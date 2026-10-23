@@ -6,7 +6,8 @@
 </h1>
 
 <p align="center">
-  <b>From a written specification to tested, committed code — in one continuous Claude Code session.</b>
+  <b>Describe it. It builds it.</b><br>
+  From a written specification to tested, committed code — in one continuous Claude Code session.
 </p>
 
 <p align="center">
