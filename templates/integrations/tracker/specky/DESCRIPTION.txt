@@ -1,0 +1,31 @@
+Requirement tracker (Specky) — how Telesma works with this integration:
+
+1. Specky is the source of truth for requirements and acceptance criteria. Telesma reads them over MCP
+   (two servers, one token: the core and the "record" history package); telesma/spec/ in the repo stays
+   frozen as before, and requirement changes arrive through telesma/changes/.
+2. Every task in the plan has anchors: `- Specky: (req: <id> v<n>.<r> @<hash7>)` (n = text version,
+   r = criteria revision). Before a task Telesma runs `check_anchors`; `stale` = the requirement changed
+   (text, criteria or lifecycle) → it reads it again before coding and updates the anchor.
+3. Every commit implementing a requirement carries the trailer `Specky-Req: <id>@<hash7>` (the hash from
+   `get_requirement` in this session); a commit with no requirement behind it carries `Specky-Req: none`.
+   A connected repository requires the trailer: a PR without one is red, `none` is neutral, and the PR is
+   merged only with the Specky status "success". With the GitHub integration the trailer also goes into
+   the PR body so it survives the squash.
+4. A criterion test has the line `specky: crit <criterion_id>` right above the test. CI sends a JUnit report
+   (an artifact with "junit" in its name — template .github/workflows/specky-ci.yml); Specky shows on the PR
+   ✅/❌ per criterion and the "Specky contract check" status. `mark_criteria_tested` is only the fallback
+   for criteria CI cannot prove.
+5. Synchronization: at session start (and by hand: ./telesma.sh --sync-specky <project>) Telesma
+   fetches `what_changed` since the last cursor (pages of 50) + `get_work_queue`. Every item that needs work
+   becomes a file in telesma/changes/ (kind: bug | correction | feature) — from there the usual change channel
+   works: plan, rework, REPORT.md, telesma/changes/processed/. Cursor: telesma/state/SPECKY.md (committed).
+6. Telesma only PROPOSES (propose_*, raise_spec_issue); decisions in Specky are made by a human. The
+   implementation status Telesma sets itself: `in_progress` when it starts, `code_ready` (with the
+   requirement's hash) when the requirement is built; `done` and `to_fix` are the human's.
+7. Everything Telesma learns from Specky stays in telesma/ (state/ and changes/) — a new session does not rediscover
+   anything.
+8. Release: after `git tag vX.Y.Z` Telesma freezes the version in Specky (`create_snapshot` with the tag, the
+   commit SHA and the content of docs/test-scenarios/vX.Y.Z.md). The tester reads the scenarios in Specky ("Versions
+   and export" → "What's new" → "How to test"); the result goes into the file in the repo. Specky being unavailable
+   does not block a release. Snapshots backwards (tags from before the integration): tools/telesma-specky-snapshots.py
+   in the Telesma repository (REST, e-mail + password login, one snapshot per tag with a scenarios file).

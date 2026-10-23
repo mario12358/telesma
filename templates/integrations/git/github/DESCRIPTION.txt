@@ -1,0 +1,24 @@
+Git repository (GitHub) — how Telesma works with this integration:
+
+1. Every task = its own branch `task-<id>-<slug>` off main + one PR (title = the commit
+   subject). Telesma never pushes to main; the permissions cover task branches only.
+2. A task is DONE after the MERGE, not when the PR is opened. In the plan a task with a PR has the tag
+   `(pr: #n)` and the checkbox `[ ]` until the merge; after the merge `[x]`, the tag stays.
+3. Merge per the "Merge" field: auto = GitHub auto-merge after green checks; agent = Telesma waits
+   for the checks (`gh pr checks --watch`) and squash-merges itself — the permission judge checks the checks
+   once more before every merge; manual = the PR waits for you.
+4. A red required check = a fix on THE SAME branch and a push, never a second PR for that
+   task. After "Max fixes per PR" Telesma stops (TELESMA BLOCKED) with a link.
+5. After opening a PR Telesma waits up to "Wait for merge" for the result; an unmerged one comes back in every
+   following iteration (reconciliation: MERGED → checked off, red → priority, closed
+   by hand → a question to you).
+6. No more than "Open PR limit" open at once. Limit reached = TELESMA WAITING,
+   end of the session (nothing is broken — run again after a merge).
+7. A task that depends on an unmerged PR: an independent task first; when nothing is left —
+   a branch off that PR's branch, and after its merge a rebase onto main (--force-with-lease only on
+   its own branch).
+8. Phase tags, the full suite after a phase and releases (vX.Y.Z) — on main, after all of the phase's tasks are merged.
+9. With quality checks enabled (## Checks), after every push the hook posts the status
+   "Telesma: checks (local)" on the PR: which checks passed on the commits of that branch, when and with what
+   result, the date of the last dependency audit. A commit with no local evidence = red status.
+   It is an attestation from your machine, not verification — hence "local" in the name.

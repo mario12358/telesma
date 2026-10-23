@@ -1,0 +1,27 @@
+# Rules added to "Allowed commands" by the GitHub integration wizard.
+# Claude Code prefix rules: Bash(prefix:*) = a command starting with the prefix.
+# There is deliberately NO `gh pr merge` or general `git push` here — merge and push outside a task
+# branch go through the permission judge (its own `gh pr checks` before a merge) or ask
+# the human. Pushes to task branches get prefixes from "Branch prefix" (task-).
+Bash(git push -u origin task-:*)
+Bash(git push origin task-:*)
+Bash(git push --force-with-lease origin task-:*)
+Bash(git fetch:*)
+Bash(git pull:*)
+Bash(git checkout -b:*)
+Bash(git checkout main)
+Bash(git switch:*)
+Bash(git rebase:*)
+Bash(git merge-base:*)
+Bash(git rev-parse:*)
+Bash(git branch --show-current)
+Bash(git branch --list:*)
+Bash(git branch -d:*)
+Bash(gh auth status)
+Bash(gh repo view:*)
+Bash(gh pr create:*)
+Bash(gh pr list:*)
+Bash(gh pr view:*)
+Bash(gh pr checks:*)
+Bash(gh pr diff:*)
+Bash(gh pr status:*)

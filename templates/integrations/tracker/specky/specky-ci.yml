@@ -1,0 +1,80 @@
+# Source: the Specky plugin's templates/specky-ci.yml (Specky v0.45.0) — a copy kept in Telesma.
+# Contract with Specky — these things must stay:
+#   - the artifact with the JUnit XML reports has "junit" in its name
+#   - the test steps run with `continue-on-error: true`: the report has to exist for a red test too,
+#     otherwise Specky sees "CI did not run it" instead of ❌ on the criterion
+#   - no `paths:` filter in `on:` — a filtered-out run gives Specky no report to read
+#   - `push: branches: [main]` stays: Specky also collects evidence from the run on the default
+#     branch after the merge
+#   - a criterion demo (recording/screenshot) is the artifact "specky-demo-<criterion_id>", built from
+#     demos/<criterion_id>/
+# The rest (language, test commands, steps) is per project — Telesma adapts this file
+# to the stack in task 1.1 (skeleton), keeping the contract points above.
+#
+# The Specky GitHub App needs: Contents: read, Actions: read, and the "Check suite" event — the
+# installation page shows it. The Specky plugin ships a cheaper variant, specky-ci-criteria-only.yml,
+# that runs only the tests marked with `specky: crit`; `/specky:init` does not propose a workflow when
+# one already uploads an artifact with "junit" in its name, so this copy and the plugin do not collide.
+#
+# Specky reads the JUnit report from this workflow and for every criterion marked in the code
+# with the comment `specky: crit <criterion_id>` (the line above the test) shows ✅/❌ on the PR.
+# The job name ("test") is one of the "Required checks" in telesma/config.md.
+
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Adapt to the stack (examples; keep one; keep continue-on-error on the test step) ---
+      # Python:
+      # - uses: actions/setup-python@v5
+      #   with: { python-version: "3.12" }
+      # - run: pip install -r requirements.txt
+      # - run: pytest --junitxml=reports/junit.xml
+      #   continue-on-error: true
+      #
+      # Node (vitest/jest):
+      # - uses: actions/setup-node@v4
+      #   with: { node-version: "22" }
+      # - run: npm ci
+      # - run: npx vitest run --reporter=junit --outputFile=reports/junit.xml
+      #   continue-on-error: true
+      #
+      # Deno:
+      # - uses: denoland/setup-deno@v2
+      # - run: deno test --junit-path=reports/junit.xml
+      #   continue-on-error: true
+      #
+      # Playwright (e2e): reporter junit → reports/junit-e2e.xml, continue-on-error: true
+      - run: |
+          mkdir -p reports
+          echo "REPLACE: test command with a JUnit report into reports/*.xml" && exit 1
+        continue-on-error: true
+
+      # --- Contract 1: JUnit report as an artifact with "junit" in its name -------
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-reports
+          path: reports/*.xml
+          if-no-files-found: error
+
+      # --- Contract 2 (optional): criterion demo ---------------------------------
+      # Recording/screenshot for a criterion → demos/<criterion_id>/ → artifact "specky-demo-<criterion_id>"
+      # (e.g. a Playwright video copied from telesma/artifacts/flows/ — section 0.5 of Telesma's instructions).
+      # - uses: actions/upload-artifact@v4
+      #   if: always()
+      #   with:
+      #     name: specky-demo-<criterion_id>
+      #     path: demos/<criterion_id>/
+
+      # The job itself must still go red when tests fail — continue-on-error only keeps the report:
+      - run: test -z "$(grep -l '<failure\|<error' reports/*.xml 2>/dev/null)"

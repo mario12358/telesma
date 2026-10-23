@@ -1,0 +1,9 @@
+.env
+.env.*
+*.log
+*.tmp
+node_modules/
+__pycache__/
+.DS_Store
+*.sqlite
+telesma/artifacts/

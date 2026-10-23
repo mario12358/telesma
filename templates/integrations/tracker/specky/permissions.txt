@@ -1,0 +1,20 @@
+# Rules added to "Allowed commands" by the Specky integration wizard. One rule per MCP server:
+# a rule names the server, so every tool of that server runs without a permission prompt.
+#
+# The Specky plugin (recommended) installs two servers:
+#   core   — whoami, get_spec_markdown, get_requirement, what_changed, get_work_queue, check_anchors,
+#            propose_*, raise_spec_issue, set_requirement_in_progress, set_requirement_code_ready,
+#            mark_criteria_tested, list_snapshots, create_snapshot (18.7 — only after a vX.Y.Z tag)
+#   record — get_requirement_history (the before → after of a requirement, needed for the change
+#            files of 18.1), diff_snapshots; also record_decision and create_project, which the
+#            instructions (18.6) forbid without the human's explicit request.
+# The claude.ai connector is a third client (mcp__claude_ai_Specky): the same tools, but it cannot
+# decide (can_decide: false) — enough for the loop, not for a human's decisions.
+#
+# Decisions (accept_*/reject_*/decide_*/answer_questions/endorse_proposal) are rejected by the
+# server anyway for a client without a human (decision_requires_interactive_client) — and in chat
+# they are made only on an explicit request. These rules remove prompts; they do not change what
+# the server lets this account do.
+mcp__plugin_specky_specky
+mcp__plugin_specky_specky-record
+mcp__claude_ai_Specky

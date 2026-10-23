@@ -1,0 +1,13 @@
+# Python bytecode (hooks and checks are run straight from templates/)
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Backups and temporary files
+*.bak
+*.tmp
+
+# Local Claude Code settings (permissions, paths of this machine)
+.claude/settings.local.json
