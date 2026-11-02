@@ -4,6 +4,20 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## Unreleased (1.1.1)
+
+State format: 18 (unchanged).
+
+- Smart App Control on Windows 11: before a session that builds, a project whose tools compile
+  their own programs (`dotnet`, `cargo`, `go`, `flutter` …) is told that Smart App Control is on,
+  that it refuses what Telesma builds there — the tests included — with no "run anyway", how to
+  turn it off and that on many Windows versions it cannot be turned back on without reinstalling.
+  A beginner's build does not start; a developer is warned. Python and Node projects pass (a
+  signed interpreter). `--doctor <project>` shows the state. The `wpf` and `pyside6` guidelines
+  tell the model to stop with `TELESMA BLOCKED` on that error instead of retrying — the first
+  Windows beginner project hit it three times half-way through.
+- `SHOWCASE.md`: the first six programs built with Telesma, with screenshots.
+
 ## 1.1.0 — 2026-11-02
 
 State format: 18 (unchanged).

@@ -3590,10 +3590,10 @@ select_mode
 if [[ "$MODE" != "3" ]] && ! preflight_stack "$CONFIG_FILE"; then
     echo ""
     if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
-        echo -e "${YELLOW}$(msg pre.stack.stop 'Telesma stops here so the build does not fail half-way. When it is installed, run the same command again.')${NC}"
+        echo -e "${YELLOW}$(msg pre.stack.stop 'Telesma stops here so the build does not fail half-way. When the above is sorted out, run the same command again.')${NC}"
         exit 1
     fi
-    echo -e "${YELLOW}$(msg pre.stack.warn 'Continuing: the session will fail on the commands that need it.')${NC}"
+    echo -e "${YELLOW}$(msg pre.stack.warn 'Continuing anyway: the session will fail where the above is needed.')${NC}"
     echo ""
 fi
 

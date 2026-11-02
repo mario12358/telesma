@@ -91,15 +91,62 @@ preflight_tool_source() {
     esac
 }
 
+# Smart App Control (Windows 11): on | evaluation | off | "" (not Windows, or no such setting).
+# HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy → VerifiedAndReputablePolicyState: 1 on,
+# 2 evaluation (watches, blocks nothing), 0 off. MSYS_NO_PATHCONV keeps Bash from turning /v
+# into a path.
+preflight_smart_app_control() {
+    local v
+    [[ "$PREFLIGHT_OS" == windows ]] || return 0
+    v=$(MSYS_NO_PATHCONV=1 reg query 'HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy' /v VerifiedAndReputablePolicyState 2>/dev/null \
+        | tr -d '\r' | awk '$1 == "VerifiedAndReputablePolicyState" { print $3 }')
+    case "$v" in
+        0x1|1) echo on ;;
+        0x2|2) echo evaluation ;;
+        0x0|0) echo off ;;
+    esac
+}
+
+# A stack that compiles its own executables and libraries (.NET, Rust, Go, C/C++, Flutter): with
+# Smart App Control on, Windows refuses to run what was just built — the program, and the tests,
+# which load the project's own unsigned DLLs. It has no "run anyway" (unlike SmartScreen), and the
+# first Windows beginner project stopped half-way on it three times. Interpreted stacks (Python,
+# Node) run in a signed interpreter and pass; their packaged .exe is the guideline's matter.
+preflight_sac_blocks() {
+    local tool
+    for tool in $1; do
+        case "$tool" in
+            dotnet|cargo|rustc|go|cmake|msbuild|cl|flutter|dart|gradle|gradlew) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # The project's tools (preflight_stack_tools) are on this machine. The stack is chosen in the
 # interview or the wizard, so this runs before a session that builds, not before everything.
 # A missing tool: what to install on this system; with winget (Windows) or Homebrew (macOS) and a
 # terminal, an offer to install it now — run only after "yes". Returns 1 when one is still missing.
 #   preflight_stack <config> [verbose]
 preflight_stack() {
-    local config="$1" verbose="${2:-}" tool missing=0 offered="" src winget brew other cmd answer
+    local config="$1" verbose="${2:-}" tool tools missing=0 offered="" src winget brew other cmd answer sac
     local ok="${GREEN}✓${NC}" no="${RED}✗${NC}"
-    for tool in $(preflight_stack_tools "$config"); do
+    tools=$(preflight_stack_tools "$config")
+    sac=$(preflight_smart_app_control)
+    if [[ "$sac" == on ]] && preflight_sac_blocks "$tools"; then
+        echo -e "  $no $(msg pre.sac 'Smart App Control is on in this Windows: it refuses to run programs that are not signed — and what Telesma builds here is not, the tests included.')"
+        echo -e "    $(msg pre.sac.off 'To build on this computer, turn it off: Windows Security → App & browser control → Smart App Control settings → Off.')"
+        echo -e "    $(msg pre.sac.back 'On many Windows versions it cannot be turned back on without reinstalling Windows — the choice is yours.')"
+        echo -e "    $(msg pre.sac.else 'Or build on another computer, or pick a technology that runs inside a signed program (Python, a web app).')"
+        missing=1
+    elif [[ -n "$sac" && -n "$verbose" ]]; then
+        case "$sac" in
+            on) sac=$(msg pre.sac.onword 'on — this project runs in a signed interpreter, it is not affected') ;;
+            evaluation) sac=$(msg pre.sac.eval 'evaluation (blocks nothing)') ;;
+            *) sac=$(msg pre.sac.offword 'off') ;;
+        esac
+        echo -e "  $ok $(msg pre.sac.state 'Smart App Control: %s' "$sac")"
+    fi
+    for tool in $tools; do
         if command -v "$tool" > /dev/null 2>&1; then
             [[ -n "$verbose" ]] && echo -e "  $ok $tool"
             continue

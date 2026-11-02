@@ -1,6 +1,6 @@
 ---
 tag: wpf
-keywords: wpf, xaml, mvvm, communitytoolkit.mvvm, desktop, windows, data binding, dispatcher, flaui, ui automation, single-file, self-contained, exe, smartscreen
+keywords: wpf, xaml, mvvm, communitytoolkit.mvvm, desktop, windows, data binding, dispatcher, flaui, ui automation, single-file, self-contained, exe, smartscreen, smart app control
 ---
 
 # Guidelines: WPF desktop app (Windows)
@@ -57,6 +57,7 @@ keywords: wpf, xaml, mvvm, communitytoolkit.mvvm, desktop, windows, data binding
 - Build with `dotnet publish src/App -c Release`; the result is one `.exe` in `bin/Release/net10.0-windows/win-x64/publish/`, tens of MB — expected for a self-contained app
 - WPF builds, runs and tests only on Windows; `<EnableWindowsTargeting>true</EnableWindowsTargeting>` lets a Mac compile it but not start or test it — never ship an exe nobody started on Windows
 - An unsigned exe that was downloaded or received by mail/chat shows SmartScreen "Windows protected your PC": tell the person to click "More info" → "Run anyway" (or Properties → Unblock); a file built on the same PC shows nothing
+- **Smart App Control** (Windows 11, Windows Security → App & browser control) is not SmartScreen: when it is on it refuses every unsigned exe and DLL, the one just built on this PC included — the app, and `dotnet test` too (the test host loads the project's own DLLs). The error says "An Application Control policy has blocked this file" (0x800711C7) or a toast names Smart App Control. It has no "run anyway", there is no per-file exception and nothing in the project works around it — so never retry, rename, move the output or try another build path. Stop with `TELESMA BLOCKED` and tell the person, in plain words: turning it off (Windows Security → App & browser control → Smart App Control settings → Off) lets the build run, and on many Windows versions it cannot be turned back on without reinstalling Windows; the other ways are another computer or a stack that runs in a signed interpreter. The launcher checks this before a build session; a person who decides to keep it on keeps it on
 - Code signing (Azure Artifact Signing, formerly Trusted Signing, or a certificate) is optional and paid; never block a release on it
 
 ## What to avoid

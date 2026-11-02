@@ -575,6 +575,43 @@ def test_preflight():
         ok(r.returncode == 0 and "✓ git" in out and "Everything Telesma needs is in place" in out, "--doctor: a ✓ per piece, exit 0")
 
 
+def test_smart_app_control():
+    print("preflight — Smart App Control on Windows stops a stack that compiles its own exe, before the build")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        b = tmp / "bin"
+        b.mkdir()
+        (b / "uname").write_text("#!/bin/sh\necho MINGW64_NT-10.0-26300\n")
+        (b / "dotnet").write_text("#!/bin/sh\nexit 0\n")
+        (b / "uv").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("uname", "dotnet", "uv"):
+            (b / f).chmod(0o755)
+
+        def run(state, tests, verbose=""):
+            reg = b / "reg"
+            reg.write_text("#!/bin/sh\n" + ("" if state is None else
+                           "printf 'HKEY_LOCAL_MACHINE\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\CI\\\\Policy\\r\\n"
+                           f"    VerifiedAndReputablePolicyState    REG_DWORD    {state}\\r\\n\\r\\n'\n"))
+            reg.chmod(0o755)
+            config = tmp / "config.md"
+            config.write_text(f"# c\n\n## Tests\n\n- **Test command**: {tests}\n\n## Git\n")
+            env = dict(os.environ, PATH=f"{b}{os.pathsep}{os.environ.get('PATH', '')}", LANG="pl_PL.UTF-8", LC_ALL="", LC_MESSAGES="")
+            r = subprocess.run(["bash", "-c", f'SCRIPT_DIR="{ROOT}"; source "$SCRIPT_DIR/templates/messages/msg.sh"; '
+                                'msg_set_language pl; source "$SCRIPT_DIR/templates/setup/preflight.sh"; '
+                                f'preflight_stack "{config}" {verbose}; echo "rc=$?"'],
+                               capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+            return strip(r.stdout)
+        out = run("0x1", "dotnet test")
+        ok("rc=1" in out and "Smart App Control" in out and "Wyłączone" in out and "ponownej instalacji" in out,
+           "on + dotnet: named before the build, how to turn it off, that it may not come back, rc 1")
+        ok("rc=0" in run("0x1", "uv run pytest -q"), "on + Python (a signed interpreter): no stop")
+        ok("rc=0" in run("0x2", "dotnet test"), "evaluation mode blocks nothing: no stop")
+        ok("rc=0" in run("0x0", "dotnet test"), "off: no stop")
+        ok("rc=0" in run(None, "dotnet test"), "no such setting (Windows 10): no stop")
+        ok("Inteligentna kontrola aplikacji: wyłączona" in run("0x0", "dotnet test", "verbose"), "--doctor shows the state")
+        ok("nie dotyczy" in run("0x1", "uv run pytest -q", "verbose"), "--doctor: on, but this Python project is not affected")
+
+
 def test_home_menu():
     print("launcher — --home: the desktop shortcut's start menu")
     with tempfile.TemporaryDirectory() as d:
@@ -776,6 +813,7 @@ if __name__ == "__main__":
     test_experience_in_prompt()
     test_clarification_end()
     test_preflight()
+    test_smart_app_control()
     test_home_menu()
     test_installer()
     test_message_catalogs()

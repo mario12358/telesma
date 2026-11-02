@@ -1,6 +1,6 @@
 ---
 tag: pyside6
-keywords: pyside6, qt, qt6, desktop, window, widgets, signals, slots, qthread, pytest-qt, qtbot, pyinstaller, gatekeeper, smartscreen
+keywords: pyside6, qt, qt6, desktop, window, widgets, signals, slots, qthread, pytest-qt, qtbot, pyinstaller, gatekeeper, smartscreen, smart app control
 ---
 
 # Guidelines: PySide6 desktop app (Windows and macOS)
@@ -55,6 +55,7 @@ keywords: pyside6, qt, qt6, desktop, window, widgets, signals, slots, qthread, p
 - No cross-compiling: the Windows `.exe` is built on Windows, the macOS `.app` on macOS — or both in CI with a `windows-*` and a `macos-*` runner
 - `--onedir` (a folder, fast start, fewer antivirus false positives) is the default; `--onefile` only on Windows when one file is required — it unpacks on every start and is flagged by antivirus more often; on macOS always a `.app` (onedir)
 - Unsigned builds that were downloaded warn on first open: Windows SmartScreen → "More info" → "Run anyway"; macOS 15+ → open once, then System Settings → Privacy & Security → "Open Anyway" (right-click → Open no longer bypasses it); a build made on the same computer opens without a warning
+- Windows 11 with **Smart App Control** on: the tests pass (they run in the signed `python.exe`), but the PyInstaller exe is unsigned and is refused even on the PC that built it ("An Application Control policy has blocked this file"), with no "run anyway". Do not retry or work around it: say so in plain words before packaging — turning Smart App Control off lets it run, and on many Windows versions it cannot be turned back on without reinstalling Windows — and let the person choose; the program can still be started from its folder with `uv run` in the meantime
 - PySide6 is LGPL: fine to bundle as PyInstaller does (Qt stays separate libraries); ship the Qt/PySide6 license notice with the app and do not modify Qt itself
 
 ## What to avoid

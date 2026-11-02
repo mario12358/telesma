@@ -15,6 +15,9 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
 </p>
 
+> **Not a programmer?** [Start here](#not-a-programmer-start-here): one line to install, then an icon on
+> your desktop. **Developer?** Read on, or jump to the [quick start](#quick-start).
+
 **Telesma is an autonomous development loop for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 You put a specification into `telesma/spec/`, answer the questions Telesma asks about it, and Telesma turns it
 into a plan and works through that plan task by task — implement, test, commit, report, next —
@@ -101,54 +104,51 @@ implementation itself is the bulk of the cost.
 - **Cheap to restart** — state-file rotation, a startup-prompt diet and a state-file diagnosis with
   a git-based repair keep the cost of a start flat as the project grows.
 
-## What's inside
+## Not a programmer? Start here
 
-| Module | What it does | Where |
-| --- | --- | --- |
-| **Launcher** | Prepares the project, validates the plan and the config, rotates state files, assembles the startup prompt, starts Claude Code | `telesma.sh` |
-| **Instruction modules** | The rules the model follows — clarification, the core loop, the post-loop conversation, one module per mode — loaded only when the mode needs them | `templates/instructions/` |
-| **State files** | The memory that survives compaction and restarts: plan, report, project context, spec index, decision / bugfix / review logs | `telesma/state/` in your project |
-| **Setup wizard** | First start and `--setup`: profile (minimal / recommended / full), stack detection → test commands, permission judge, check tier, integrations, visual artifacts, language | `templates/setup/` |
-| **State-file templates** | The shape of the plan, report, project context, spec index, questions, backlog, test scenarios — the contract between the model and the scripts | `templates/*.md` |
-| **Technology guidelines** | General clean-code rules plus 48 convention files, loaded per task by `(tech:)` tags | `templates/guidelines/` |
-| **Permission judge** | A Claude Code hook that answers permission prompts you would approve anyway — it only removes prompts, never adds blocks; its one refusal is the loop's contract (merge only on green, no release-tag push), which holds even in Claude Code's `auto` mode | `templates/hooks/` |
-| **Quality checks** | 11 modules run on git operations: secrets, weakenings, dependencies, dependency audit, weakened tests, hygiene, dead entry points, SAST, lint/types, attack-surface map, red-team markers | `templates/checks/` |
-| **Integrations** | GitHub pull-request workflow and the Specky requirements tracker, each an optional instruction module | `templates/integrations/` |
-| **Tools** | State-file repair, self-hosted quality telemetry, Specky release snapshots, judge evaluation | `tools/` |
-| **Benchmark** | A frozen project with a hidden HTTP judge, for comparing Telesma versions | `benchmark/` |
+Telesma takes you from an idea to a program on your computer. It asks what you want, writes it
+down, builds the program, tests it and hands it to you as one file to open with a double-click.
+You never type a command.
 
-## Not a programmer? Install with one line
+**1. Install it.** One line, copied and pasted. The installer says what it is about to install and
+asks before each step; at the end there is a **Telesma** icon on your desktop.
 
-Telesma can take you from an idea to a program on your desktop: it interviews you, picks the
-technology, builds and tests the program, and hands it over as one file to double-click. The
-installer gets everything it needs (asking before each step), signs you in to Claude and puts a
-**Telesma** shortcut on your desktop — after that you never type a command.
-
-- **Windows 10/11** — open PowerShell (Start → type *PowerShell*; not as administrator) and paste:
+- **Windows 10 or 11**: press Start, type *PowerShell* and open it (the normal one, not "Run as
+  administrator"). Paste this line and press Enter:
   ```powershell
   irm https://raw.githubusercontent.com/mario12358/telesma/main/install.ps1 | iex
   ```
-  It installs Git for Windows, Python and Claude Code with `winget`, and Telesma into `%USERPROFILE%\.telesma`.
-  The shortcut opens Telesma in a Git Bash window (its title bar says `MINGW64`); another Bash, such
-  as MSYS2, is not what Telesma is tested in.
-- **macOS** — open Terminal (Spotlight → type *Terminal*) and paste:
+- **Mac**: press ⌘ Space, type *Terminal* and open it. Paste this line and press Enter:
   ```bash
   curl -fsSL https://raw.githubusercontent.com/mario12358/telesma/main/install.sh | bash
   ```
-  It installs Apple's command line tools (git, Python) and Claude Code, and Telesma into `~/.telesma`.
 
-The shortcut opens a menu: **a new idea**, or one of your projects (kept in a `Telesma` folder in
-your home folder — not in Documents, which iCloud or OneDrive may sync and break). Running the
-installer again updates Telesma; a copy it cannot update is kept as `.telesma.old-<date>`.
-Tools a particular program needs (for example .NET for a Windows program) are offered when the
-project needs them, not up front.
+It installs the few programs Telesma needs, then Claude Code, and opens your browser to sign in to
+your Claude account. The same line, run again later, updates Telesma.
 
-What it does not do: you need a Claude account with a paid plan (Pro or Max) — Telesma has no free
-path, and building a program uses a noticeable part of the plan's limits. No websites or phone apps
-yet (they need hosting, accounts and app stores). A program is built on the system it is for: a
-Windows program on Windows. Antivirus software sometimes flags a freshly built program that is
-not signed. And you still answer Claude Code's permission questions — Telesma words them plainly
-but does not remove them.
+**2. Double-click Telesma.** A menu opens: *a new idea*, or one of your programs. Pick a new idea
+and Telesma interviews you: six plain questions, one at a time, about ten minutes. It reads the
+answers back, asks about a few details, plans the work and builds. When the program is ready it
+opens the folder with it and says what to try. Later, the same icon shows your programs with
+*Build on* and *Something does not work right*. Your programs live in a *Telesma* folder in your
+home folder. [Six programs built this way](SHOWCASE.md).
+
+**Good to know before you start:**
+
+- You need a Claude account with a paid plan (Pro or Max). There is no free way, and building a
+  program uses a good part of a plan's monthly limit.
+- Claude asks before some actions (installing something, deleting files). Telesma words those
+  questions plainly, but you answer them.
+- A program is built on the kind of computer it is for: a Windows program on Windows, a Mac
+  program on a Mac. The interview offers a program with a window, a page in your browser on your
+  own computer, or a command-line tool. A website for other people or a phone app needs hosting,
+  accounts and app stores, so the interview does not offer it yet — Telesma itself builds those
+  too, from a written specification (the developer path below; see the [showcase](SHOWCASE.md)).
+- A freshly built program has no publisher signature. Windows may warn once ("More info" → "Run
+  anyway"); Windows 11 with *Smart App Control* on refuses it altogether — Telesma says so before
+  building and what the choice is.
+- Something wrong? Double-click Telesma, pick the program, choose *Something does not work right*
+  and say what you saw.
 
 ## Requirements
 
@@ -162,6 +162,9 @@ but does not remove them.
 Telesma is cloned, not installed. Nothing is added to your project's dependencies. Every start checks
 the required column (and that Claude Code is signed in) and says what to install; `telesma.sh --doctor`
 runs the same check on its own (`--doctor <project>` also checks the programs its test commands call). On Windows Telesma runs in Git Bash, which Claude Code needs there too.
+The one-line installers above put Telesma in `~/.telesma` (`%USERPROFILE%\.telesma` on Windows, opened in Git
+Bash) and the desktop icon runs `telesma.sh --home`; a rerun updates it, a clone it cannot update is kept as
+`.telesma.old-<date>`.
 
 ## Quick start
 
@@ -196,15 +199,11 @@ your-project/
 
 ### 3. Write the specification
 
-**No specification, just an idea?** Run `~/tools/telesma/telesma.sh --new /path/to/project`
-instead of steps 3 and 4: Telesma interviews you — six plain questions, one at a time — writes
+**No specification, just an idea?** `~/tools/telesma/telesma.sh --new /path/to/project` replaces
+steps 3 and 4: the interview from [Not a programmer?](#not-a-programmer-start-here) writes
 `telesma/spec/` itself (the idea in your words, numbered requirements with "when …, then …" checks,
-the user flows), picks the technology from who will use the program and where, reads it all back
-and runs the setup. It also switches Telesma to plain words for the rest of the project
-(`Experience: beginner`, see [Language and experience](#language-and-experience)). From there one
-run leads on by itself: after the settings it asks "go on?" and starts the clarification, after the
-plan it asks whether to start building. Stopped anywhere, `telesma.sh /path/to/project` continues
-with the right next step.
+the user flows, the technology) and runs the setup. It sets `Experience: beginner` (plain words,
+see [Language and experience](#language-and-experience)); `--setup` switches it back.
 
 - `telesma/spec/TECHNICAL_GUIDELINES.md` — fill in **only** the fields where you depart from the defaults
   in `telesma/guidelines/` (a mandated stack, hosting, integrations, compliance or SLA requirements).
@@ -317,50 +316,23 @@ writes only `telesma/config.md` and explains in ten lines how the result will be
 
 ### GitHub
 
-- **One branch and one pull request per task** (`task-<id>-<slug>`). PR title and body are the
-  commit subject and body, so squash merges keep the commit's trailers.
-- **A task is done when its PR is merged**, not when it is opened. Until then the task line carries
-  `(pr: #n)` and stays unchecked, so phase completeness, phase tags and release proposals all fall
-  in the right place.
-- **Three merge modes**: `agent` (default — Telesma waits for the required checks and squash-merges
-  itself; works on a private repository on GitHub Free), `auto` (GitHub auto-merge with branch
-  protection), `manual` (a human merges).
-- **"Merge only on green" is enforced, not promised.** With the permission judge enabled, the hook
-  runs its own `gh pr checks` before letting `gh pr merge` through; a missing required check is not
-  a green one, and a merge on red is refused even in Claude Code's `auto` permission mode, where the
-  judge's questions would reach nobody. Pushes are allowed only to branches with the task prefix;
-  release tags are never pushed by Telesma.
-- A red check is fixed on the same branch; reaching the open-PR limit ends the session with
-  `TELESMA WAITING` (nothing is broken — merge and start again). Stacked branches are merged bottom-up
-  with a retarget and a rebase.
+One branch and one pull request per task; a task is done when its PR is merged, not when it is
+opened. Three merge modes: `agent` (Telesma waits for the required checks and squash-merges —
+works on a private repository on GitHub Free), `auto` (GitHub auto-merge), `manual`. **"Merge only
+on green" is enforced, not promised:** the permission hook runs its own `gh pr checks` before
+letting a merge through, even in Claude Code's `auto` mode; pushes go only to task branches, and
+release tags are never pushed by Telesma.
 
 ### Specky
 
-[Specky](https://app.specky.app) is a requirements tool: it keeps the specification as a **contract
-between a human and an agent** — requirements with acceptance criteria and content hashes, and
-explicit human acceptance. The agent proposes; the human decides. With `Tracker: specky`:
-
-- **Requirement anchors on tasks** — `- Specky: (req: <id> v<n>.<r> @<hash7>)` under each task. Before a
-  task Telesma checks its anchors; a requirement that changed since the plan was written is re-read
-  before coding, and the requirement is marked code-ready with its hash once built.
-- **Trailers in commits** — `Specky-Req: <id>@<hash7>` ties each commit to the requirement version
-  it implements (the PR body carries it through a squash merge).
-- **Criteria evidence from CI** — a test marked `specky: crit <criterion_id>` proves a criterion via
-  the JUnit report your CI publishes (a `specky-ci.yml` template with the contract in its header is
-  provided). Evidence is the CI result, not the agent's word.
-- **Requirement changes as change files** — `what_changed` and the work queue are materialised as
-  files in `telesma/changes/` (at session start and with `--sync-specky`), and then follow the normal change
-  channel: plan edits, rework phases, change history.
-- **Release snapshots** — after tagging `vX.Y.Z` Telesma creates a Specky snapshot with the tag, the
-  commit SHA and the full manual test scenarios, so testers see "what's new" and "how to test" in
-  one place. Specky being unreachable never blocks a release.
-
-**Telesma + Specky + GitHub** work together: requirements and their acceptance live in Specky, the
-plan anchors tasks to them, every task is a PR whose commits name the requirement version, CI
-turns marked tests into criterion evidence, and a release becomes a snapshot of what shipped.
-
-Specky is a product by the author of Telesma. Telesma works fully without it. Questions about Specky:
-hello@specky.app.
+[Specky](https://app.specky.app) keeps the specification as a **contract between a human and an
+agent**: requirements with acceptance criteria and content hashes, accepted by a human. With
+`Tracker: specky` every task is anchored to a requirement version, every commit names it in a
+trailer, a test marked `specky: crit <id>` proves a criterion through the JUnit report your CI
+publishes, requirement changes arrive as files in `telesma/changes/`, and a release becomes a
+Specky snapshot with the tag, the commit and the manual test scenarios. Specky being unreachable
+never blocks anything. Specky is a product by the author of Telesma; Telesma works fully without
+it (hello@specky.app).
 
 Full reference: [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
