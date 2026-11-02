@@ -1,4 +1,4 @@
-<!-- TELESMA_SPEC_TEMPLATE: delete this line once you start filling in the template -->
+<!-- TELESMA_SPEC_TEMPLATE: left as it is, this file means "the defaults apply"; delete this line once you fill something in -->
 
 # Project technical guidelines
 
@@ -15,7 +15,8 @@
 >
 > **Undecided**: leave it empty or write `?`. Claude will generate questions in `telesma/state/QUESTIONS.md`.
 >
-> Once filled in, delete the `TELESMA_SPEC_TEMPLATE` marker from the first line of the file.
+> Nothing to impose? Leave the file as it is — the defaults apply and the start does not wait for it.
+> Once you fill something in, delete the `TELESMA_SPEC_TEMPLATE` marker from the first line.
 
 ---
 

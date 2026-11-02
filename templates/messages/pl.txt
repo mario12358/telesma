@@ -1,0 +1,357 @@
+# Polish catalog of launcher messages (templates/messages/msg.sh).
+# One `KEY = text` per line; %s placeholders in the same order as in the English text of the code;
+# a literal percent sign is %%. A missing key falls back to English. tools/test-setup.py checks
+# that every key used in telesma.sh and the wizard is here with the same placeholders.
+
+new.intro1 = Telesma porozmawia teraz z Tobą o pomyśle i go zapisze — jedno pytanie naraz,
+new.intro2 = około dziesięciu minut. Jeszcze nic nie powstaje.
+new.trust = Claude najpierw zapyta, czy ufasz temu folderowi — wybierz «Yes»: to folder Twojego projektu.
+new.intro3 = Gdy wypisze %s, wpisz %s i naciśnij Enter — dalej Telesma poprowadzi Cię stąd.
+new.done = Opis Twojego pomysłu jest zapisany.
+new.settings = Teraz kilka ustawień.
+new.unfinished = Rozmowa się nie skończyła — opis nie jest jeszcze kompletny.
+new.resume = Kontynuuj od miejsca, w którym rozmowa się urwała: %s
+
+yes.no = T/n
+window.close = Naciśnij Enter, żeby zamknąć to okno.
+yes.short = t
+yes.word = tak
+later = Gdy zechcesz iść dalej, wpisz: %s
+go.clarify = Idziemy dalej? Telesma przeczyta opis, zada kilka pytań o szczegóły i zaplanuje pracę
+go.build = Zaczynamy budowę? Telesma buduje program krok po kroku i po każdym kroku mówi, co już działa
+
+set.title = === Telesma — ustawienia ===
+set.usual1 = Telesma wybrała zwykłe ustawienia: pyta Cię przed wszystkim, co ryzykowne, i po każdym
+set.usual2 = kroku sprawdza swoją pracę.
+set.git = w projekcie jest zapisywana historia każdej zmiany
+set.tests = program będzie sprawdzany poleceniem: %s
+set.later = Wszystkie ustawienia możesz później zmienić poleceniem: %s
+
+tel.header = Telemetria
+tel.b1 = Telesma może wysyłać swoim twórcom notatki o tym, jak SAMA wykonała pracę (nie o Twoim
+tel.b2 = programie), żeby stawała się lepsza. Co wychodzi: jak poszedł każdy krok, wyniki testów
+tel.b3 = i notatki Telesmy o problemach (hasła i klucze usunięte); Twój e-mail i adres projektu
+tel.b4 = tylko jako skrót (hash), nie wprost.
+tel.b5 = Nigdy: Twój opis, Twój program, to, co wpisujesz.
+tel.b6 = Wszystko możesz w każdej chwili usunąć. Szczegóły: %s
+tel.b.ask = Wysyłać te notatki? [t/N]
+tel.b.on = Dziękujemy — notatki będą wysyłane.
+tel.b.fail = Serwer Telesmy teraz nie odpowiada, więc nic nie zostało włączone — możesz spróbować później w ustawieniach.
+tel.b.off = Nic nie będzie wysyłane.
+tel.1 = Telesma może wysyłać zdarzenia o jakości SWOJEJ pracy do wspólnego huba Telesmy
+tel.2 = (prowadzi go autor projektu), żeby framework był ulepszany na podstawie prawdziwych projektów.
+tel.3 = Wysyłane: wyniki i czasy zadań, wyniki testów, wpisy o problemach, pułapkach i decyzjach
+tel.4 = z telesma/state (tytuły i treść, bez sekretów), wyniki kontroli, liczniki uprawnień,
+tel.5 = wersja frameworka, tagi technologii, hash adresu origin projektu i Twojego
+tel.6 = e-maila z gita. Nigdy: specyfikacja, kod, telesma/changes/, polecenia, prompty.
+tel.7 = Prywatność i usuwanie: %s — usunięcie w każdej chwili: %s
+tel.ask = Wysyłać telemetrię? [t/N/własny serwer]
+tel.scope1 = Z tytułów i treści wpisów powstają ulepszenia frameworka;
+tel.scope2 = 'metrics' wysyła tylko liczby, rodzaje i daty.
+tel.scope = Zakres (full / metrics)
+tel.stays_off = Telemetria zostaje wyłączona.
+tel.own1 = Serwer, który prowadzisz sam; format w docs/TELEMETRY.md. Klucz pochodzi z
+tel.own2 = `API key` (env:/file:/cmd:) na każdej maszynie — nigdy nie trafia do config.md.
+tel.still1 = Wyłączona dla tego projektu. Ta maszyna nadal ma zgodę dla innych projektów;
+tel.still2 = żeby ją wycofać i usunąć to, co wysłano: %s
+
+cfg.title = === Konfiguracja (telesma/config.md) ===
+cfg.later = Każde ustawienie zmienisz później: %s (albo w pliku — każdy klucz ma komentarz).
+next.title = === Następne kroki ===
+next.loop = Uruchom pętlę:     %s
+next.1 = Umieść specyfikację w %s (dowolny format) — jeśli jeszcze jej tam nie ma.
+next.go = Dalej: %s — ta sama komenda kontynuuje po przerwie.
+next.go2 = Telesma czyta specyfikację, pyta o sprzeczności i luki, pisze plan i pyta, czy zacząć budowę.
+
+a0.fail = Telesma nie zapisała pytań (w telesma/state/QUESTIONS.md nie ma ani jednego ### Q).
+a0.b.reading = Telesma czyta opis i przygotowuje pytania — kilka minut.
+a0.phase = Etap: %s (%s plików w telesma/spec/)
+a0.phase.name = tworzenie indeksu i pytań
+a0.reading = Claude czyta specyfikację...
+a0.done = Powstało pytań: %s, oraz telesma/state/SPEC_INDEX.md
+exit.b = Gdy Claude pokaże podsumowanie, wpisz /exit — to zamyka tylko tę rozmowę, Telesma pójdzie dalej sama.
+exit.a = Gdy Claude skończy i pokaże podsumowanie utworzonych plików, wpisz /exit
+exit.a2 = — zamyka to tylko tę rozmowę; Telesma przejdzie potem do pytań doprecyzowujących.
+exit.plan = Gdy Claude pokaże podsumowanie planu, wpisz /exit — Telesma sprawdzi plan i zakończy doprecyzowanie.
+q.unseen = W QUESTIONS.md %s pozycji było oznaczonych jako rozstrzygnięte bez odpowiedzi — zostaną teraz zadane.
+plan.making = Claude tworzy telesma/state/PLAN.md (kontynuując sesję indeksowania)...
+plan.lost = Sesja planu nadpisała telesma/state/QUESTIONS.md i skasowała Twoje odpowiedzi — zostały przywrócone. Plan powstał bez Twoich odpowiedzi na: %s. Porównaj go z nimi przed budową; zgłoszenie zmiany w telesma/changes/ go poprawi.
+plan.done = === Doprecyzowanie zakończone ===
+plan.review = Plan: %s (zadań: %s).
+plan.go = Zaczynamy budowę? (n = najpierw przejrzyj plan; zwykły start kontynuuje)
+plan.failed = Nie udało się utworzyć telesma/state/PLAN.md. Sprawdź telesma/state/QUESTIONS.md i uruchom ponownie.
+spec.empty = Projekt wymaga doprecyzowania, ale telesma/spec/ jest pusty.
+spec.put = Umieść w %s pliki z:
+spec.put1 = specyfikacją projektu (.md, .txt)
+spec.put2 = wymaganiami technicznymi
+spec.put3 = diagramami / kryteriami akceptacji
+mode.title = === Telesma - Wybierz tryb ===
+mode.1 = Realizacja zadań z PLAN.md (pętla autonomiczna)
+mode.2 = Tryb poprawek (rozmowa — przekaż błąd do naprawy)
+mode.3 = Tryb przeglądu kodu (lokalny, ze znajomością projektu — kryteria ze specyfikacji i wytycznych)
+mode.4 = Odtworzenie artefaktów wizualnych (zrzuty ekranu + wideo — uzupełnienie bez zmian w PLAN.md)
+mode.cancel = Anulowano.
+mode.bad = Nieprawidłowy wybór: %s (oczekiwano 1, 2, 3, 4 albo q)
+no.yes = t/N
+again = Uruchom ponownie: %s
+stopped = Zatrzymano. Uruchom ponownie, żeby kontynuować.
+
+s.b.title = === Telesma — sprzeczności w opisie: %s ===
+s.b.how = Telesma potrzebuje Twojej decyzji przy każdej. ENTER przyjmuje jej propozycję; 'q' przerywa, dokończysz później.
+s.title = === Telesma - Sprzeczności w dokumentacji (%s) ===
+s.how = Trzeba je rozstrzygnąć przed pytaniami. ENTER = przyjmij propozycję | 'q' = przerwij
+s.item = --- Sprzeczność S%s ---
+s.proposal = Proponowane rozstrzygnięcie: %s
+s.prompt = Rozstrzygnięcie
+s.done = Wszystkie sprzeczności rozstrzygnięte (%s/%s)
+
+a.b.decided = Drobniejsze sprawy, które Telesma rozstrzygnęła sama, w zwykły sposób: %s — na przykład:
+a.b.where = (wszystkie są w telesma/state/QUESTIONS.md, jeśli chcesz zajrzeć)
+a.title = === Telesma - Założenia do sprawdzenia (%s) ===
+a.how = ENTER = przyjmij | tekst = komentarz/alternatywa (oznacza odrzucenie) | 'q' = przerwij
+a.item = --- Założenie A%s ---
+a.rationale = Uzasadnienie: %s
+a.prompt = [ENTER=przyjmij / tekst=odrzuć]
+a.done = Założenia sprawdzone (%s/%s)
+
+q.b.title = === Telesma — kilka pytań o szczegóły ===
+q.b.count = Pytania od Telesmy: %s. Przy każdym jest odpowiedź, którą sama by wybrała —
+q.b.how = ENTER ją przyjmuje, możesz też wpisać własną. 'q' przerywa; dokończysz później.
+q.title = === Telesma - Doprecyzowanie projektu ===
+q.count = Pytania: %s | Pozostało: %s
+q.how = ENTER = przyjmij propozycję | 'q' = przerwij
+q.item = --- Pytanie %s/%s ---
+q.proposal = Propozycja: %s
+q.prompt = Odpowiedź
+q.stopped = Zatrzymano. Uruchom ponownie, żeby kontynuować od pytania %s.
+q.done = Wszystkie pytania mają odpowiedź! (%s/%s)
+
+plan.b.making = Telesma planuje teraz pracę — kilka minut.
+plan.b.ready = Plan jest gotowy. Liczba kroków: %s.
+
+mode.b.title = === Telesma — co teraz? ===
+mode.b.left = Kroki planu, które zostały do zrobienia: %s.
+mode.b.build = Buduj dalej — następne kroki planu
+mode.b.done = Wszystkie kroki planu są zrobione.
+mode.b.more = Dodaj albo zmień coś — opowiedz Telesmie, co
+mode.b.bug = Coś działa źle — opowiedz Telesmie, co
+mode.b.quit = Nie teraz
+mode.prompt = Wybór [1]
+
+tel.start1 = ten projekt jest ustawiony na zgłaszanie jakości pracy Telesmy do
+tel.start2 = wspólnego huba Telesmy, ale na tej maszynie nie ma Twojej zgody. Wysyłane: wyniki i czasy
+tel.start3 = zadań, wyniki testów, wpisy Telesmy o problemach i decyzjach (bez sekretów), liczniki,
+tel.start4 = hashe adresu origin i e-maila z gita. Nigdy: specyfikacja, kod, changes/, polecenia, prompty.
+tel.start5 = Prywatność: %s · cofnięcie: %s
+tel.start.ask = Zgoda na tej maszynie? [t/N/metrics]
+tel.start.no = Ta maszyna nic nie wysyła. Zmienisz to później: %s (krok Telemetria).
+tel.start.none = projekt dopuszcza wspólny hub, na tej maszynie nie ma zgody — nic nie jest wysyłane.
+
+pre.git = git nie jest zainstalowany.
+pre.git.mac = Zainstaluj go poleceniem: %s (okno systemu poprosi o potwierdzenie).
+pre.git.win = Zainstaluj Git for Windows: %s — i uruchamiaj Telesmę z Git Bash.
+pre.git.other = Zainstaluj go menedżerem pakietów systemu (np. %s).
+pre.py = Python 3 (python3) nie jest zainstalowany.
+pre.py.old = Python jest za stary: %s — Telesma potrzebuje wersji 3.9 lub nowszej.
+pre.py.mac = Zainstaluj go ze strony %s (instalator dla macOS) i otwórz nowe okno Terminala.
+pre.py.win1 = Python jest zainstalowany (%s), ale pod nazwą python, a Telesma wywołuje python3.
+pre.py.win.ask = Utworzyć obok niego python3.exe (kopię python.exe)?
+pre.py.win2 = Zainstaluj go ze strony %s — w pierwszym oknie zaznacz «Add python.exe to PATH».
+pre.py.win3 = Potem wyłącz atrapy ze Sklepu: Ustawienia → Aplikacje → Zaawansowane ustawienia aplikacji → Aliasy wykonywania aplikacji → wyłącz python.exe i python3.exe.
+pre.py.win4 = Otwórz nowe okno Git Bash i uruchom Telesmę jeszcze raz — zaproponuje dokończenie ustawienia.
+pre.py.other = Zainstaluj go menedżerem pakietów systemu (np. %s).
+pre.py.fixed = python3 jest gotowy.
+pre.claude = Claude Code (claude) nie jest zainstalowany.
+pre.claude.win = W PowerShell: %s — potem otwórz nowe okno Git Bash.
+pre.claude.unix = W Terminalu: %s — potem otwórz nowe okno Terminala.
+pre.claude.plan = Potrzebne jest konto Claude z płatnym planem (Pro albo Max) albo klucz API.
+pre.login = Claude Code jest zainstalowany, ale niezalogowany.
+pre.login.how = Zaloguj się poleceniem: %s (otworzy się przeglądarka), potem uruchom Telesmę ponownie.
+pre.crlf = Telesma została skopiowana z windowsowymi końcami linii, których Bash nie czyta.
+pre.crlf.how = Sklonuj ją ponownie poleceniem: %s
+pre.ready = Wszystko, czego Telesma potrzebuje, jest na miejscu.
+pre.missing = Telesma nie wystartuje, dopóki tych elementów nie będzie. Potem uruchom to samo polecenie jeszcze raz.
+pre.tool = %s nie jest zainstalowany — ten projekt jest nim budowany i testowany.
+pre.tool.ask = Zainstalować go teraz poleceniem %s?
+pre.tool.reopen = Zainstalowane. Nowy program widać dopiero w nowym oknie: zamknij to i uruchom Telesmę jeszcze raz.
+pre.tool.cmd = Zainstaluj go poleceniem: %s
+pre.tool.page = Zainstaluj go ze strony %s, potem otwórz nowe okno.
+pre.tool.any = Zainstaluj go (wywołują go polecenia w ## Tests w telesma/config.md), potem otwórz nowe okno.
+pre.stack.stop = Telesma zatrzymuje się tutaj, żeby budowa nie przerwała się w połowie. Po instalacji uruchom to samo polecenie jeszcze raz.
+pre.stack.warn = Idę dalej: sesja nie wykona poleceń, które go potrzebują.
+home.title = === Telesma ===
+home.where = Twoje projekty są w folderze: %s
+home.new = Nowy pomysł — opowiedz Telesmie, jakiego programu potrzebujesz
+home.quit = Zamknij
+home.prompt = Wybór
+home.name = Robocza nazwa pomysłu (kilka słów, tak będzie się nazywał folder)
+home.bad = Nie ma takiej opcji.
+home.st.idea = opis pomysłu jeszcze niedokończony
+home.st.plan = następne będą pytania i plan
+home.st.left = kroków do zrobienia: %s
+home.st.done = wszystkie kroki zrobione
+inst.title = === Telesma — instalacja ===
+inst.intro = Telesma buduje programy razem z Claude Code. Ten instalator dogra to, czego potrzebuje, i przed każdym krokiem zapyta.
+inst.s.git = 1/4  git i Python
+inst.s.telesma = 2/4  Telesma
+inst.s.claude = 3/4  Claude Code
+inst.s.shortcut = 4/4  Skrót na pulpicie
+inst.s.git.win = 1/5  Git for Windows
+inst.s.py.win = 2/5  Python
+inst.s.telesma.win = 3/5  Telesma
+inst.s.claude.win = 4/5  Claude Code
+inst.s.shortcut.win = 5/5  Skrót na pulpicie
+inst.git.mac = Potrzebne są narzędzia Apple dla programistów (zawierają git i Pythona). Okno systemu zapyta o ich instalację.
+inst.git.wait = W tym oknie kliknij «Instaluj» i poczekaj — instalator pójdzie dalej sam, gdy skończy.
+inst.git.other = Zainstaluj git i python3 menedżerem pakietów systemu (np. %s), potem uruchom instalator jeszcze raz.
+inst.git.win = Potrzebny jest Git for Windows: zawiera git i okno, w którym pracuje Telesma.
+inst.ok = Instalować?
+inst.stop = Zatrzymane. Uruchom instalator jeszcze raz, kiedy zechcesz kontynuować.
+inst.fail = Instalacja się nie udała — zobacz linie powyżej, potem uruchom instalator jeszcze raz.
+inst.py = Potrzebny jest Python 3.9 lub nowszy: zainstaluj go ze strony %s i uruchom instalator jeszcze raz.
+inst.py.win = Potrzebny jest Python — Telesma uruchamia nim swoje sprawdzenia.
+inst.py.admin = Nie udało się utworzyć python3.exe w %s — uruchom PowerShell jako administrator i instalator jeszcze raz.
+inst.pull = Nie udało się zaktualizować Telesmy w %s (zmieniona ręcznie?).
+inst.updated = Telesma zaktualizowana: %s
+inst.exists = %s już istnieje i nie jest Telesmą — przenieś go w inne miejsce i uruchom instalator jeszcze raz.
+inst.cloned = Telesma pobrana: %s
+inst.claude = Claude Code nie jest zainstalowany. Potrzebne jest konto Claude z płatnym planem (Pro albo Max).
+inst.claude.ask = Zainstalować go teraz (oficjalnym instalatorem z claude.ai)?
+inst.claude.fail = Claude Code się nie zainstalował — zobacz linie powyżej.
+inst.login = Teraz zaloguj się do konta Claude: otworzy się okno przeglądarki.
+inst.login.later = Logowanie jeszcze nie zakończone — Telesma zapyta o nie ponownie przy starcie.
+inst.shortcut = Na pulpicie: «Telesma». Twoje projekty będą w folderze %s.
+inst.shortcut.cmd = Uruchamiaj Telesmę poleceniem: %s
+inst.done = Gotowe. Od teraz: kliknij dwa razy «Telesma» na pulpicie.
+inst.start = Uruchomić Telesmę teraz?
+inst.winget = Brakuje programu winget: zaktualizuj «Instalator aplikacji» w Microsoft Store, potem uruchom instalator jeszcze raz.
+inst.app = Także w Aplikacjach: naciśnij ⌘ Spacja i wpisz Telesma.
+inst.hidden = Na tym Macu ikony na biurku są wyłączone, więc skrótu na pulpicie nie widać — użyj ⌘ Spacja → Telesma.
+new.title = === Telesma — nowy projekt z pomysłu ===
+new.lang = Język, w którym Telesma ma rozmawiać (en, pl = polski, de, …)
+
+wiz.first.title = === Telesma — pierwszy start: konfiguracja ===
+wiz.first.1 = Kilka pytań, po jednym na moduł. ENTER przyjmuje odpowiedź w nawiasie; wszystko można
+wiz.first.2 = później zmienić poleceniem --setup albo w pliku telesma/config.md.
+wiz.lang.header = Język i poziom
+wiz.lang.1 = Język, w którym Telesma rozmawia z Tobą i pisze prozę w plikach stanu (raporty,
+wiz.lang.2 = decyzje, scenariusze testów). Dowolny kod: en, pl, de, … Struktura zostaje po angielsku.
+wiz.lang.ask = Język
+wiz.exp.1 = Z kim rozmawia Telesma? developer = jak z kolegą z zespołu (nazwy plików, numery sekcji);
+wiz.exp.2 = beginner = prostymi słowami, jedno pytanie naraz z domyślną odpowiedzią, skutki zamiast poleceń.
+wiz.exp.3 = Mechanika i pytania o uprawnienia są takie same — zmienia się tylko język.
+wiz.exp.ask = Poziom (developer / beginner)
+wiz.profile.min = minimal      sama pętla: każde pytanie o uprawnienia trafia do Ciebie, bez kontroli jakości
+wiz.profile.rec = recommended  + sędzia uprawnień (reguły: odczyty przechodzą, reszta pyta) + podstawowe kontrole jakości
+wiz.profile.full = full         + standardowe kontrole jakości oraz pytania o integracje i artefakty wizualne
+wiz.profile.ask = Profil
+wiz.git.header = Repozytorium git
+wiz.git.1 = Telesma commituje po każdym zadaniu i taguje każdą ukończoną fazę — potrzebuje repozytorium git.
+wiz.git.ask = Uruchomić 'git init' w %s?
+wiz.git.no = Bez gita Telesma nie może commitować; uruchom 'git init' przed pierwszym zadaniem.
+wiz.tests.header = Stos i testy
+wiz.tests.1 = Zielone testy są dla Telesmy definicją „zrobione”: uruchamia je po każdym zadaniu i nie
+wiz.tests.2 = zgaduje polecenia. Linter i typechecker zasilają kontrolę lint-types (poziom standard).
+wiz.tests.detected = Wykryto: %s
+wiz.tests.use = Użyć wykrytego stosu?
+wiz.tests.pick1 = Jeszcze nie ma kodu (tylko specyfikacja) albo nie rozpoznaję stosu. Wybierz ten, w którym
+wiz.tests.pick2 = projekt będzie budowany — polecenia to propozycje, które możesz poniżej poprawić:
+wiz.tests.stack = Stos
+wiz.tests.unknown = nieznany stos — uzupełnij ## Tests ręcznie
+wiz.tests.cmd = Polecenie testów
+wiz.tests.full = Polecenie pełnego zestawu
+wiz.tests.lint = Linter/formatter
+wiz.tests.types = Polecenie typecheck
+wiz.tests.smoke1 = Zestaw smoke to szybki podzbiór uruchamiany po KAŻDYM zadaniu (regresja wychodzi od razu, nie
+wiz.tests.smoke2 = na końcu fazy). Mały projekt: to samo, co polecenie testów.
+wiz.tests.smoke = Zestaw smoke (none = pomiń)
+wiz.perm.header = Pytania o uprawnienia
+wiz.perm.1 = Claude Code pyta przed każdym poleceniem. Telesma działa w trybie acceptEdits (edycje plików w
+wiz.perm.2 = projekcie nie pytają; każde polecenie Bash tak). Sędzia uprawnień to hook, który odpowiada
+wiz.perm.3 = na pytania, na które i tak byś się zgodził — tylko zdejmuje pytania, nigdy nie blokuje.
+wiz.perm.rules = rules    zalecane: bez modelu; dowodliwe odczyty przechodzą, cała reszta nadal pyta Ciebie
+wiz.perm.command = command  model przez API zgodne z OpenAI rozstrzyga szarą strefę (potrzebny endpoint)
+wiz.perm.off = off      każde pytanie o Bash trafia do Ciebie
+wiz.perm.ollama = (lokalny serwer modelu odpowiada na porcie 11434 — command jest opcją)
+wiz.perm.ask = Sędzia
+wiz.perm.endpoint = Endpoint (command)
+wiz.perm.model = Model (command)
+wiz.perm.eval = Zanim zaufasz modelowi, uruchom zestaw ewaluacyjny: %s
+wiz.perm.eval2 = Wymagany wynik: FALSE ALLOWS: 0. Klucz API wpisz w API key (command) jako env:NAZWA albo file:<ścieżka>.
+wiz.checks.header = Kontrole jakości
+wiz.checks.1 = Kontrole odpalają się przy operacjach git (przed commitem, tagiem fazy, tagiem wydania), a nie
+wiz.checks.2 = wtedy, gdy model o nich pamięta. Blokujące znalezisko zatrzymuje operację; fałszywy alarm
+wiz.checks.3 = możesz zwolnić po odcisku. Trzy poziomy:
+wiz.checks.basic = basic     sekrety, celowe osłabienia, osłabione testy, higiena repozytorium — bez sieci, bez narzędzi
+wiz.checks.standard = standard  + zmyślone lub podatne zależności (zapytania do rejestru/OSV), SAST, lint/typy, martwe wejścia
+wiz.checks.security = security  + mapa powierzchni ataku i znaczniki red-team (aplikacje z trasami HTTP)
+wiz.checks.none = none      wyłączone
+wiz.checks.gitleaks = szersze wykrywanie sekretów
+wiz.checks.semgrep = reguły OWASP dla SAST
+wiz.checks.tools = Opcjonalne narzędzia nie są zainstalowane — kontrole działają bez nich:%s
+wiz.checks.custom = (obecny zestaw kontroli jest własny — wybór poziomu go zastąpi)
+wiz.checks.ask = Poziom
+wiz.checks.map = Mapa powierzchni ataku %s powstanie jako szkielet przy następnym starcie; przejrzyj jej role i trasy.
+wiz.int.header = Integracje
+wiz.int.1 = Domyślnie Telesma commituje do bieżącej gałęzi i nigdy nie pushuje. Opcjonalnie: GitHub (gałąź
+wiz.int.2 = i pull request na zadanie, scalane przy zielonych kontrolach) i Specky (tracker wymagań).
+wiz.int.ask = Podłączyć integrację teraz?
+wiz.int.none = brak — później: %s
+wiz.vis.header = Artefakty wizualne
+wiz.vis.1 = Opcjonalnie: zrzut ekranu każdego zrealizowanego ekranu i wideo każdego przepływu użytkownika,
+wiz.vis.2 = robione przez testy e2e (Playwright / Detox). Potrzebne UI, makiety w telesma/spec/ux_ui/ do
+wiz.vis.3 = zrzutów i przepływy zapisane jako ## Step N w telesma/spec/APP_FLOW.md do nagrań.
+wiz.vis.shots = Zrzuty ekranu dla każdego ekranu?
+wiz.vis.recs = Nagrania wideo dla każdego przepływu?
+wiz.vis.flow = telesma/spec/APP_FLOW.md — opisz po jednym przepływie na ## Step N, potem usuń znacznik z linii 1
+wiz.vis.links = telesma/spec/ux_ui/LINKS.md — linki do makiet trzymanych poza repozytorium; pliki idą wprost do ux_ui/
+wiz.menu.title = === Telesma — ustawienia (%s) ===
+wiz.menu.tests = Stos i testy           %s
+wiz.menu.perm = Pytania o uprawnienia  sędzia: %s
+wiz.menu.checks = Kontrole jakości       %s
+wiz.menu.int = Integracje             repozytorium: %s, tracker: %s
+wiz.menu.vis = Artefakty wizualne     zrzuty: %s, nagrania: %s
+wiz.menu.lang = Język, poziom          %s, %s
+wiz.menu.tel = Telemetria             %s
+wiz.menu.done = Gotowe
+wiz.menu.ask = Zmień [q]
+wiz.menu.bad = 1–7 albo q
+next.tg = Wytyczne techniczne: %s — zostawione bez zmian oznaczają domyślne z telesma/guidelines/;
+next.tg2 = wpisz tylko to, co projektowi narzucono (stos, hosting, zgodność z przepisami).
+
+sum.tests = Testy
+sum.tests.unset = NIE USTAWIONE — Telesma zatrzyma się, dopóki nie uzupełnisz ## Tests
+sum.perm = Pytania o uprawnienia
+sum.perm.off = każde polecenie Bash pyta Ciebie
+sum.perm.rules = sędzia włączony (reguły): odczyty przechodzą, reszta pyta Ciebie
+sum.perm.command = sędzia włączony (model %s): szara strefa idzie do modelu
+sum.perm.none = hook włączony, bez sędziego: tylko poprawki kształtu polecenia
+sum.checks = Kontrole jakości
+sum.checks.basic = basic (sekrety, osłabienia, testy, higiena)
+sum.checks.standard = standard (+ zależności, audyt, sast, lint/typy, martwe wejścia)
+sum.checks.security = security (+ mapa powierzchni ataku, red team)
+sum.checks.custom = zestaw własny
+sum.off = wyłączone
+sum.none = brak
+sum.int = Integracje
+sum.vis = Artefakty wizualne
+sum.vis.shots = zrzuty ekranu
+sum.vis.recs = nagrania
+sum.lang = Język
+sum.exp = Poziom
+sum.exp.beginner = beginner (proste słowa, jedno pytanie naraz)
+sum.tel = Telemetria
+sum.tel.off = wyłączona (nic nie opuszcza tej maszyny)
+wiz.tests.later = later = stos wybierze doprecyzowanie i zapisze go w planie; Telesma zaproponuje potem polecenia i zapyta raz
+wiz.tests.later.ok = Polecenia testów wezmą się z planu — pytanie padnie przy pierwszym starcie po nim.
+tests.plan = Plan wskazuje stos: %s
+tests.plan.unknown = Telesma nie potrafi z tego odczytać narzędzia testów — ustaw ## Tests: %s (1)
+tests.plan.ask = Ustawić z niego polecenia testów i reguły uprawnień dla %s? [%s]
+tests.plan.no = Zostaje bez zmian — ustaw ## Tests: %s (1)
+tests.plan.edit = Inne polecenia? %s (1).
+
+dir.unsafe = Nie tutaj: %s to nie jest folder na jeden program — Telesma rozłożyłaby swoje pliki między Twoimi.
+dir.unsafe.how = Podaj osobny folder, na przykład: %s
+dir.unsafe.home = Albo otwórz menu startowe: %s
+dir.unsafe.none = Niczego nie utworzono.
+inst.aside = Telesmy w %s nie dało się zaktualizować; zostaje zachowana jako %s.

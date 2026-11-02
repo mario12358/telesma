@@ -3,6 +3,10 @@
 You are working in the clarification phase of a Telesma project (generating the spec index, the questions and the plan).
 References to sections 0+ describe the later implementation phase — its instructions are loaded separately.
 
+A hook failing (a write refused with a hook error, a traceback or "file not found" from `.claude/hooks/`
+or `telesma/checks/`) is Telesma's machinery broken: stop and report the error's first lines. Never
+write the file another way (Bash, `python -c`) and never edit `.claude/` or `telesma/checks/`.
+
 ## -1. Clarification phase (if `Clarified: no` in telesma/config.md)
 
 This phase runs ONLY when telesma/config.md says `Clarified: no`. If it says `Clarified: yes` — skip this section and go to section 0.
@@ -151,6 +155,11 @@ Main MVP1 user flows — from registration to exporting the specification.
 
 In each of these situations Telesma will detect the gap in section 0.5 and write an info line to REPORT.md instead of blocking — carry on normally.
 
+**The technical template left as it is.** `telesma/spec/TECHNICAL_GUIDELINES.md` still carrying the
+`TELESMA_SPEC_TEMPLATE` marker in its first line means "no departures from the defaults": the
+guidelines in `telesma/guidelines/` apply. Do not ask about it, do not list it as a gap and do not
+lower the quality assessment for it; an empty field in a filled-in template means the same.
+
 ### Step 2: Generating questions, assumptions and contradictions
 
 Check whether `telesma/state/QUESTIONS.md` exists:
@@ -287,8 +296,17 @@ After the Q&A, telesma/state/QUESTIONS.md will contain the user's answers (statu
 After ALL questions are answered and the contradictions and assumptions are resolved:
 
 1. Check that every contradiction has a filled-in **Resolution** (status ✅). If not → TELESMA BLOCKED.
-2. Check the assumptions: treat accepted ones (✅) as agreed; rejected ones (❌) should already have been moved to questions and have an answer.
-3. Change the state in telesma/state/QUESTIONS.md to `done`
+2. Check the assumptions: treat accepted ones (✅) as agreed. A rejected one (❌) carries the
+   user's **User comment**. When the comment is a decision or an alternative, plan by it. When it
+   is not — a question, "I do not understand", a doubt — there is no decision yet: this is the
+   one place where you ask. Explain the assumption in plain words (what it decides, what the
+   alternative would be), ask the one question that settles it and wait for the answer; write it
+   into the item (status ✅, the answer in **User comment**) and only then go on. Never build the
+   plan on an assumption the user rejected without deciding, and never say afterwards that it
+   "stays open".
+3. Change the state in telesma/state/QUESTIONS.md to `done` — with Edit on that line. Never
+   write the whole file: it holds the user's answers, and a Write from your context replaces them
+   with your own earlier version.
 4. Generate telesma/state/PLAN.md from four sources of knowledge:
    - The documentation in `telesma/spec/` (specification, requirements, diagrams)
    - Contradiction resolutions from `telesma/state/QUESTIONS.md`
@@ -317,6 +335,15 @@ After ALL questions are answered and the contradictions and assumptions are reso
      the task that builds it
    - A test after every implementation (unit/integration as an annotation `- [ ] Test: ...`)
    - **An e2e task at the end of every phase with UI** (see below)
+   - **With an `EXPERIENCE: beginner` block: a packaging task last.** The plan's final task is
+     `Task N.M: Package — <program name> as <the file from the packaging line in
+     TECHNICAL_GUIDELINES.md → Other constraints>` requiring every other task, with
+     `  - AC: entry — the person double-clicks the file in the folder Telesma opened for them`,
+     `  - AC: the packaged file starts on this computer from where it was placed, not from the build folder` and
+     `  - AC: next to it a short text file in the person's Language ("<program name> — how to use"):
+     how to start it, where its data is kept, how to remove it, what to do when it does not work`.
+     Only for the system of this computer — a file for another system goes into Spec coverage as
+     "out of scope — built later on that system"
    - **Tracker anchors** — when `telesma/config.md` → `## Integrations` has `Tracker: specky`: before
      laying out tasks, fetch the project's requirements (`get_requirements` on `Tracker project`, when in
      doubt `get_plan_prompt`) and under EVERY task that implements a requirement add the line
@@ -347,7 +374,8 @@ After ALL questions are answered and the contradictions and assumptions are reso
    tasks. In an autonomous loop this type of error only surfaces at the end of the project.
 7. **Plan self-review (the last step before finishing):** read the generated plan with fresh
    eyes against the checklist: task atomicity / a feasible order / dependencies exist and have no cycles /
-   a test with every implementation / e2e at the end of every phase with UI / coverage of the gaps from the spec quality
+   a test with every implementation / e2e at the end of every phase with UI / the packaging task
+   last (beginner only) / coverage of the gaps from the spec quality
    assessment (the `Topic gaps` section in SPEC_INDEX — a significant gap → a task or a deliberate omission
    in Spec coverage) / **no task line exceeds 400 characters** (rationale and context
    belong in telesma/state/PROJECT_CONTEXT.md, criteria on separate `- AC:` lines — the whole plan goes
@@ -458,7 +486,7 @@ Example (Auth module, two clients):
 **Phase numbering accepts an optional letter suffix** after the number (`Phase 1M`, `Phase 2I`, `Phase 3A`) and an optional rework suffix `.Z<n>` (`Phase 6.Z1`, `Phase 2M.Z1`). Recognition regex: `^### Phase ([0-9]+[A-Z]?(?:\.Z[0-9]+)?):`. Tasks in a suffixed phase use the same numbering (`1M.1`, `1M.2`, `6.Z1.1`, `6.Z1.2`). Phases `N` and `NM` are siblings (not nested) — both are scanned independently when choosing a task. Rework phases `N.Z<n>` belong to the track of the base phase `N` (selected together with it through `Active phases`).
 
 6. Change in `telesma/config.md`: `Clarified: no` → `Clarified: yes`
-7. Message:
+7. Message, then finish — the session ends here:
 
 ```
 TELESMA: PLAN GENERATED
@@ -467,14 +495,15 @@ The plan is saved in telesma/state/PLAN.md, based on:
 - Documentation: [list of files from telesma/spec/]
 - Answers to [N] clarifying questions
 
-Review telesma/state/PLAN.md and choose:
-1. Approve → Telesma starts the implementation
-2. Edit → fix the plan by hand, then run Telesma again
+Close this session (type /exit) — the launcher checks the plan and asks whether to start the work.
 ```
 
-8. Wait for the user's decision:
-   - **Approve/ok/start/yes** → go to section 0 (start of implementation)
-   - **Edit/no/stop** → END the session (the user edits by hand)
+8. Do **not** ask for an approval and do **not** start the implementation. This session carries
+   only section -1: the rules of the implementation (section 0 onwards) arrive with the next start
+   of the launcher, which asks or prints the next step itself. Never look for where Telesma is
+   installed and never give a command that starts it — the launcher knows its own path. If the
+   person answers anyway, reply in one sentence that the plan is saved and they should type
+   `/exit`.
 
 ---
 

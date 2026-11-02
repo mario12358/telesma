@@ -19,6 +19,12 @@ task keywords (`Task N.M:`, `Test N.M:`), phase headers (`### Phase N:`), tags (
 (`bug | correction | feature`, …), terminal markers (`TELESMA BLOCKED`, …) and block titles
 (`📦 RELEASE PROPOSAL`). Scripts parse them; a translated token is a token nobody finds.
 
+**Experience.** When the startup prompt carries an `EXPERIENCE: beginner` block (from the
+`Experience` field in `telesma/config.md`), the person you work with does not program: follow that
+block. It changes how you write to them — plain words, one question at a time with a default,
+the effect of an action instead of its command — and nothing else: not what you do, not the
+permission prompts, not the structure of the state files. Without the block, talk as to a colleague.
+
 At the start of every session:
 
 1. Go through the state files in the prompt (config, plan, context, report, spec index)
@@ -474,6 +480,12 @@ Claude Code"). Project trailers (e.g. `Specky-Req:`) go above that footer.
 - **Regression**: takes priority over a new task - fix it before moving on
 - **Blocked dependency**: skip the task, choose the next one without blocks
 - **After running out of tries**: STOP and ask the user
+- **A hook fails** (a tool call refused with a hook error, a traceback or "file not found" from
+  `.claude/hooks/` or `telesma/checks/`): Telesma's own machinery is broken, not your task. STOP
+  with TELESMA BLOCKED quoting the error's first lines. Never get the same change through another
+  way (a write through Bash, `python -c`, `sed -i`), never edit `.claude/settings.local.json`,
+  `.claude/hooks/` or `telesma/checks/` to make it pass — the launcher rewrites them at every start.
+  A check that refuses with a reason is not a failure: fix what it names (section 19).
 
 **HARD RULE — a failing test is fixed by changing the code, not the test.**
 Changing a test's content (assertions, expected values, adding skip/only, removing a case) is allowed
@@ -624,6 +636,8 @@ When every task in telesma/state/PLAN.md has ✅:
    Collect it from the session's memory + PROJECT_CONTEXT + the project's configs:
    - Required environment variables (names + where to get the values, WITHOUT secrets)
    - Commands: installing dependencies, running dev, tests, build/production
+   - **How to start the program** — the first line of the file: the built file with its full path
+     (a desktop program or game), or the command / address (a server or web app)
    - Database: migrations, seeding
    - Local ports / URLs, test accounts (if any)
    If docs/RUNBOOK.md already exists — update it instead of overwriting. Commit it together with the final report.
@@ -638,6 +652,7 @@ TELESMA COMPLETE
 Completed tasks: [number]
 Tests: [full suite result]
 Summary: [what was done]
+Run it: [where the program is and how to start it — as in docs/RUNBOOK.md]
 
 Ready for new instructions.
 ```

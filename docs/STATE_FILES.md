@@ -15,7 +15,7 @@ and the diagnosis with `--repair`.
 
 | File | Role | Written by |
 |---|---|---|
-| `telesma/spec/TECHNICAL_GUIDELINES.md` | Departures from the defaults in `telesma/guidelines/` (stack, hosting, integrations, non-functional requirements). Template copied on the first run; delete the `TELESMA_SPEC_TEMPLATE` marker once filled in. | You, before the start |
+| `telesma/spec/TECHNICAL_GUIDELINES.md` | Departures from the defaults in `telesma/guidelines/` (stack, hosting, integrations, non-functional requirements). Template copied on the first run; left as it is (marker `TELESMA_SPEC_TEMPLATE` in line 1) it means the defaults apply and never blocks the start; delete the marker once you fill something in. | You, before the start |
 | `telesma/spec/*` | Business and functional requirements, use cases, domain model, diagrams — any format. Frozen after clarification. | You, before the start |
 | `telesma/spec/ux_ui/` | Mockups, design tokens, reference components (CSS, HTML, JSX, TSX, images). Loaded fragment by fragment through `(ui-*:)` tags. Always created; empty is fine. | You, before the start |
 | `telesma/spec/ux_ui/LINKS.md` | Registry of mockups kept outside the repository (`## <id> — Title` + `- link:`). Template created by the setup wizard when screenshots are turned on (or copy `templates/UX_LINKS_TEMPLATE.md` yourself). **Exempt from the freeze** — add links any time; Telesma indexes new entries at the next start. The link must be shared. | You, any time |

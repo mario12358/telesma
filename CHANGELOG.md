@@ -4,6 +4,113 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.1.0 — 2026-11-02
+
+State format: 18 (unchanged).
+
+- The first-start wizard asks for the language and the experience first and proposes the
+  system's language; from there every line of the wizard, the `[Y/n]` letters (`[T/n]`, `t` = yes)
+  and the configuration summary are in that language (`templates/messages/<lang>.txt`, read by
+  `configure.py summary --lang` too), as are the mode menu, the clarification hints and its end.
+  `beginner` chosen there leads straight to the short setup. The merge report of `config.md`
+  prints only when a section or field was added or the file carries a field the template does
+  not know — the list of kept values is gone. A project with no code yet answers the stack
+  question with `later` (the default): the clarification picks the stack, and the first start
+  after the plan reads its `Stack` line, proposes the test commands and permission rules for it
+  (`configure.py tests`) and asks once — a guess before the spec was even read is gone.
+- `telesma/spec/TECHNICAL_GUIDELINES.md` is optional: left as it is (marker in line 1) it means
+  "the defaults apply" and never blocks the start — the wizard's next steps say so, and the
+  clarification does not ask about it. Alone in `telesma/spec/` it still counts as no spec.
+- The wizard ends by asking "go on?" (ENTER starts the clarification) and the clarification by
+  asking "Start building now?" (ENTER starts the loop; `n` prints the one command that continues)
+  instead of commands to type — for a developer too; `-m 1` is no longer listed before a plan
+  exists. A session is closed
+  with `/exit` wherever the launcher or the model says how to go on — not Ctrl+C twice.
+- A rejected assumption whose comment is not a decision ("I do not understand") is the one
+  question the plan session may ask: it explains, waits for the answer, writes it into
+  `QUESTIONS.md` and only then plans — before, it planned on its own proposal and said so after.
+- Two safety nets around `QUESTIONS.md`: a contradiction or question with ✅ and an empty
+  Resolution/Answer was never shown to the user and goes back to the queue on every start, not
+  only right after generation; and the plan session is told to edit the State line, never to
+  rewrite the file — if it does anyway, the answers are put back from a copy taken before the
+  session, and the questions whose answer differed from the proposal are named, because the plan
+  was made without them.
+- Starting from an idea: `telesma.sh --new <project>` interviews you (six plain questions, one at
+  a time — `templates/instructions/INTERVIEW.md`), writes `telesma/spec/` itself (`IDEA.md`,
+  `REQUIREMENTS.md` with "when …, then …" checks, `APP_FLOW.md`, the filled technical template),
+  picks the technology from who will use the program and where (a fixed table), fills `## Tests`
+  for it, reads everything back and then runs the setup. Interrupted → `--new` again continues.
+- `Experience: developer | beginner` in `## Project`. `beginner` appends the `EXPERIENCE` block
+  (`BEGINNER.md`) after the `LANGUAGE` line: plain words, one question at a time with a default,
+  the effect of an action instead of its command, progress in one sentence; the clarification
+  accepts Telesma's assumptions and names the first three; the first-start wizard applies the
+  recommended profile without the questions a beginner cannot answer and asks only about
+  telemetry. Mechanics, permission prompts and state files are unchanged. The wizard asks for it
+  next to the language.
+- A beginner is led, not handed commands: after the settings Telesma asks "go on?" and starts the
+  clarification; after the plan, whether to start building. No → one command continues with the
+  right next step. The telemetry question is one plain yes/no; a hub that does not answer is one
+  sentence. A plain start offers "build on" or "something does not work".
+  Closing a build or bugfix session brings a beginner back to that menu (with the steps still
+  open). Telesma builds the program itself and opens the folder with it on screen instead of
+  handing over a build command, asks to try it before proposing a version, and gives any command
+  it needs as one that works from every folder.
+- Desktop programs: new guidelines `wpf` (MVVM with CommunityToolkit.Mvvm, ViewModels in a plain
+  library testable on any OS, FlaUI for the few end-to-end flows, one self-contained exe,
+  SmartScreen) and `pyside6` (Qt-free core, pytest-qt headless, PyInstaller per system, Gatekeeper
+  and SmartScreen). The interview's technology table moves to .NET 10 (.NET 8 support ends
+  November 2026) and Python 3.13 with uv, and says that a program for a system is built and tried
+  on that system.
+- Every start checks what the machine needs — git, Python 3.9+ as `python3`, Claude Code and its
+  sign-in — before anything is created, and names what to install for this system (macOS, Linux,
+  Windows/Git Bash), in the system language. On Windows, where python.org installs `python` and
+  `python3` is the Store placeholder, it offers to create `python3.exe`. `telesma.sh --doctor`
+  runs the check on its own. `.gitattributes` keeps LF line endings on a Windows checkout.
+- Before a session that builds, the programs the project's `## Tests` commands call (`dotnet`,
+  `uv`, `npm` …) must be on the machine: a missing one is named with what to install, and with
+  winget (Windows) or Homebrew (macOS) Telesma offers to install it — only after "yes". A beginner's
+  build does not start without it; a developer is warned. `telesma.sh --doctor <project>` checks
+  them too.
+- A beginner's plan ends with a packaging task: the program as one file to double-click, started
+  from where it was placed, with a short "how to use" text next to it in the person's language.
+- A hook that fails (a crash, not a check refusing with a reason) stops the session with
+  `TELESMA BLOCKED` and its error; the model never gets the same write through another tool or
+  edits the hook setup.
+- One-line installers for people who do not program: `install.ps1` (Windows: Git for Windows,
+  Python with a `python3.exe`, Claude Code via `winget` / the official installer) and `install.sh`
+  (macOS: Apple's command line tools, Claude Code), each asking before every installation, then
+  Telesma itself, the Claude sign-in and a «Telesma» desktop shortcut. Run again = update.
+- `telesma.sh --home [folder]`: the shortcut's start menu — a new idea (a folder named from a
+  working name, then the interview) or one of the projects, newest first, with where each stands;
+  an interrupted interview continues. Projects live in `~/Telesma`, outside the folders iCloud or
+  OneDrive sync.
+- Launcher messages in your `Language`: `templates/messages/` (Polish now) covers the interview,
+  the settings, telemetry, the clarification questions and the next steps; a language without a
+  catalog falls back to English. The system language comes from `LANG`, else from the system
+  itself: `AppleLocale` on macOS, the Windows locale in the registry under Git Bash (which sets no
+  `LANG`).
+- Every release says how to start it: the "version created" message has a `Run it:` line (the
+  built file with its full path to double-click, a command that works from any folder, or the
+  address), the scenarios file opens with "Start the version", `docs/RUNBOOK.md` starts with it and
+  `TELESMA COMPLETE` repeats it — after the first Windows game shipped as v0.1.0 with the tests and
+  scenarios described but no word on how to play it.
+- Home, Desktop, Documents, Downloads and the projects folder `~/Telesma` are never made into a
+  project: started there (or with no path from there — a desktop shortcut of an older version),
+  the launcher creates nothing and names the command that starts a project in a folder of its own.
+- A rerun of an installer whose `~/.telesma` cannot be brought to the branch asked for (another
+  history, files git does not know) keeps the old clone whole as `~/.telesma.old-<date>` and
+  downloads Telesma again, instead of stopping.
+
+- Shared, opt-in Telesma hub: the setup wizard (every profile, default no) asks once, listing
+  everything that is sent; a yes registers a token of this machine's own (`~/.config/telesma/hub`)
+  and sets `Endpoint: shared`. A committed `Send: yes` no longer switches anyone on: a person who
+  clones such a project is asked once on their machine. `Scope: metrics` sends numbers only.
+  To the shared hub the sender's name is not sent and an empty `Project label` is the project hash.
+- `telesma.sh --telemetry-forget`: deletes everything this machine sent to the shared hub and
+  withdraws the opt-in. Privacy page: `<hub>/privacy`.
+- Own self-hosted server works as before (`Endpoint: https://…`, `API key`); `API key: auto`
+  reads the opt-in token.
+
 ## 1.0.0 — first public release
 
 State format: 18.

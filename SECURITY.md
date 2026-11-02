@@ -32,5 +32,7 @@ third-party tools Telesma calls (`gh`, `gitleaks`, `semgrep`).
   An `ALLOW` from the model is the only decision with an effect, and the evaluation gate
   (`tools/telesma-judge-eval.py`) requires zero false allows on the dangerous set.
 - Quality checks never print secret values, only a rule, a file, a line and a fingerprint.
-- Telemetry is off by default. When enabled it sends counters and Telesma's own notes, never
-  `telesma/spec/`, source code, `telesma/changes/` or commands from the judge log.
+- Telemetry is off by default. The shared hub needs a per-machine opt-in that a committed config
+  cannot give; your own server needs a key on each machine. When enabled it sends counters and
+  Telesma's own notes (numbers only with `Scope: metrics`), never `telesma/spec/`, source code,
+  `telesma/changes/` or commands from the judge log.

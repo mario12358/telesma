@@ -5,6 +5,16 @@
   python3 tools/telesma-telemetry.py <project> --json   # events as JSONL on stdout
   python3 tools/telesma-telemetry.py <project> --send   # send per `## Telemetry` in config.md
                                                       # (telesma.sh does it in the background at startup)
+  python3 tools/telesma-telemetry.py --register [--scope full|metrics]   # opt in on this machine
+  python3 tools/telesma-telemetry.py --forget           # delete my data on the shared hub, opt out
+
+Two destinations. `Endpoint: shared` = the shared Telesma hub run by the project's author: it
+needs a per-MACHINE opt-in (~/.config/telesma/hub, written by `--register` from the setup
+wizard), because `telesma/config.md` is committed and one person's `Send: yes` must not make
+everyone who clones the repo send. Without that file nothing goes out, whatever config.md says.
+To the shared hub the sender's name is never sent, and an empty `Project label` is the project
+hash, not the directory name (which often names a client). `Endpoint: <url>` = a server you run
+yourself, with `API key` from env/file/cmd — the key on each machine is that machine's opt-in.
 
 Reads files Telesma leaves in the project anyway, which nobody reads with an eye on the
 QUALITY OF THE FRAMEWORK: problem log, tries per task, bugfixes, reviews, blockers, outcomes
@@ -97,6 +107,11 @@ TECH_EVIDENCE = {
 }
 BATCH_BYTES = 400_000
 CACHE = Path.home() / ".cache" / "telesma"
+# The shared opt-in hub (docs/TELEMETRY.md → "The shared Telesma hub"). The variable exists for
+# tests and for pointing at a mirror; normal installations never set it.
+SHARED_HUB = os.environ.get("TELESMA_SHARED_HUB", "https://telesma-hub.specky.app:8443")
+CONSENT = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "telesma" / "hub"
+SCOPES = ("full", "metrics")
 
 SECRETS = [
     re.compile(r"\b(sk|pk|ghp|gho|glpat|xox[abp])[-_][A-Za-z0-9_\-]{16,}"),
@@ -214,6 +229,24 @@ def versions_over_time(project):
             if v.isdigit():
                 out.append((d, int(v)))
     return sorted(out)
+
+
+def consent():
+    """{token, scope, endpoint} from the per-machine opt-in file, or None. Format: `key: value`
+    lines; the file holds a token, so it is created 0600."""
+    if not CONSENT.is_file():
+        return None
+    out = {}
+    for l in CONSENT.read_text(encoding="utf-8").split("\n"):
+        if ":" in l:
+            k, v = l.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out if out.get("token") else None
+
+
+def shared(endpoint):
+    e = endpoint.strip().rstrip("/")
+    return e.lower() == "shared" or e == SHARED_HUB.rstrip("/")
 
 
 def config(project):
@@ -928,8 +961,10 @@ def collect(project):
     pid = project_id(project)
     # Empty label = the project directory name: on the server a project without a label is a
     # bare hash, and the directory name is the same for everyone who cloned the repo under it.
+    # Not for the shared hub: there a directory name often names somebody's client, so an empty
+    # label stays the hash; a readable label is something the user types in knowingly.
     label = cfg.get("Telemetry", {}).get("Project label", "").strip() \
-        or project.resolve().name
+        or (pid if shared(cfg.get("Telemetry", {}).get("Endpoint", "")) else project.resolve().name)
     versions = versions_over_time(project)
     dictionary = tech_dictionary(project, tags)
     current = (state / ".telesma-version").read_text().strip() \
@@ -1011,9 +1046,11 @@ def assign_bug_sources(events):
 
 # --- sending ------------------------------------------------------------------
 def api_key(spec):
-    """env:NAME | file:<path> | cmd:<command> | literal value; empty = no key."""
+    """auto (the opt-in file) | env:NAME | file:<path> | cmd:<command> | literal value; empty = no key."""
     if not spec.strip():
         return ""
+    if spec.strip() == "auto":
+        return (consent() or {}).get("token", "")
     if spec.startswith("env:"):
         return os.environ.get(spec[4:].strip(), "")
     if spec.startswith("file:"):
@@ -1077,21 +1114,46 @@ def fingerprint(ev):
     return hashlib.sha1(json.dumps(ev, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def for_shared_hub(events, scope):
+    """What the shared hub gets: with `metrics` scope no title, text or entry opener (`key` is
+    the first line of an entry — text too). The cut happens here, at the sender; the hub never
+    sees what it would have to throw away."""
+    if scope != "metrics":
+        return events
+    return [{k: ("" if k in ("title", "text") else v) for k, v in e.items() if k != "key"}
+            for e in events]
+
+
 def send(project, events, limit_s):
     """→ (code, message). Code: 0 sent/nothing to send, 1 disabled, 2 error."""
     tel = config(project).get("Telemetry", {})
     if tel.get("Send", "no").lower() != "yes":
         return 1, "telemetry disabled (`Send: no`)"
     endpoint = tel.get("Endpoint", "")
-    if not endpoint.startswith(("http://", "https://")):
-        return 1, "endpoint not set"
-    key = api_key(tel.get("API key", ""))
-    if not key:
-        return 2, (f"cannot read the key (`{tel.get('API key', '')}`) — "
-                   f"set `API key` in telesma/config.md (env:NAME, file:<path> or cmd:<command>)")
+    to_shared = shared(endpoint)
+    if to_shared:
+        # `Send: yes` in a committed file is the project owner allowing it; the person on THIS
+        # machine has to agree on their own. No opt-in file = no request at all.
+        c = consent()
+        if not c:
+            return 1, "no opt-in on this machine for the shared hub (telesma.sh --setup, step Telemetry)"
+        endpoint, key = c.get("endpoint") or SHARED_HUB, c["token"]
+        # The project may narrow the scope for everyone (`Scope: metrics`), never widen it.
+        scope = "metrics" if "metrics" in (c.get("scope"), tel.get("Scope", "").strip().lower()) \
+            else "full"
+        events = for_shared_hub(events, scope)
+    else:
+        if not endpoint.startswith(("http://", "https://")):
+            return 1, "endpoint not set"
+        key = api_key(tel.get("API key", ""))
+        if not key:
+            return 2, (f"cannot read the key (`{tel.get('API key', '')}`) — "
+                       f"set `API key` in telesma/config.md (env:NAME, file:<path> or cmd:<command>)")
 
     CACHE.mkdir(parents=True, exist_ok=True)
-    path = CACHE / f"telemetry-{project_id(project)}.json"
+    # Separate record for the shared hub: `--forget` clears it without making your own server
+    # receive everything again.
+    path = CACHE / f"telemetry-{project_id(project)}{'-shared' if to_shared else ''}.json"
     try:
         sent = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -1112,6 +1174,8 @@ def send(project, events, limit_s):
 
     deadline = datetime.datetime.now() + datetime.timedelta(seconds=limit_s)
     who = sender(project)
+    if to_shared:
+        who.pop("name", None)       # a readable name of a stranger has no place on that server
     delivered = refused = 0
     for batch in batches:
         left = (deadline - datetime.datetime.now()).total_seconds()
@@ -1142,8 +1206,84 @@ def send(project, events, limit_s):
     return 0, f"sent {delivered}{rest}{old_hub}"
 
 
+def hub_request(url, method, token=None, timeout=15):
+    req = urllib.request.Request(url, method=method, data=b"" if method == "POST" else None,
+                                 headers={"Authorization": f"Bearer {token}"} if token else {})
+    error = None
+    for ctx in ssl_contexts():
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return json.loads(r.read() or b"{}")
+        except urllib.error.URLError as e:
+            error = e
+            if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                continue
+            raise
+    raise error
+
+
+def register(scope):
+    """Opt in on this machine: a token of its own from the shared hub → ~/.config/telesma/hub.
+    → (code, message). An existing opt-in keeps its token; only the scope changes."""
+    c = consent()
+    if c:
+        token, endpoint = c["token"], c.get("endpoint") or SHARED_HUB
+    else:
+        try:
+            token = hub_request(SHARED_HUB.rstrip("/") + "/register", "POST").get("token", "")
+        except (OSError, ValueError) as e:
+            return 2, f"the shared hub did not answer ({e}) — nothing was turned on"
+        if not re.fullmatch(r"th_[0-9a-f]{48}", token or ""):
+            return 2, "the shared hub returned no token — nothing was turned on"
+        endpoint = SHARED_HUB
+    CONSENT.parent.mkdir(parents=True, exist_ok=True)
+    old = os.umask(0o077)
+    try:
+        CONSENT.write_text(f"# Telesma telemetry opt-in for this machine — delete with "
+                           f"telesma.sh --telemetry-forget\ntoken: {token}\nscope: {scope}\n"
+                           f"endpoint: {endpoint}\nsince: {datetime.date.today()}\n",
+                           encoding="utf-8")
+    finally:
+        os.umask(old)
+    CONSENT.chmod(0o600)
+    return 0, f"opted in on this machine (scope: {scope}) — {CONSENT}"
+
+
+def forget():
+    """Opt out and delete: DELETE /mine on the hub (every event sent with this machine's token,
+    and the token), then the opt-in file and the record of what was sent — after a deletion
+    the client must not believe the hub still has those events."""
+    c = consent()
+    if not c:
+        return 1, "no opt-in on this machine — nothing to delete"
+    try:
+        r = hub_request((c.get("endpoint") or SHARED_HUB).rstrip("/") + "/mine", "DELETE", c["token"])
+    except urllib.error.HTTPError as e:
+        if e.code != 401:       # 401 = the token is already gone on the hub
+            return 2, f"the hub refused the deletion (HTTP {e.code}) — the opt-in file stays; try again"
+        r = {}
+    except (OSError, ValueError) as e:
+        return 2, f"the hub did not answer ({e}) — the opt-in file stays; try again"
+    CONSENT.unlink()
+    for f in CACHE.glob("telemetry-*-shared.json"):
+        f.unlink()
+    return 0, f"deleted {r.get('deleted_events', 0)} events on the hub and the opt-in on this machine"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    if len(sys.argv) > 1 and sys.argv[1] in ("--register", "--forget", "--shared-hub"):
+        ap.add_argument("--register", action="store_true", help="opt in on this machine")
+        ap.add_argument("--scope", choices=SCOPES, default="full")
+        ap.add_argument("--forget", action="store_true", help="delete my data, opt out")
+        ap.add_argument("--shared-hub", action="store_true", help="print the shared hub address")
+        a = ap.parse_args()
+        if a.shared_hub:
+            print(SHARED_HUB)
+            return
+        code, msg = register(a.scope) if a.register else forget()
+        print(msg)
+        sys.exit(code)
     ap.add_argument("project", type=Path)
     ap.add_argument("--json", action="store_true", help="events as JSONL on stdout")
     ap.add_argument("--send", action="store_true", help="send per `## Telemetry`")

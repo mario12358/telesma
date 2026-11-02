@@ -11,7 +11,7 @@ terminal. Python 3 standard library only.
     configure.py checks  <config.md> <none|basic|standard|security> --template <templates/config.md>
     configure.py tests   <config.md> --stack <name|auto> [--project <dir>]
     configure.py set     <config.md> <Section> <Field> <value>
-    configure.py summary <config.md>                      human-readable table of the modules
+    configure.py summary <config.md> [--lang pl]          human-readable table of the modules
 
 Profiles (what a newcomer gets with ENTER):
     minimal      the loop only — every permission prompt goes to the human, no checks
@@ -33,6 +33,7 @@ import re
 import socket
 import shutil
 import sys
+from pathlib import Path
 
 FIELD_RE = re.compile(r'^- \*\*(.+?)\*\*:[ \t]*(.*?)[ \t]*$')
 PLACEHOLDER_RE = re.compile(r'^\[.*\]$')
@@ -484,6 +485,7 @@ def status(text):
     out = {}
     out['clarified'] = g('Project', 'Clarified') or 'no'
     out['language'] = g('Project', 'Language') or 'en'
+    out['experience'] = (g('Project', 'Experience') or 'developer').lower()
     test = g('Tests', 'Test command')
     out['tests'] = 'placeholder' if not test or PLACEHOLDER_RE.match(test) else 'set'
     out['test_command'] = test
@@ -501,6 +503,13 @@ def status(text):
     out['screenshots'] = g('Visual artifacts', 'Screenshots') or 'no'
     out['recordings'] = g('Visual artifacts', 'Recordings') or 'no'
     out['telemetry'] = g('Telemetry', 'Send') or 'no'
+    ep = g('Telemetry', 'Endpoint')
+    if out['telemetry'] == 'yes':
+        if ep.lower() == 'shared':
+            opted = (Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'telesma' / 'hub').is_file()
+            out['telemetry'] = 'shared hub' + ('' if opted else ' (no opt-in on this machine — nothing sent)')
+        else:
+            out['telemetry'] = f'own server {ep}'
     return out
 
 
@@ -582,28 +591,62 @@ def cmd_profile(a):
     return 0
 
 
+# The summary in the person's language: the same catalog the launcher reads (templates/messages/
+# <lang>.txt, `KEY = text` lines), looked up with L(<key>, <English text>) — tools/test-setup.py
+# checks these keys like the launcher's. A language without a catalog, or none given: English.
+LABELS = {}
+
+
+def load_labels(lang):
+    LABELS.clear()
+    if not lang or lang == 'en':
+        return
+    cat = Path(__file__).resolve().parent.parent / 'messages' / f'{lang}.txt'
+    if not cat.is_file():
+        return
+    for line in cat.read_text(encoding='utf-8').splitlines():
+        k, sep, v = line.partition(' = ')
+        if sep and not line.startswith('#'):
+            LABELS.setdefault(k, v)
+
+
+def L(key, text):
+    return LABELS.get(key, text)
+
+
 def cmd_summary(a):
+    load_labels(getattr(a, 'lang', None))
     s = status(read(a.config))
     rows = [
-        ('Tests', s['test_command'] if s['tests'] == 'set' else 'NOT SET — Telesma will stop until you fill ## Tests',
+        (L('sum.tests', 'Tests'),
+         s['test_command'] if s['tests'] == 'set' else L('sum.tests.unset', 'NOT SET — Telesma will stop until you fill ## Tests'),
          '## Tests'),
-        ('Permission prompts', {'off': 'every Bash command asks you', 'rules': 'judge on (rules): reads pass, the rest asks you',
-                                'command': f'judge on (model {s["judge_model"] or "?"}): gray zone goes to the model',
-                                'none': 'hook on, no judge: command-shape fixes only',
-                                'prompt': 'judge on (Claude Code prompt judge)', 'agent': 'judge on (Claude Code agent judge)'}
+        (L('sum.perm', 'Permission prompts'),
+         {'off': L('sum.perm.off', 'every Bash command asks you'),
+          'rules': L('sum.perm.rules', 'judge on (rules): reads pass, the rest asks you'),
+          'command': L('sum.perm.command', 'judge on (model %s): gray zone goes to the model') % (s['judge_model'] or '?'),
+          'none': L('sum.perm.none', 'hook on, no judge: command-shape fixes only'),
+          'prompt': 'judge on (Claude Code prompt judge)', 'agent': 'judge on (Claude Code agent judge)'}
          .get(s['judge'], s['judge']), '## Auto-approval'),
-        ('Quality checks', {'none': 'off', 'basic': 'basic (secrets, weakenings, tests, hygiene)',
-                            'standard': 'standard (+ dependencies, audit, sast, lint/types, dead entries)',
-                            'security': 'security (+ attack-surface map, red team)', 'custom': 'custom set'}[s['checks']],
+        (L('sum.checks', 'Quality checks'),
+         {'none': L('sum.off', 'off'), 'basic': L('sum.checks.basic', 'basic (secrets, weakenings, tests, hygiene)'),
+          'standard': L('sum.checks.standard', 'standard (+ dependencies, audit, sast, lint/types, dead entries)'),
+          'security': L('sum.checks.security', 'security (+ attack-surface map, red team)'),
+          'custom': L('sum.checks.custom', 'custom set')}[s['checks']],
          '## Checks'),
-        ('Integrations', ', '.join(x for x in (
-            f'GitHub' if s['repository'] == 'github' else '', f'Specky' if s['tracker'] == 'specky' else '') if x) or 'none',
+        (L('sum.int', 'Integrations'), ', '.join(x for x in (
+            'GitHub' if s['repository'] == 'github' else '', 'Specky' if s['tracker'] == 'specky' else '') if x) or L('sum.none', 'none'),
          '## Integrations'),
-        ('Visual artifacts', ', '.join(x for x in ('screenshots' if s['screenshots'] == 'yes' else '',
-                                                   'recordings' if s['recordings'] == 'yes' else '') if x) or 'off',
+        (L('sum.vis', 'Visual artifacts'), ', '.join(x for x in (
+            L('sum.vis.shots', 'screenshots') if s['screenshots'] == 'yes' else '',
+            L('sum.vis.recs', 'recordings') if s['recordings'] == 'yes' else '') if x) or L('sum.off', 'off'),
          '## Visual artifacts'),
-        ('Language', s['language'], '## Project'),
-        ('Telemetry', 'on' if s['telemetry'] == 'yes' else 'off (nothing leaves this machine)', '## Telemetry'),
+        (L('sum.lang', 'Language'), s['language'], '## Project'),
+        (L('sum.exp', 'Experience'),
+         L('sum.exp.beginner', 'beginner (plain words, one question at a time)') if s['experience'] == 'beginner' else 'developer',
+         '## Project'),
+        (L('sum.tel', 'Telemetry'),
+         s['telemetry'] if s['telemetry'] != 'no' else L('sum.tel.off', 'off (nothing leaves this machine)'), '## Telemetry'),
     ]
     w = max(len(r[0]) for r in rows)
     for name, value, where in rows:
@@ -616,7 +659,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('detect'); p.add_argument('project_dir'); p.set_defaults(fn=cmd_detect)
     p = sub.add_parser('status'); p.add_argument('config'); p.set_defaults(fn=cmd_status)
-    p = sub.add_parser('summary'); p.add_argument('config'); p.set_defaults(fn=cmd_summary)
+    p = sub.add_parser('summary'); p.add_argument('config'); p.add_argument('--lang'); p.set_defaults(fn=cmd_summary)
     p = sub.add_parser('set'); p.add_argument('config'); p.add_argument('section'); p.add_argument('field')
     p.add_argument('value'); p.set_defaults(fn=cmd_set)
     p = sub.add_parser('checks'); p.add_argument('config'); p.add_argument('tier', choices=sorted(TIERS))

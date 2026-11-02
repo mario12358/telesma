@@ -81,7 +81,7 @@ implementation itself is the bulk of the cost.
   including `- AC: entry` ("what triggers this in the running product").
 - **Selective retrieval** — the spec is never loaded whole; an anchored index points each task at
   the exact line range it needs.
-- **Technology guidelines** — general clean-code rules plus 46 convention files — languages (Python, TypeScript, Go, Rust, Java,
+- **Technology guidelines** — general clean-code rules plus 48 convention files — languages (Python, TypeScript, Go, Rust, Java,
   Kotlin, Swift, C#, PHP, Ruby), frameworks (React, Next.js, Vue, Svelte, Angular, React Native,
   Flutter, FastAPI, Django, Spring, NestJS, Node, Deno, Hono, HTMX, Tailwind), data (SQL, PostgreSQL,
   MySQL, SQLite, MongoDB, Redis, GraphQL, REST API design), infrastructure (Docker, Kubernetes,
@@ -110,12 +110,45 @@ implementation itself is the bulk of the cost.
 | **State files** | The memory that survives compaction and restarts: plan, report, project context, spec index, decision / bugfix / review logs | `telesma/state/` in your project |
 | **Setup wizard** | First start and `--setup`: profile (minimal / recommended / full), stack detection → test commands, permission judge, check tier, integrations, visual artifacts, language | `templates/setup/` |
 | **State-file templates** | The shape of the plan, report, project context, spec index, questions, backlog, test scenarios — the contract between the model and the scripts | `templates/*.md` |
-| **Technology guidelines** | General clean-code rules plus 46 convention files, loaded per task by `(tech:)` tags | `templates/guidelines/` |
+| **Technology guidelines** | General clean-code rules plus 48 convention files, loaded per task by `(tech:)` tags | `templates/guidelines/` |
 | **Permission judge** | A Claude Code hook that answers permission prompts you would approve anyway — it only removes prompts, never adds blocks; its one refusal is the loop's contract (merge only on green, no release-tag push), which holds even in Claude Code's `auto` mode | `templates/hooks/` |
 | **Quality checks** | 11 modules run on git operations: secrets, weakenings, dependencies, dependency audit, weakened tests, hygiene, dead entry points, SAST, lint/types, attack-surface map, red-team markers | `templates/checks/` |
 | **Integrations** | GitHub pull-request workflow and the Specky requirements tracker, each an optional instruction module | `templates/integrations/` |
 | **Tools** | State-file repair, self-hosted quality telemetry, Specky release snapshots, judge evaluation | `tools/` |
 | **Benchmark** | A frozen project with a hidden HTTP judge, for comparing Telesma versions | `benchmark/` |
+
+## Not a programmer? Install with one line
+
+Telesma can take you from an idea to a program on your desktop: it interviews you, picks the
+technology, builds and tests the program, and hands it over as one file to double-click. The
+installer gets everything it needs (asking before each step), signs you in to Claude and puts a
+**Telesma** shortcut on your desktop — after that you never type a command.
+
+- **Windows 10/11** — open PowerShell (Start → type *PowerShell*; not as administrator) and paste:
+  ```powershell
+  irm https://raw.githubusercontent.com/mario12358/telesma/main/install.ps1 | iex
+  ```
+  It installs Git for Windows, Python and Claude Code with `winget`, and Telesma into `%USERPROFILE%\.telesma`.
+  The shortcut opens Telesma in a Git Bash window (its title bar says `MINGW64`); another Bash, such
+  as MSYS2, is not what Telesma is tested in.
+- **macOS** — open Terminal (Spotlight → type *Terminal*) and paste:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/mario12358/telesma/main/install.sh | bash
+  ```
+  It installs Apple's command line tools (git, Python) and Claude Code, and Telesma into `~/.telesma`.
+
+The shortcut opens a menu: **a new idea**, or one of your projects (kept in a `Telesma` folder in
+your home folder — not in Documents, which iCloud or OneDrive may sync and break). Running the
+installer again updates Telesma; a copy it cannot update is kept as `.telesma.old-<date>`.
+Tools a particular program needs (for example .NET for a Windows program) are offered when the
+project needs them, not up front.
+
+What it does not do: you need a Claude account with a paid plan (Pro or Max) — Telesma has no free
+path, and building a program uses a noticeable part of the plan's limits. No websites or phone apps
+yet (they need hosting, accounts and app stores). A program is built on the system it is for: a
+Windows program on Windows. Antivirus software sometimes flags a freshly built program that is
+not signed. And you still answer Claude Code's permission questions — Telesma words them plainly
+but does not remove them.
 
 ## Requirements
 
@@ -126,7 +159,9 @@ implementation itself is the bulk of the cost.
 | [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`) | `semgrep` — OWASP rule packs in the `sast` check                                |
 | `git`                                                                        | `pandoc` — converts `.docx` / `.pdf` / `.odt` / `.rtf` files in `telesma/spec/` |
 
-Telesma is cloned, not installed. Nothing is added to your project's dependencies.
+Telesma is cloned, not installed. Nothing is added to your project's dependencies. Every start checks
+the required column (and that Claude Code is signed in) and says what to install; `telesma.sh --doctor`
+runs the same check on its own (`--doctor <project>` also checks the programs its test commands call). On Windows Telesma runs in Git Bash, which Claude Code needs there too.
 
 ## Quick start
 
@@ -161,10 +196,21 @@ your-project/
 
 ### 3. Write the specification
 
+**No specification, just an idea?** Run `~/tools/telesma/telesma.sh --new /path/to/project`
+instead of steps 3 and 4: Telesma interviews you — six plain questions, one at a time — writes
+`telesma/spec/` itself (the idea in your words, numbered requirements with "when …, then …" checks,
+the user flows), picks the technology from who will use the program and where, reads it all back
+and runs the setup. It also switches Telesma to plain words for the rest of the project
+(`Experience: beginner`, see [Language and experience](#language-and-experience)). From there one
+run leads on by itself: after the settings it asks "go on?" and starts the clarification, after the
+plan it asks whether to start building. Stopped anywhere, `telesma.sh /path/to/project` continues
+with the right next step.
+
 - `telesma/spec/TECHNICAL_GUIDELINES.md` — fill in **only** the fields where you depart from the defaults
   in `telesma/guidelines/` (a mandated stack, hosting, integrations, compliance or SLA requirements).
-  An empty field means the default wins. Delete the `TELESMA_SPEC_TEMPLATE` marker from its first
-  line when you are done.
+  An empty field means the default wins, and the file left as it is means the defaults apply —
+  the start does not wait for it. Delete the `TELESMA_SPEC_TEMPLATE` marker from its first line
+  once you fill something in.
 - Any other files with business and functional requirements: goals, use cases, user stories,
   domain model, business rules, acceptance criteria, diagrams. Any format.
 - Optional: mockups, design tokens and reference components in `telesma/spec/ux_ui/`.
@@ -180,14 +226,16 @@ it, one module per question, ENTER accepting the recommended answer:
 
 | Step | What it decides | Recommended |
 |---|---|---|
+| Language and experience | Asked first, so the rest of the wizard talks in that language: the language Telesma talks and writes prose in; `developer` or `beginner` (plain words — a beginner then gets the short setup) | the system's language, `developer` |
 | Profile | `minimal` (the loop only), `recommended`, `full` | `recommended` |
-| Stack and tests | Detects the stack from manifests (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, …, also one level down in a monorepo) and proposes the test, lint and typecheck commands; a project with no code yet picks a stack from a list | detected |
+| Stack and tests | Detects the stack from manifests (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, …, also one level down in a monorepo) and proposes the test, lint and typecheck commands; a project with no code yet leaves it to the plan (`later`): the clarification picks the stack, and the first start after the plan proposes the commands and permission rules for it | detected / `later` |
 | Permission prompts | The permission judge: `rules` (no model — provable reads pass, everything else still asks you), `command` (a model decides the gray zone), `off` | `rules` |
 | Quality checks | `basic` (secrets, weakenings, weakened tests, hygiene — no network, no tools), `standard` (+ dependencies, vulnerability audit, SAST, lint/types, dead entry points), `security` (+ attack-surface map, red team), `none` | `basic` |
 | Integrations, visual artifacts, telemetry | Asked in the `full` profile (or when mockups are already in `spec/ux_ui/`) | off |
-| Language | The language Telesma talks and writes prose in | `en` |
 
-It ends with a summary and the next command. Change anything later with `telesma.sh --setup` (a
+It ends with a summary and asks whether to go on to the clarification right away; "no" prints
+the one command that continues (a plain start always picks the right next step: clarification,
+then the question whether to build). Change anything later with `telesma.sh --setup` (a
 menu with the state of every module) or by editing `telesma/config.md` — every key is commented
 there and documented in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Without a terminal (CI) the
 wizard applies the recommended profile silently.
@@ -329,24 +377,37 @@ Full reference: [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
   run them. A blocking finding stops the operation; a false positive is waived by a human only, in
   `telesma/state/CHECK_EXCEPTIONS.md`. With GitHub, the result is posted to the PR as the commit status
   `Telesma: checks (local)`. See [docs/CHECKS.md](docs/CHECKS.md).
-- **Telemetry** (`## Telemetry`, off by default). Optional quality events sent to a server _you_
-  host. Nothing leaves your machine unless you turn it on and set an endpoint. See
+- **Telemetry** (`## Telemetry`, off by default). Optional quality events about Telesma's own work,
+  sent to the shared Telesma hub after an explicit opt-in on your machine (the setup wizard asks,
+  default no; `--telemetry-forget` deletes your data) or to a server you host. See
   [docs/TELEMETRY.md](docs/TELEMETRY.md).
 - **Commit footer.** Every commit, PR and PR comment Telesma writes ends with exactly
   `🤖 Generated with Telesma` — no model name, tool name or session link.
 
-## Language
+## Language and experience
 
 `Language` in `## Project` (default `en`) sets the language Telesma uses to talk to you and to write
 prose into state files — report entries, decisions, problem descriptions, test scenarios. Any
 language code works (`en`, `pl`, `de`, …). Structural tokens — section headers, task keywords,
 tags, field labels, terminal markers such as `TELESMA BLOCKED` — always stay in English, because the
-scripts parse them.
+scripts parse them. The launcher's own lines on the way from the idea to the first build (the
+interview, the settings, telemetry, the clarification questions, the next step) come from a
+catalog in `templates/messages/` — Polish is there; a language without a catalog gets them in
+English while Claude itself still talks in yours.
+
+`Experience` (default `developer`) sets who Telesma is talking to. With `beginner` it uses plain
+words — "the list of steps" instead of `PLAN.md`, "a saved point in the history" instead of a
+commit — asks one question at a time with the answer it would choose, says what an action does
+before doing it instead of showing the command, and reports progress in one sentence. The
+clarification accepts Telesma's assumptions for you and names the first three. Nothing else
+changes: the same loop, the same permission prompts, the same files. `telesma.sh --new` sets it;
+`--setup` changes it.
 
 ## Documentation
 
 | Document                                             | Contents                                                                  |
 | ---------------------------------------------------- | ------------------------------------------------------------------------- |
+| [SHOWCASE.md](SHOWCASE.md)                           | Programs built with Telesma, and how to add yours                         |
 | [docs/WORKFLOW.md](docs/WORKFLOW.md)                 | Clarification, plan format and tags, modes, changes, releases, monitoring |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md)       | Every `telesma/config.md` section and key, launcher flags                 |
 | [docs/STATE_FILES.md](docs/STATE_FILES.md)           | Files Telesma creates in your project, rotation, prompt diet, `--repair`  |

@@ -7,14 +7,61 @@ versions, models and projects, so that a change to Telesma can be judged by data
 impression.
 
 **It is optional and off by default.** With `Send: no` (the template default) nothing leaves your
-machine. There is no default server: events go only to a server that you or your team run yourselves.
-Telesma contains only the client; the server (**Telesma hub**, a small SQLite-backed service with
-read-only MCP tools for a retrospective session) is not published yet. The payload is documented
-below, so a receiver of your own is a few dozen lines: accept the POST, store the events by `id`.
-A shared, opt-in hub run by the project's author, with an explicit consent question in the setup
-wizard and self-service deletion, is planned for 1.1.
+machine. There are two destinations:
 
-## Enabling it
+- **The shared Telesma hub**, run by the project's author — events from many real projects are what
+  framework improvements are made from. Sending to it needs **your explicit opt-in on this machine**;
+  a setting in the repository cannot give it for you.
+- **A server you run yourself** — the payload is documented below, so a receiver of your own is a
+  few dozen lines: accept the POST, store the events by `id`.
+
+## The shared Telesma hub
+
+The setup wizard asks once (every profile, default **no**) and lists exactly what is sent:
+
+```
+Telemetry
+  Telesma can send events about the quality of ITS OWN work to the shared Telesma hub
+  (run by the project's author) so the framework can be improved from real projects.
+  Sent: task outcomes and timings, test results, problem/pitfall/decision entries from
+  telesma/state (titles and text, secrets removed), check findings, permission counters,
+  framework version, technology tags, a hash of the project's origin URL and of your
+  git e-mail. Never sent: your spec, code, telesma/changes/, commands, prompts.
+  Privacy and deletion: https://<hub>/privacy — delete any time: telesma.sh --telemetry-forget
+Send telemetry? [y/N/own server]
+```
+
+A `y` asks one more thing — **scope**: `full` (titles and text of Telesma's own entries, after the
+secret scrub) or `metrics` (numbers, types and dates only). Then the client registers a token of
+this machine's own with the hub (`POST /register`), writes it to `~/.config/telesma/hub` (mode
+0600, outside every repository) and sets `Send: yes`, `Endpoint: shared` in `telesma/config.md`.
+
+**The opt-in is per person and machine, not per repository.** `telesma/config.md` is committed: if
+one person's `Send: yes` were enough, everyone who clones the repo would start sending without being
+asked. So:
+
+- `Send: yes` + `Endpoint: shared` in the repo means only "this project may be reported". Without
+  `~/.config/telesma/hub` the client makes **no request at all**.
+- Someone who clones such a project is asked once, at the first start on their machine (without a
+  terminal: not asked, nothing sent, one line in the startup output). A "no" is remembered.
+- `Send: no` switches the project off for everyone; `Scope: metrics` narrows it to numbers for
+  everyone. A project can narrow what a person agreed to, never widen it.
+- To the shared hub the sender's **name is not sent** (only the e-mail hash), and an empty
+  `Project label` is the **project hash**, not the directory name — directory names often name a client.
+
+### Deleting your data
+
+```bash
+telesma.sh --telemetry-forget
+```
+
+calls `DELETE /mine` on the hub, which immediately deletes every event sent with this machine's token
+and the token itself; then it removes `~/.config/telesma/hub` and the local record of what was sent.
+Turning telemetry off in one project (`--setup` → Telemetry → no) does not withdraw the opt-in for
+your other projects — `--telemetry-forget` does. The hub deletes events older than its retention
+period (see `/privacy`) on its own.
+
+## Your own server
 
 ```markdown
 ## Telemetry
@@ -25,12 +72,16 @@ wizard and self-service deletion, is planned for 1.1.
 - **Project label**: my-project
 ```
 
+Here the key on each machine is that machine's opt-in: without it nothing is sent. The wizard's
+`own server` answer sets `Send` and `Endpoint`.
+
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `Send` | `no` | `yes` = send to the endpoint at startup |
-| `Endpoint` | `none` | address of your telemetry server; `none` or empty = sending stays silent |
-| `API key` | `env:TELESMA_HUB_TOKEN` | `env:NAME`, `file:<path outside the repo>` or `cmd:<command>` (stdout). Never write the key itself here — `config.md` is committed |
-| `Project label` | empty | a readable project name on the server; empty = the project directory name |
+| `Send` | `no` | `yes` = this project may be reported |
+| `Endpoint` | `none` | `shared` = the shared hub; `https://…` = your server; `none` or empty = sending stays silent |
+| `API key` | `env:TELESMA_HUB_TOKEN` | own server only: `env:NAME`, `file:<path outside the repo>`, `cmd:<command>` (stdout) or `auto` (the token from `~/.config/telesma/hub`). Never write the key itself here — `config.md` is committed |
+| `Scope` | `full` | shared hub only: `metrics` = no titles, text or entry openers, for everyone on this project |
+| `Project label` | empty | a readable project name on the server; empty = the directory name (own server) or the project hash (shared hub) |
 
 At every start `telesma.sh` runs the collector **in the background** and never waits for it: Telesma's
 start must not depend on someone else's server. Collection is pure file reads, zero tokens, a fraction
@@ -135,8 +186,9 @@ not store (an unknown `type`, for example). Any other status or a network error 
 - **Project id** = a hash of the `origin` URL, so two people on the same repository produce the same
   ids. `Project label` adds a readable name.
 - **Sender** = a hash of `git config user.email` as seen from the project (the same on every machine you
-  use; the address itself never leaves) plus `user.name`. Without git it falls back to OS user +
-  hostname. It is attribution, not authentication — only the key is verified.
+  use; the address itself never leaves) plus `user.name` — the name only to your own server, never
+  to the shared hub. Without git it falls back to OS user + hostname. It is attribution, not
+  authentication — only the key is verified.
 - **Event id** is a natural key (project + type + entry opener), not a content hash: when rotation moves
   an entry to the archive, or Claude appends a lesson to it, it is still the same event and the server
   overwrites it. Event ids deliberately do not include the sender, so two people reading the same
@@ -146,8 +198,12 @@ not store (an unknown `type`, for example). Any other status or a network error 
 
 ## Privacy guarantees, in short
 
-- Off by default; no built-in endpoint, no built-in key.
-- Sending goes only to a server you configure, and only with `Send: yes`.
+- Off by default; no built-in key.
+- The shared hub gets nothing without an opt-in file on this machine, which only the wizard (or
+  the one-time question at startup) writes — a committed `Send: yes` cannot switch anyone on.
+- Your own server gets nothing without a key on this machine.
 - The collector is read-only towards the project, `.git` included.
-- `--json` shows byte for byte what would be sent.
-- Turning it off is one word: `Send: no`.
+- `--json` shows byte for byte what would be sent (before the `metrics` cut and name removal for
+  the shared hub).
+- Turning it off for a project is one word: `Send: no`. Withdrawing and deleting everything:
+  `telesma.sh --telemetry-forget`.

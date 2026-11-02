@@ -16,6 +16,11 @@ server nothing is marked as sent, and the next run delivers everything.
 INVARIANT 4 — the collector only reads: the project after a run is byte-for-byte the same
 (`.git` included — the second source reads commit history).
 
+INVARIANT 5 — the shared hub needs a per-machine opt-in. `Send: yes` + `Endpoint: shared` without
+~/.config/telesma/hub makes zero HTTP requests; with it, the batch carries no sender name and no
+directory name; `Scope: metrics` carries no title, text or entry opener; `--forget` deletes on the
+hub and removes the opt-in.
+
 Plus the sources beyond state files: git (the commit subject and the session transcript carry
 canaries too — only numbers come out of them), the `Kind` field and the framework version.
 """
@@ -141,6 +146,34 @@ class Hub(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class SharedHub(http.server.BaseHTTPRequestHandler):
+    """The shared hub's three endpoints the client uses: /register, /ingest, DELETE /mine."""
+    requests, received, sender, token = [], [], None, "th_" + "c" * 48
+
+    def reply(self, code, body=b"{}"):
+        self.send_response(code)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        SharedHub.requests.append(("POST", self.path, self.headers.get("Authorization", "")))
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/register":
+            return self.reply(200, json.dumps({"token": SharedHub.token}).encode())
+        if self.headers.get("Authorization") != f"Bearer {SharedHub.token}":
+            return self.reply(401)
+        SharedHub.received += json.loads(body)["events"]
+        SharedHub.sender = json.loads(body).get("sender")
+        self.reply(200)
+
+    def do_DELETE(self):
+        SharedHub.requests.append(("DELETE", self.path, self.headers.get("Authorization", "")))
+        self.reply(200, b'{"deleted_events": 7}')
+
+    def log_message(self, *a):
+        pass
+
+
 TRANSCRIPT = [
     {"type": "user", "timestamp": "2026-02-02T10:00:00Z",
      "message": {"role": "user", "content": "CANARY_TRANSCRIPT start\n\nMODE: autonomous"}},
@@ -170,10 +203,15 @@ def commit(project, date, subject, *files):
     gitc(project, date, "commit", "-q", "-m", subject)
 
 
+SHARED = {}
+
+
 def run(project, home, *flags):
-    env = dict(os.environ, HOME=str(home), TELESMA_TEST_HUB_KEY="secret")
+    env = dict(os.environ, HOME=str(home), TELESMA_TEST_HUB_KEY="secret", **SHARED)
     env.pop("CLAUDE_CONFIG_DIR", None)
-    return subprocess.run([sys.executable, str(TOOL), str(project), *flags],
+    env.pop("XDG_CONFIG_HOME", None)
+    args = [str(project), *flags] if project else list(flags)
+    return subprocess.run([sys.executable, str(TOOL), *args],
                           capture_output=True, text=True, env=env)
 
 
@@ -195,6 +233,9 @@ def main():
 
     srv = http.server.HTTPServer(("127.0.0.1", 0), Hub)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    shared = http.server.HTTPServer(("127.0.0.1", 0), SharedHub)
+    threading.Thread(target=shared.serve_forever, daemon=True).start()
+    SHARED["TELESMA_SHARED_HUB"] = f"http://127.0.0.1:{shared.server_port}"
 
     with tempfile.TemporaryDirectory() as tmp:
         project, home = Path(tmp) / "project", Path(tmp) / "home"
@@ -381,6 +422,45 @@ def main():
         run(project, home, "--send")
         check(len(Hub.received) == len(ev2), "`Send: no` → nothing goes out")
 
+        print("5. the shared hub needs a per-machine opt-in")
+        consent = home / ".config/telesma/hub"
+        cfg.write_text(cfg.read_text().replace("Send**: no", "Send**: yes")
+                       .replace(f"Endpoint**: http://127.0.0.1:{srv.server_port}", "Endpoint**: shared"))
+        r = run(project, home, "--send")
+        check(r.returncode == 1 and not SharedHub.requests,
+              "`Send: yes` + `Endpoint: shared` without the opt-in file → zero HTTP requests")
+        r = run(None, home, "--register", "--scope", "full")
+        check(r.returncode == 0 and consent.is_file() and SharedHub.token in consent.read_text()
+              and (consent.stat().st_mode & 0o777) == 0o600, "--register → opt-in file 0600 with the token")
+        r = run(project, home, "--send")
+        sh = SharedHub.received
+        check(r.returncode == 0 and len(sh) == len(ev2) + 1, f"opted in → events arrive ({len(sh)})")
+        payload = json.dumps(sh, ensure_ascii=False) + json.dumps(SharedHub.sender)
+        check(SharedHub.sender and "name" not in SharedHub.sender, "shared hub: no sender name in the batch")
+        check(all(e["label"] == e["project"] for e in sh) and '"project"' not in
+              json.dumps([e["label"] for e in sh]), "shared hub: empty label = project hash, not the directory")
+        check(all(k not in payload for k in CANARIES) and SECRET not in payload,
+              "shared hub: canaries did not leak")
+        check(any(e["text"] for e in sh), "scope full: entry text goes out")
+        SharedHub.received = []
+        (home / ".cache/telesma").joinpath(
+            next(f.name for f in (home / ".cache/telesma").glob("telemetry-*-shared.json"))).unlink()
+        cfg.write_text(cfg.read_text().replace("- **Project label**:", "- **Scope**: metrics\n- **Project label**:"))
+        run(project, home, "--send")
+        check(SharedHub.received and not any(e["title"] or e["text"] or "key" in e
+                                             for e in SharedHub.received),
+              f"`Scope: metrics` → no title, text or key ({len(SharedHub.received)} events)")
+        own = list((home / ".cache/telesma").glob("telemetry-*.json"))
+        r = run(None, home, "--forget")
+        check(r.returncode == 0 and ("DELETE", "/mine", f"Bearer {SharedHub.token}") in SharedHub.requests
+              and not consent.exists(), "--forget → DELETE /mine with the token, opt-in file removed")
+        left = {f.name for f in (home / ".cache/telesma").glob("telemetry-*.json")}
+        check(not any(n.endswith("-shared.json") for n in left) and len(left) == len(own) - 1,
+              "--forget clears the shared-hub send record, keeps the own-server one")
+        n = len(SharedHub.requests)
+        run(project, home, "--send")
+        check(len(SharedHub.requests) == n, "after --forget nothing goes out")
+
         print("4. the collector only reads")
         for n in ("telesma/state/REPORT.md", "telesma/state/REPORT_ARCHIVE.md", "telesma/config.md",
                   "telesma/state/BUGFIXES.md"):
@@ -392,6 +472,7 @@ def main():
               "no new files in the project")
 
     srv.shutdown()
+    shared.shutdown()
     print("OK" if not failures else f"FAILURES: {len(failures)}")
     sys.exit(1 if failures else 0)
 

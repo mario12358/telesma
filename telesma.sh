@@ -6,6 +6,34 @@
 set -e
 # Python helpers run from the project (telesma/checks/, hooks) must not leave __pycache__ there.
 export PYTHONDONTWRITEBYTECODE=1
+# Windows writes Python's output and files in the console code page (cp1250, cp437…), which has
+# no → or —: a helper that prints one dies halfway (configure.py did, after `set Language`).
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+
+# Windows (Git Bash). Started from PowerShell or Explorer, a .sh opens its own Git Bash window,
+# which closes the moment the script ends — the last lines (an error, the next command) vanish
+# with it: such a run waits for Enter at the end (TELESMA_OWN_WINDOW, set once and inherited by
+# the runs this script execs). A path with backslashes (D:\AI\telesma\telesma.sh, .\test-win)
+# is turned into a Git Bash path, so the commands Telesma prints can be pasted back.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if [[ -z "${TELESMA_WINDOW_CHECKED:-}" ]]; then
+            export TELESMA_WINDOW_CHECKED=1
+            [[ "${SHLVL:-1}" -le 1 ]] && export TELESMA_OWN_WINDOW=1
+        fi
+        if [[ "$0" == *\\* ]] && command -v cygpath > /dev/null 2>&1; then
+            exec bash "$(cygpath -u "$0")" "$@"
+        fi
+        ;;
+esac
+
+# macOS: kqueue cannot watch a terminal opened by the name /dev/tty, and Claude Code (Bun) dies on
+# such a stdin ("EINVAL: invalid argument, kqueue") — handed on by anything that started Telesma
+# with `< /dev/tty`, like the piped installer. The terminal's own device (/dev/ttys003) works.
+if [[ "$(uname -s 2>/dev/null)" == Darwin && -t 0 ]]; then
+    TELESMA_TTY="/dev/$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')"
+    [[ -c "$TELESMA_TTY" ]] && exec < "$TELESMA_TTY"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR=""
@@ -51,13 +79,41 @@ while [[ $# -gt 0 ]]; do
             SYNC_SPECKY=true
             shift
             ;;
+        --new)
+            # An idea, no specification: an interview session writes telesma/spec/ (INTERVIEW.md),
+            # then the first-start wizard runs. Sets Experience: beginner.
+            NEW_PROJECT=true
+            shift
+            ;;
+        --home)
+            # The desktop shortcut's start menu: a new idea or one of the projects in a folder
+            # (the positional argument; default ~/Telesma) — templates/setup/home.sh.
+            HOME_MENU=true
+            shift
+            ;;
+        --doctor)
+            # Check what Telesma needs on this machine (git, Python, Claude Code and its sign-in), then exit.
+            DOCTOR=true
+            shift
+            ;;
+        --telemetry-forget)
+            # Machine-wide, needs no project: delete what this machine sent to the shared hub and
+            # withdraw the opt-in (docs/TELEMETRY.md → "Deleting your data").
+            exec python3 "$SCRIPT_DIR/tools/telesma-telemetry.py" --forget
+            ;;
         -h|--help)
             cat <<EOF
 Usage: $0 [options] [project_dir]
 
 Options:
   -i, --interactive       Start Claude in interactive mode (open chat instead of a pipe)
-      --repair            Repair the state files and exit (without starting Claude).
+      --new               Start from an idea, without a specification: Telesma interviews
+                          you (six plain questions, one at a time), writes the specification
+                          into telesma/spec/ itself, picks the technology from your answers
+                          and runs the setup. Sets Experience: beginner in telesma/config.md —
+                          Telesma then talks in plain words for the rest of the project.
+                          Needs a terminal. Interrupted → run again, it continues.
+      --repair           Repair the state files and exit (without starting Claude).
                           Restores entries that the rotation of versions before 6 cut
                           in half from git history, moves realization notes out of
                           PLAN.md into the archive and breaks overly long task lines.
@@ -75,6 +131,14 @@ Options:
       --sync-specky       Sync with the Specky tracker (Tracker: specky): a short
                           Claude session that fetches the changes since the last cursor
                           and writes them as files into telesma/changes/. Does not run the loop.
+      --home [folder]     The start menu of the desktop shortcut: a new idea, or one of the
+                          projects in the folder (default ~/Telesma).
+      --doctor            Check what Telesma needs on this machine — git, Python 3.9+ as python3,
+                          Claude Code and its sign-in — and say what to install. Then exits.
+                          With a project: also the programs its ## Tests commands call.
+                          The same check runs silently on every start.
+      --telemetry-forget  Delete everything this machine sent to the shared Telesma hub and
+                          withdraw the opt-in on this machine (all projects). Then exits.
   -m, --mode <1|2|3|4>    Choose the working mode (skips the console menu):
                             1 = work through the tasks in PLAN.md (autonomous loop)
                             2 = bugfix mode (chat — hand over a bug to fix)
@@ -95,8 +159,23 @@ EOF
     esac
 done
 
+# --home: the positional argument is the projects folder, not a project
+if [[ "${HOME_MENU:-false}" == "true" ]]; then
+    HOME_ROOT="${PROJECT_DIR:-$HOME/Telesma}"
+    [[ "$HOME_ROOT" == *\\* ]] && command -v cygpath > /dev/null 2>&1 && HOME_ROOT=$(cygpath -u "$HOME_ROOT")
+fi
+
 # Default project dir (only AFTER parsing flags — otherwise a flag like -i ends up in PROJECT_DIR)
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+[[ "$PROJECT_DIR" == *\\* ]] && command -v cygpath > /dev/null 2>&1 && PROJECT_DIR=$(cygpath -u "$PROJECT_DIR")
+# Absolute from here on: the clarification cd's into the project and then reads
+# $PROJECT_DIR/telesma/state/QUESTIONS.md — from `./test-win` that is test-win/test-win/…, so the
+# questions "were not written", the answers were skipped and the plan prompt died on a missing file.
+case "$PROJECT_DIR" in
+    /*) ;;
+    *) PROJECT_DIR="$PWD/${PROJECT_DIR#./}" ;;
+esac
+PROJECT_DIR="${PROJECT_DIR%/}"
 
 # Validate the -m flag
 if [[ -n "$MODE" ]] && [[ "$MODE" != "1" ]] && [[ "$MODE" != "2" ]] && [[ "$MODE" != "3" ]] && [[ "$MODE" != "4" ]]; then
@@ -111,14 +190,157 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Python on Windows ends every printed line with \r\n, and Bash keeps the \r: a captured
+# `tests=set` became `set\r` and the beginner wizard asked about the stack after all. Every
+# python3 the launcher (and the wizard it sources) runs goes through this; exit code kept.
+# Windows only (TELESMA_STRIP_CR=1 forces it, for the tests), and a pipe, not `> >(…)`: the
+# exported function reaches every `sh -c` of the session (hooks), where bash in POSIX mode has no
+# process substitution and wrote Python's output into a file named ">(tr -d \r)" instead.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) TELESMA_STRIP_CR=1 ;;
+esac
+if [[ -n "${TELESMA_STRIP_CR:-}" ]]; then
+    python3() {
+        command python3 "$@" | tr -d '\r'
+        return "${PIPESTATUS[0]}"
+    }
+    export -f python3
+fi
+
+# The last line a clarification session must write. Such a session does not end by itself (it is
+# closed with /exit), and the launcher's hint about that has scrolled away above the long
+# prompt: a model left to itself says "the program will now show the questions" and the person waits.
+close_line() {
+    printf '%s' "End your final message with one line on its own, in the user's Language: to go on, type /exit — it closes only this conversation, and $1. Never say that something happens by itself."
+}
+
+# run_claude pipe|arg <prompt> [claude options…] — start a Claude session with Telesma's prompt.
+# macOS/Linux: as the call site has always done it — `pipe` gives the prompt on stdin (Claude then
+# reads the keyboard from the terminal), `arg` as the first message. Windows: Claude Code cannot
+# read the keyboard when stdin is piped, and a prompt of 35–100k characters does not fit a Windows
+# command line (32k). A prompt that fits goes as the first message; a longer one into a file
+# appended to the system prompt, with a short first message that starts the work — except with
+# --continue, where Claude Code ignores --append-system-prompt-file (checked live): there the
+# first message asks to read the file. stdin stays the terminal. TELESMA_PROMPT_VIA_FILE=1 forces
+# the Windows route elsewhere (tests).
+run_claude() {
+    local how="$1" prompt="$2" f arg a rc=0 continued=false
+    shift 2
+    if [[ "$PREFLIGHT_OS" == windows || -n "${TELESMA_PROMPT_VIA_FILE:-}" ]]; then
+        if (( ${#prompt} < 28000 )); then
+            claude "$@" "$prompt"
+            return
+        fi
+        for a in "$@"; do [[ "$a" == --continue ]] && continued=true; done
+        f=$(mktemp "${TMPDIR:-/tmp}/telesma-prompt.XXXXXX")
+        printf '%s' "$prompt" > "$f"
+        arg="$f"
+        if [[ "$PREFLIGHT_OS" == windows ]] && command -v cygpath > /dev/null 2>&1; then
+            arg=$(cygpath -w "$f")      # claude.exe is a Windows program: C:\…, not /tmp/…
+        fi
+        if [[ "$continued" == true ]]; then
+            claude "$@" "Read the file $arg in full with the Read tool (in parts if it is long) — it is the Telesma prompt for this step — and follow it exactly." || rc=$?
+        else
+            claude "$@" --append-system-prompt-file "$arg" \
+                "Begin now. Your instructions for this session are the Telesma prompt appended to your system prompt — follow them exactly." || rc=$?
+        fi
+        rm -f "$f"
+        return $rc
+    fi
+    if [[ "$how" == pipe ]]; then
+        claude "$@" <<< "$prompt"
+    else
+        claude "$@" "$prompt"
+    fi
+}
+
 # Edit a file in place — portable (BSD sed needs `-i ''`, GNU sed `-i`)
 sed_inplace() {
     local expr="$1" file="$2"
     sed "$expr" "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
 
-echo -e "${GREEN}=== Telesma - Autonomous Development Loop ===${NC}"
-echo ""
+# Messages in the user's language: msg KEY 'English text' [args] (templates/messages/msg.sh)
+# shellcheck source=templates/messages/msg.sh
+source "$SCRIPT_DIR/templates/messages/msg.sh"
+if [[ -n "${TELESMA_OWN_WINDOW:-}" ]]; then
+    trap 'echo ""; read -r -p "$(msg window.close "Press Enter to close this window.") " _ < /dev/tty || true' EXIT
+fi
+
+if [[ "${HOME_MENU:-false}" != "true" && -z "${TELESMA_FROM_HOME:-}" ]]; then
+    echo -e "${GREEN}=== Telesma - Autonomous Development Loop ===${NC}"
+    echo ""
+fi
+
+# What this machine needs (templates/setup/preflight.sh) — before anything is created. No project
+# config yet, so the system language decides the language of these lines.
+# shellcheck source=templates/setup/preflight.sh
+source "$SCRIPT_DIR/templates/setup/preflight.sh"
+msg_set_language "$(msg_system_language)"
+if [[ "${DOCTOR:-false}" == "true" ]]; then
+    DOCTOR_RC=0
+    preflight verbose || DOCTOR_RC=1
+    # Run inside a project (or with its path): also the tools its own commands need
+    if [[ -f "$PROJECT_DIR/telesma/config.md" ]]; then
+        preflight_stack "$PROJECT_DIR/telesma/config.md" verbose || DOCTOR_RC=1
+    fi
+    exit "$DOCTOR_RC"
+fi
+preflight || exit 1
+if [[ "${HOME_MENU:-false}" == "true" ]]; then
+    # shellcheck source=templates/setup/home.sh
+    source "$SCRIPT_DIR/templates/setup/home.sh"
+    home_menu "$HOME_ROOT"            # execs the launcher with the chosen project, or exits
+fi
+
+# A folder that is not a project of its own: with no path the project is the current folder, and
+# a stale desktop shortcut on Windows started a project in Desktop itself (telesma/, .claude/ and
+# a git repository among the person's files). Home, Desktop, Documents, Downloads, the projects
+# folder of the start menu are never a new project; one that already is a project goes on.
+not_a_project_folder() {
+    local d h p
+    d=$(cd "$1" 2>/dev/null && pwd -P) || d="$1"
+    d=$(printf '%s' "${d%/}" | tr '[:upper:]' '[:lower:]')
+    [[ -z "$d" ]] && return 0
+    for p in "$HOME" "$HOME/Desktop" "$HOME/Documents" "$HOME/Downloads" "$HOME/Telesma" \
+             "$HOME"/OneDrive*/Desktop "$HOME"/OneDrive*/Documents "${USERPROFILE:-}"; do
+        [[ -n "$p" ]] || continue
+        [[ "$p" == *\\* ]] && command -v cygpath > /dev/null 2>&1 && p=$(cygpath -u "$p")
+        h=$(cd "$p" 2>/dev/null && pwd -P) || h="$p"
+        h=$(printf '%s' "${h%/}" | tr '[:upper:]' '[:lower:]')
+        [[ -n "$h" && "$d" == "$h" ]] && return 0
+    done
+    return 1
+}
+# (telesma/ alone is no proof: on macOS and Windows names ignore case, so ~/Telesma — the projects
+# folder — is ~/telesma too)
+if [[ ! -f "$PROJECT_DIR/telesma/config.md" && ! -f "$PROJECT_DIR/telesma/state/.telesma-version" ]] \
+        && not_a_project_folder "$PROJECT_DIR"; then
+    echo -e "${RED}$(msg dir.unsafe 'Not here: %s is not a folder for one program — Telesma would put its files among yours.' "$PROJECT_DIR")${NC}"
+    echo "$(msg dir.unsafe.how 'Give a folder of its own, for example: %s' "$0 --new \"$HOME/Telesma/my-program\"")"
+    echo "$(msg dir.unsafe.home 'Or open the start menu: %s' "$0 --home")"
+    echo "$(msg dir.unsafe.none 'Nothing has been created.')"
+    exit 1
+fi
+
+# Where the hook commands find the scripts. Claude Code sets $CLAUDE_PROJECT_DIR for a hook,
+# but on Windows it runs hook commands in PowerShell, where `$CLAUDE_PROJECT_DIR` is an empty
+# PowerShell variable (the environment one is $env:…): the path became D:\telesma\checks\…, and
+# python's "can't open file" exits 2 — which blocks every Write. There the launcher writes the
+# project's absolute path (D:/AI/x — forward slashes work in PowerShell, cmd and Bash alike);
+# settings.local.json is local and re-synced on every start, so a moved project heals itself.
+TELESMA_HOOK_ROOT='$CLAUDE_PROJECT_DIR'
+if [[ "$PREFLIGHT_OS" == windows ]] && command -v cygpath > /dev/null 2>&1; then
+    TELESMA_HOOK_ROOT=$(cygpath -m -a "$PROJECT_DIR")
+fi
+export TELESMA_HOOK_ROOT
+
+# --new is a conversation; without a terminal there is nobody to interview. Checked before
+# anything is created in the project.
+if [[ "${NEW_PROJECT:-false}" == "true" ]] && ! { true < /dev/tty; } 2>/dev/null; then
+    echo -e "${RED}--new needs a terminal: Telesma interviews you about the idea.${NC}"
+    exit 1
+fi
 
 # =============================================================================
 # Is Telesma itself up to date — is this clone behind its remote branch
@@ -171,16 +393,10 @@ check_telesma_up_to_date() {
 }
 check_telesma_up_to_date
 
-# Check that claude is installed
-if ! command -v claude &> /dev/null; then
-    echo -e "${RED}Error: the Claude CLI is not installed${NC}"
-    echo "Install it: npm install -g @anthropic-ai/claude-code"
-    exit 1
-fi
-
 # Create the project directory if it does not exist
 if [[ ! -d "$PROJECT_DIR" ]]; then
-    echo -e "${YELLOW}Project directory does not exist - creating: $PROJECT_DIR${NC}"
+    # --new (and the start menu's new idea) asked for a new folder: nothing to warn about
+    [[ "${NEW_PROJECT:-false}" == "true" ]] || echo -e "${YELLOW}Project directory does not exist - creating: $PROJECT_DIR${NC}"
     mkdir -p "$PROJECT_DIR"
 fi
 
@@ -193,6 +409,7 @@ fi
 # docs/RUNBOOK.md + docs/test-scenarios/ (documentation of the project itself).
 TELESMA_DIR="$PROJECT_DIR/telesma"
 STATE_DIR="$TELESMA_DIR/state"
+msg_load_language "$TELESMA_DIR/config.md"
 
 # =============================================================================
 # Format gate — the project's state format vs this Telesma (telesma/state/.telesma-version)
@@ -234,7 +451,7 @@ APP_FLOW_FILE="$SPEC_DIR/APP_FLOW.md"
 UX_LINKS_TEMPLATE_FILE="$SCRIPT_DIR/templates/UX_LINKS_TEMPLATE.md"
 UX_LINKS_FILE="$SPEC_UX_UI_DIR/LINKS.md"
 if [[ ! -d "$SPEC_DIR" ]]; then
-    echo -e "${YELLOW}Creating telesma/spec/${NC}"
+    [[ "${NEW_PROJECT:-false}" == "true" ]] || echo -e "${YELLOW}Creating telesma/spec/${NC}"
     mkdir -p "$SPEC_DIR"
 fi
 
@@ -249,9 +466,99 @@ fi
 # wizard copies their templates when that module is turned on (templates/setup/wizard.sh). A
 # first start shows one template to fill in, not three.
 
+# =============================================================================
+# --new: the interview (templates/instructions/INTERVIEW.md, section -2)
+# =============================================================================
+# For a person with an idea and no specification — usually someone who does not program. One
+# interactive Claude session asks six plain questions and writes telesma/spec/ (IDEA.md,
+# REQUIREMENTS.md, APP_FLOW.md, the filled technical template) and ## Tests in config.md for the
+# technology it picked from the answers. config.md is created here, before the session, so that
+# Language and Experience: beginner are in place for it; the first-start wizard runs afterwards
+# as on any first start. The session gets `acceptEdits`: it only writes files inside telesma/,
+# and a confirmation per file is a question a beginner cannot judge — commands still ask.
+# Done = IDEA.md + REQUIREMENTS.md exist and the technical template lost its marker; anything
+# less is "interrupted", and the next --new continues from the files already written.
+interview_complete() {
+    [[ -f "$SPEC_DIR/IDEA.md" && -f "$SPEC_DIR/REQUIREMENTS.md" ]] \
+        && ! head -1 "$SPEC_DIR/TECHNICAL_GUIDELINES.md" 2>/dev/null | grep -qF "TELESMA_SPEC_TEMPLATE"
+}
+
+run_interview() {
+    local cfg="$TELESMA_DIR/config.md" configure="$SCRIPT_DIR/templates/setup/configure.py"
+    local instr="$SCRIPT_DIR/templates/instructions" lang existing prompt
+    [[ -f "$SPEC_DIR/TECHNICAL_GUIDELINES.md" ]] || cp "$SPEC_TEMPLATE_FILE" "$SPEC_DIR/TECHNICAL_GUIDELINES.md"
+    echo -e "${GREEN}$(msg new.title '=== Telesma — a new project from an idea ===')${NC}"
+    if [[ ! -f "$cfg" ]]; then
+        # The system's language is the default (from LANG, before any project config)
+        read -r -p "$(msg new.lang 'Language Telesma should talk in (en, pl = polski, de, …)') [$(msg_system_language)]: " lang < /dev/tty || lang=""
+        cp "$SCRIPT_DIR/templates/config.md" "$cfg"
+        python3 "$configure" set "$cfg" Project Language "${lang:-$(msg_system_language)}" > /dev/null
+        python3 "$configure" set "$cfg" Project Experience beginner > /dev/null
+    fi
+    msg_load_language "$cfg"
+    lang=$(grep -m1 '^- \*\*Language\*\*:' "$cfg" | sed 's/^[^:]*:[[:space:]]*//'); lang=${lang:-en}
+    existing=$(ls -A "$SPEC_DIR" 2>/dev/null | grep -v '^ux_ui$' | sed 's|^|- telesma/spec/|')
+    prompt="$(cat "$instr/INTERVIEW.md")
+
+---
+
+LANGUAGE: ${lang} — talk to the person in this language; keep every heading and label of the files you write exactly as the instructions show them.
+
+$(cat "$instr/BEGINNER.md")
+
+---
+
+# Files already in telesma/spec/:
+
+${existing:-none}
+
+Start the interview now (section -2): greet in one sentence, say what the two of you are going to do, and ask the first question."
+    echo ""
+    echo "$(msg new.intro1 'Telesma will now talk with you about your idea and write it down — one question at a time,')"
+    echo "$(msg new.intro2 'about ten minutes. Nothing gets built yet.')"
+    echo "$(msg new.trust 'Claude first asks whether you trust this folder — choose «Yes»: it is the folder of your project.')"
+    echo -e "$(msg new.intro3 'When it prints %s, type %s and press Enter — Telesma then leads you on from here.' "${CYAN}TELESMA: INTERVIEW DONE${NC}" "${CYAN}/exit${NC}")"
+    echo ""
+    (cd "$PROJECT_DIR" && run_claude arg "$prompt" --permission-mode acceptEdits) || true
+    if interview_complete; then
+        echo ""
+        echo -e "${GREEN}$(msg new.done 'The description of your idea is written down.')${NC} $(msg new.settings 'A few settings now.')"
+        return 0
+    fi
+    echo ""
+    echo -e "${YELLOW}$(msg new.unfinished 'The interview did not finish — the description is not complete yet.')${NC}"
+    echo -e "$(msg new.resume 'Continue where you stopped: %s' "${GREEN}$0 --new $PROJECT_DIR${NC}")"
+    exit 0
+}
+
+# A beginner is led from one step to the next instead of being handed the next command: one
+# question, ENTER = yes, and the next step starts as a fresh run of this script (exec — the state
+# it needs is in the files). No → the one command that continues later: a plain start always
+# picks the next step by itself (clarification while Clarified: no, the loop after it).
+continue_or_stop() {    # continue_or_stop <question> [arguments of the next run…]
+    local question="$1" answer
+    shift
+    echo ""
+    read -r -p "${question} [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
+    case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+        ""|y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
+            exec bash "$SCRIPT_DIR/telesma.sh" "$PROJECT_DIR" "$@" ;;
+    esac
+    echo -e "$(msg later 'When you want to go on, type: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
+    exit 0
+}
+
 # Empty telesma/spec/ → copy the technical guidelines template and explain what goes where
 SPEC_CONTENT_COUNT=$(ls -A "$SPEC_DIR" 2>/dev/null | grep -v '^APP_FLOW\.md$' | grep -v '^ux_ui$' | wc -l | tr -d ' ')
-if [[ "$SPEC_CONTENT_COUNT" -eq 0 ]]; then
+if [[ "${NEW_PROJECT:-false}" == "true" ]] && grep -qi '^- \*\*Clarified\*\*:.*yes' "$TELESMA_DIR/config.md" 2>/dev/null; then
+    echo -e "${RED}This project already has a specification and a plan — --new is for a project without one.${NC}"
+    echo -e "Change requests go into ${CYAN}telesma/changes/${NC}; start as usual: ${GREEN}$0 $PROJECT_DIR${NC}"
+    exit 1
+fi
+if [[ "${NEW_PROJECT:-false}" == "true" ]] && ! interview_complete; then
+    run_interview                 # exits itself when the interview did not finish
+    SETUP_WIZARD_AUTO=true        # config.md was created above; the first-start wizard still has to run
+elif [[ "$SPEC_CONTENT_COUNT" -eq 0 ]]; then
     if [[ -f "$SPEC_TEMPLATE_FILE" ]]; then
         cp "$SPEC_TEMPLATE_FILE" "$SPEC_DIR/TECHNICAL_GUIDELINES.md"
         echo -e "${GREEN}Created telesma/spec/ — this is where Telesma reads your project from.${NC}"
@@ -260,8 +567,11 @@ if [[ "$SPEC_CONTENT_COUNT" -eq 0 ]]; then
         echo -e "     model, acceptance criteria, diagrams — as separate files, in any format (.md, .docx, .pdf …)."
         echo -e "     UI mockups and design tokens, if you have them, go into ${CYAN}telesma/spec/ux_ui/${NC}."
         echo -e "  2. ${CYAN}telesma/spec/TECHNICAL_GUIDELINES.md${NC}: fill in ONLY where you depart from the defaults"
-        echo -e "     (an imposed stack, hosting, compliance). Empty field = default. Then delete its first line."
+        echo -e "     (an imposed stack, hosting, compliance). Left as it is, the defaults apply — nothing to delete."
         echo -e "  3. Run again: ${GREEN}$0 $PROJECT_DIR${NC} — a short wizard configures the project."
+        echo ""
+        echo -e "  No written specification yet, just an idea? ${GREEN}$0 --new $PROJECT_DIR${NC} — Telesma"
+        echo -e "  interviews you and writes it."
         exit 0
     else
         echo -e "${YELLOW}telesma/spec/ is empty — put the specification there and run again${NC}"
@@ -348,7 +658,7 @@ fi
 
 # Modular instructions — assembled per mode (clarification/1/2/3/4), so that the prompt does
 # not carry sections of modes Claude is not working in
-for _instr in CLARIFY.md CORE.md INTERACTIVE.md MODE_BUGFIX.md MODE_REVIEW.md MODE_ARTIFACTS.md; do
+for _instr in CLARIFY.md CORE.md INTERACTIVE.md MODE_BUGFIX.md MODE_REVIEW.md MODE_ARTIFACTS.md INTERVIEW.md BEGINNER.md; do
     if [[ ! -f "$INSTR_DIR/$_instr" ]]; then
         echo -e "${RED}Error: missing $INSTR_DIR/$_instr${NC}"
         exit 1
@@ -364,7 +674,11 @@ done
 # - Does NOT touch the ## Permissions section (synced separately below)
 # =============================================================================
 if command -v python3 &> /dev/null; then
-    python3 - "$SCRIPT_DIR/templates/config.md" "$CONFIG_FILE" <<'PYMERGE'
+    # A beginner did not write config.md and cannot act on a list of merged keys.
+    MERGE_QUIET=0
+    grep -qi '^- \*\*Experience\*\*:[[:space:]]*beginner' "$CONFIG_FILE" 2>/dev/null && MERGE_QUIET=1
+    TELESMA_MERGE_QUIET=$MERGE_QUIET python3 - "$SCRIPT_DIR/templates/config.md" "$CONFIG_FILE" <<'PYMERGE'
+import os
 import re
 import sys
 from collections import OrderedDict, defaultdict
@@ -508,7 +822,12 @@ if added:
     with open(local_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(l_lines) + '\n')
 
-if added_sections or added or preserved or custom:
+# Reported only when the file changed (a new section or field) or carries a field the template
+# does not know (a typo, or a key of another version). Values the user set are kept silently:
+# a list of them on every start is noise, and right after the wizard it repeats its own answers.
+if os.environ.get('TELESMA_MERGE_QUIET') == '1':
+    pass
+elif added_sections or added or custom:
     print(f'{GREEN}Merge telesma/config.md ← templates/config.md:{NC}')
     if added_sections:
         print(f'  {CYAN}Added missing sections ({len(added_sections)}):{NC}')
@@ -518,16 +837,10 @@ if added_sections or added or preserved or custom:
         print(f'  {CYAN}Added missing fields ({len(added)}):{NC}')
         for s, l, _ in added:
             print(f'    + {s} -> {l}')
-    if preserved:
-        print(f'  {CYAN}Kept local values ({len(preserved)}):{NC}')
-        for s, l in preserved:
-            print(f'    = {s} -> {l}')
     if custom:
         print(f'  {YELLOW}User-defined fields ({len(custom)}):{NC}')
         for s, l in custom:
             print(f'    * {s} -> {l}')
-else:
-    print(f'{GREEN}Config merge: file up to date (no changes){NC}')
 PYMERGE
 fi
 
@@ -555,8 +868,8 @@ load_integrations() {
 load_integrations
 
 # Setup wizard: the first time config.md is created (profile → one question per module →
-# summary → next steps) and with --setup (a menu of modules on an existing project). Both end the
-# run: the user has just answered questions and gets the exact next command. Without a terminal
+# summary → next steps → "go on?") and with --setup (a menu of modules on an existing project). Both end the
+# run: a "no" at "go on?" prints the one command that continues. Without a terminal
 # the first start applies the "recommended" profile silently.
 if [[ "${SETUP_WIZARD_AUTO:-false}" == "true" || "${SETUP_WIZARD:-false}" == "true" ]]; then
     # shellcheck source=templates/setup/wizard.sh
@@ -565,6 +878,9 @@ if [[ "${SETUP_WIZARD_AUTO:-false}" == "true" || "${SETUP_WIZARD:-false}" == "tr
         setup_wizard_first_run
     else
         setup_wizard_menu
+    fi
+    if [[ "${WIZARD_NEXT:-}" == "clarify" ]]; then
+        continue_or_stop "$(msg go.clarify 'Go on now? Telesma reads the description, asks a few questions about the details and plans the work')"
     fi
     exit 0
 fi
@@ -582,6 +898,62 @@ fi
 PROJECT_LANGUAGE=$(config_field Project Language)
 PROJECT_LANGUAGE=${PROJECT_LANGUAGE:-en}
 LANGUAGE_LINE="LANGUAGE: ${PROJECT_LANGUAGE} — talk to the user and write the prose of the state files (PLAN.md task descriptions, REPORT.md, PROJECT_CONTEXT.md, DECISIONS.md, BUGFIXES.md, REVIEWS.md, BACKLOG.md, QUESTIONS.md, test scenarios) in this language, but keep every structural token (section names, task keywords, field labels, tags, status words and markers) exactly as they appear in the templates and instructions — the scripts parse them."
+
+# Who Telesma talks to (## Project → Experience). `beginner` appends the EXPERIENCE block
+# (templates/instructions/BEGINNER.md) wherever the LANGUAGE line goes: plain words, one question
+# at a time, effects instead of commands. It changes the prose only — the mechanics, the
+# permission prompts and the state files are the same. A developer pays no tokens for it.
+PROJECT_EXPERIENCE=$(config_field Project Experience | tr '[:upper:]' '[:lower:]')
+PROJECT_EXPERIENCE=${PROJECT_EXPERIENCE:-developer}
+EXPERIENCE_BLOCK=""
+if [[ "$PROJECT_EXPERIENCE" == "beginner" ]]; then
+    EXPERIENCE_BLOCK=$'\n\n'"$(cat "$INSTR_DIR/BEGINNER.md")"
+fi
+
+# =============================================================================
+# ## Tests left for the plan ("later" in the wizard: no code yet, so the clarification picks the
+# stack and writes it into PLAN.md's Stack line). Once the plan is there, the test commands and
+# the stack's permission rules come from that line through the wizard's own engine — asked once,
+# before the permissions are synced, so the first build session already runs with them.
+# =============================================================================
+tests_from_plan() {
+    grep -qi '^- \*\*Clarified\*\*:.*yes' "$CONFIG_FILE" 2>/dev/null || return 0
+    # Unset = the template's [placeholder] (from the template or the wizard's "later"/other) or empty
+    grep -Eq '^- \*\*Test command\*\*:[[:space:]]*(\[[^]]*\])?[[:space:]]*$' "$CONFIG_FILE" 2>/dev/null || return 0
+    [[ -f "$PLAN_FILE" ]] || return 0
+    local line l stack="" answer
+    line=$(grep -m1 '^- \*\*Stack\*\*:' "$PLAN_FILE" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
+    [[ -n "$line" && "$line" != *"[technologies]"* ]] || return 0
+    l=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')
+    # The first match wins: the backend's test tool when a web or mobile client is listed too.
+    if   [[ "$l" == *python* ]]; then stack=python
+    elif [[ "$l" == *flutter* || "$l" == *dart* ]]; then stack=flutter
+    elif [[ "$l" == *deno* ]]; then stack=deno
+    elif [[ "$l" == *rust* ]]; then stack=rust
+    elif [[ "$l" == *dotnet* || "$l" == *".net"* || "$l" == *"c#"* || "$l" == *csharp* ]]; then stack=dotnet
+    elif [[ "$l" == *swift* ]]; then stack=swift
+    elif [[ "$l" == *php* || "$l" == *laravel* ]]; then stack=php
+    elif [[ "$l" == *ruby* || "$l" == *rails* ]]; then stack=ruby
+    elif [[ "$l" =~ (^|[^a-z])(go|golang)([^a-z]|$) ]]; then stack=go
+    elif [[ "$l" =~ node|javascript|typescript|react|next\.js|nextjs|express|vue|svelte|angular|hono|bun ]]; then stack=node
+    elif [[ "$l" =~ kotlin|java|spring ]]; then stack=java
+    fi
+    echo ""
+    echo -e "$(msg tests.plan 'The plan names the stack: %s' "${CYAN}${line}${NC}")"
+    if [[ -z "$stack" ]]; then
+        echo -e "${YELLOW}$(msg tests.plan.unknown 'Telesma cannot tell the test tool from it — set ## Tests: %s (1)' "$0 --setup $PROJECT_DIR")${NC}"
+        return 0
+    fi
+    { true < /dev/tty; } 2>/dev/null || return 0
+    read -r -p "$(msg tests.plan.ask 'Set the test commands and the permission rules for %s from it? [%s]' "$stack" "$(msg yes.no 'Y/n')"): " answer < /dev/tty || answer=n
+    if [[ "$answer" =~ ^[nN] ]]; then
+        echo -e "  $(msg tests.plan.no 'Left as it is — set ## Tests: %s (1)' "$0 --setup $PROJECT_DIR")"
+        return 0
+    fi
+    python3 "$SCRIPT_DIR/templates/setup/configure.py" tests "$CONFIG_FILE" --stack "$stack" --project "$PROJECT_DIR" | sed 's/^/  /'
+    echo -e "  $(msg tests.plan.edit 'Different commands? %s (1).' "$0 --setup $PROJECT_DIR")"
+}
+tests_from_plan
 
 # =============================================================================
 # Permission sync: telesma/config.md ↔ .claude/settings.local.json
@@ -1174,7 +1546,7 @@ config_path, settings_path = sys.argv[1], sys.argv[2]
 
 MARKER = 'telesma-permission-judge'          # our command hooks are recognized by their path
 MARKER_PROMPT = '[telesma-judge]'            # prompt/agent hooks — by the marker in their text
-SCRIPT = 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/telesma-permission-judge.py"'
+SCRIPT = f'python3 "{os.environ.get("TELESMA_HOOK_ROOT", "$CLAUDE_PROJECT_DIR")}/.claude/hooks/telesma-permission-judge.py"'
 
 try:
     with open(config_path, encoding='utf-8') as f:
@@ -1565,7 +1937,7 @@ if enabled:
     # its own budget (570 s) and overshoots it by at most one check.
     groups.append({'matcher': 'Bash|Edit|Write|MultiEdit|NotebookEdit', 'hooks': [{
         'type': 'command',
-        'command': 'python3 "$CLAUDE_PROJECT_DIR/telesma/checks/telesma-checks.py" --pretooluse',
+        'command': f'python3 "{os.environ.get("TELESMA_HOOK_ROOT", "$CLAUDE_PROJECT_DIR")}/telesma/checks/telesma-checks.py" --pretooluse',
         'timeout': 600,
         'statusMessage': 'Telesma: quality checks...',
     }]})
@@ -1579,7 +1951,7 @@ post = without_ours('PostToolUse')
 if enabled:
     post.append({'matcher': 'Bash', 'hooks': [{
         'type': 'command',
-        'command': 'python3 "$CLAUDE_PROJECT_DIR/telesma/checks/telesma-checks.py" --posttooluse',
+        'command': f'python3 "{os.environ.get("TELESMA_HOOK_ROOT", "$CLAUDE_PROJECT_DIR")}/telesma/checks/telesma-checks.py" --posttooluse',
         'timeout': 60,
     }]})
 if post:
@@ -1887,27 +2259,32 @@ resolve_contradictions() {
     local unresolved=${#s_nums[@]}
     [[ $unresolved -eq 0 ]] && return 0
 
-    echo -e "\n${RED}=== Telesma - Contradictions in the documentation (${unresolved}) ===${NC}"
-    echo -e "${CYAN}They must be resolved before the questions. ENTER = accept the proposal | 'q' = stop${NC}\n"
+    if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+        echo -e "\n${RED}$(msg s.b.title '=== Telesma — %s things in the description contradict each other ===' "$unresolved")${NC}"
+        echo -e "${CYAN}$(msg s.b.how "Telesma needs your decision on each. ENTER accepts its proposal; 'q' stops, you can continue later.")${NC}\n"
+    else
+        echo -e "\n${RED}$(msg s.title '=== Telesma - Contradictions in the documentation (%s) ===' "$unresolved")${NC}"
+        echo -e "${CYAN}$(msg s.how "They must be resolved before the questions. ENTER = accept the proposal | 'q' = stop")${NC}\n"
+    fi
 
     for i in "${!s_nums[@]}"; do
         local sn="${s_nums[$i]}"
         local st="${s_texts[$i]}"
         local sp="${s_props[$i]}"
 
-        echo -e "${RED}--- Contradiction S${sn} ---${NC}"
+        echo -e "${RED}$(msg s.item '--- Contradiction S%s ---' "$sn")${NC}"
         echo -e "\n  ${st}\n"
-        echo -e "  ${YELLOW}Proposed resolution: ${sp}${NC}\n"
+        echo -e "  ${YELLOW}$(msg s.proposal 'Proposed resolution: %s' "$sp")${NC}\n"
 
         local answer
-        read -r -p "  Resolution: " answer < /dev/tty
+        read -r -p "  $(msg s.prompt 'Resolution'): " answer < /dev/tty
 
         if [[ "$answer" == "q" || "$answer" == "quit" || "$answer" == "stop" ]]; then
-            echo -e "\n${YELLOW}Stopped. Run again to continue.${NC}"
+            echo -e "\n${YELLOW}$(msg stopped 'Stopped. Run again to continue.')${NC}"
             return 1
         fi
 
-        [[ -z "$answer" ]] && answer="$sp"
+        [[ -z "$answer" ]] && answer="${sp:-(accepted)}"    # never empty: empty = never shown to the user
 
         awk -v snum="$sn" -v ans="$answer" '
             /^### S[0-9]+:/ {
@@ -1926,7 +2303,7 @@ resolve_contradictions() {
         echo ""
     done
 
-    echo -e "${GREEN}All contradictions resolved (${total}/${total})${NC}\n"
+    echo -e "${GREEN}$(msg s.done 'All contradictions resolved (%s/%s)' "$total" "$total")${NC}\n"
     return 0
 }
 
@@ -1959,24 +2336,39 @@ review_assumptions() {
     local pending=${#a_nums[@]}
     [[ $pending -eq 0 ]] && return 0
 
-    echo -e "\n${CYAN}=== Telesma - Assumptions to verify (${pending}) ===${NC}"
-    echo -e "${CYAN}ENTER = accept | text = comment/alternative (marks it as rejected) | 'q' = stop${NC}\n"
+    # A beginner cannot judge "bcrypt, not MD5". The EXPERIENCE block tells the model to make
+    # its assumptions the usual, safe choices — so they are accepted here, and the person hears
+    # the first three in one breath instead of answering a table. Rejecting one is still
+    # possible by hand in QUESTIONS.md; the file says where.
+    if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+        awk '/^### /{ina=($0 ~ /^### A/)} ina && /^- \*\*Status\*\*:.*🔵/{print "- **Status**: ✅"; next} {print}' \
+            "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        echo -e "\n${CYAN}$(msg a.b.decided 'Telesma decided %s smaller things on its own, the usual way — for example:' "$pending")${NC}"
+        local i
+        for i in 0 1 2; do [[ $i -lt $pending ]] && echo "  - ${a_texts[$i]}"; done
+        echo "  $(msg a.b.where '(all of them are listed in telesma/state/QUESTIONS.md if you want to look)')"
+        echo ""
+        return 0
+    fi
+
+    echo -e "\n${CYAN}$(msg a.title '=== Telesma - Assumptions to verify (%s) ===' "$pending")${NC}"
+    echo -e "${CYAN}$(msg a.how "ENTER = accept | text = comment/alternative (marks it as rejected) | 'q' = stop")${NC}\n"
 
     for i in "${!a_nums[@]}"; do
         local an="${a_nums[$i]}"
         local at="${a_texts[$i]}"
         local ar="${a_reasons[$i]}"
 
-        echo -e "${CYAN}--- Assumption A${an} ---${NC}"
+        echo -e "${CYAN}$(msg a.item '--- Assumption A%s ---' "$an")${NC}"
         echo -e "\n  ${at}"
-        [[ -n "$ar" ]] && echo -e "  ${YELLOW}Rationale: ${ar}${NC}"
+        [[ -n "$ar" ]] && echo -e "  ${YELLOW}$(msg a.rationale 'Rationale: %s' "$ar")${NC}"
         echo ""
 
         local answer
-        read -r -p "  [ENTER=accept / text=reject]: " answer < /dev/tty
+        read -r -p "  $(msg a.prompt '[ENTER=accept / text=reject]'): " answer < /dev/tty
 
         if [[ "$answer" == "q" || "$answer" == "quit" || "$answer" == "stop" ]]; then
-            echo -e "\n${YELLOW}Stopped. Run again to continue.${NC}"
+            echo -e "\n${YELLOW}$(msg stopped 'Stopped. Run again to continue.')${NC}"
             return 1
         fi
 
@@ -2018,7 +2410,7 @@ review_assumptions() {
         echo ""
     done
 
-    echo -e "${GREEN}Assumptions verified (${total}/${total})${NC}\n"
+    echo -e "${GREEN}$(msg a.done 'Assumptions verified (%s/%s)' "$total" "$total")${NC}\n"
     return 0
 }
 
@@ -2060,28 +2452,34 @@ ask_questions() {
         return 0
     fi
 
-    echo -e "\n${GREEN}=== Telesma - Project clarification ===${NC}"
-    echo -e "Questions: ${total} | Remaining: ${unanswered}"
-    echo -e "${CYAN}ENTER = accept the proposal | 'q' = stop${NC}\n"
+    if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+        echo -e "\n${GREEN}$(msg q.b.title '=== Telesma — a few questions about the details ===')${NC}"
+        echo -e "$(msg q.b.count 'Telesma has %s questions. Each comes with the answer it would choose —' "$unanswered")"
+        echo -e "${CYAN}$(msg q.b.how "ENTER accepts it, or type your own. 'q' stops; you can continue later.")${NC}\n"
+    else
+        echo -e "\n${GREEN}$(msg q.title '=== Telesma - Project clarification ===')${NC}"
+        echo -e "$(msg q.count 'Questions: %s | Remaining: %s' "$total" "$unanswered")"
+        echo -e "${CYAN}$(msg q.how "ENTER = accept the proposal | 'q' = stop")${NC}\n"
+    fi
 
     for i in "${!q_nums[@]}"; do
         local qn="${q_nums[$i]}"
         local qt="${q_texts[$i]}"
         local qp="${q_proposals[$i]}"
 
-        echo -e "${CYAN}--- Question ${qn}/${total} ---${NC}"
+        echo -e "${CYAN}$(msg q.item '--- Question %s/%s ---' "$qn" "$total")${NC}"
         echo -e "\n  ${qt}\n"
-        echo -e "  ${YELLOW}Proposal: ${qp}${NC}\n"
+        echo -e "  ${YELLOW}$(msg q.proposal 'Proposal: %s' "$qp")${NC}\n"
 
         local answer
-        read -r -p "  Answer: " answer < /dev/tty
+        read -r -p "  $(msg q.prompt 'Answer'): " answer < /dev/tty
 
         if [[ "$answer" == "q" || "$answer" == "quit" || "$answer" == "stop" ]]; then
-            echo -e "\n${YELLOW}Stopped. Run again to continue from question ${qn}.${NC}"
+            echo -e "\n${YELLOW}$(msg q.stopped 'Stopped. Run again to continue from question %s.' "$qn")${NC}"
             return 1
         fi
 
-        [[ -z "$answer" ]] && answer="$qp"
+        [[ -z "$answer" ]] && answer="${qp:-(accepted)}"    # never empty: empty = never shown to the user
 
         # Update the file: write the answer and change the status
         awk -v qnum="$qn" -v ans="$answer" '
@@ -2106,7 +2504,7 @@ ask_questions() {
 
     # All answered
     sed_inplace "s/^\(- \*\*State\*\*: \).*/\1done/" "$file"
-    echo -e "${GREEN}All questions answered! (${total}/${total})${NC}\n"
+    echo -e "${GREEN}$(msg q.done 'All questions answered! (%s/%s)' "$total" "$total")${NC}\n"
     return 0
 }
 
@@ -2122,16 +2520,43 @@ select_mode() {
         return 0
     fi
 
+    if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+        echo ""
+        echo -e "${GREEN}$(msg mode.b.title '=== Telesma — what now? ===')${NC}"
+        # Open steps only: finished phases rotate into the archive, so a done count would lie.
+        local left
+        left=$(grep -c '^- \[ \]' "$PLAN_FILE" 2>/dev/null) || left=0
+        if [[ "$left" -gt 0 ]]; then
+            echo -e "$(msg mode.b.left 'Steps of the plan still to do: %s.' "$left")"
+            echo -e "  ${CYAN}1)${NC} $(msg mode.b.build 'Build on — the next steps of the plan')"
+        else
+            echo -e "$(msg mode.b.done 'Every step of the plan is done.')"
+            echo -e "  ${CYAN}1)${NC} $(msg mode.b.more 'Add or change something — tell Telesma what')"
+        fi
+        echo -e "  ${CYAN}2)${NC} $(msg mode.b.bug 'Something does not work right — tell Telesma what')"
+        echo -e "  ${CYAN}q)${NC} $(msg mode.b.quit 'Not now')"
+        echo ""
+        local choice
+        read -r -p "$(msg mode.prompt 'Choice [1]'): " choice < /dev/tty || choice=q
+        case "$choice" in
+            ""|1) MODE=1 ;;
+            2) MODE=2 ;;
+            *) exit 0 ;;
+        esac
+        [[ "$MODE" == "2" ]] && INTERACTIVE=true
+        return 0
+    fi
+
     echo ""
-    echo -e "${GREEN}=== Telesma - Choose a mode ===${NC}"
-    echo -e "  ${CYAN}1)${NC} Work through the tasks in PLAN.md (autonomous loop)"
-    echo -e "  ${CYAN}2)${NC} Bugfix mode (chat — hand over a bug to fix)"
-    echo -e "  ${CYAN}3)${NC} Code review mode (local, context-aware — spec + guidelines as criteria)"
-    echo -e "  ${CYAN}4)${NC} Regenerate visual artifacts (screenshots + video — backfill without touching PLAN.md)"
+    echo -e "${GREEN}$(msg mode.title '=== Telesma - Choose a mode ===')${NC}"
+    echo -e "  ${CYAN}1)${NC} $(msg mode.1 'Work through the tasks in PLAN.md (autonomous loop)')"
+    echo -e "  ${CYAN}2)${NC} $(msg mode.2 'Bugfix mode (chat — hand over a bug to fix)')"
+    echo -e "  ${CYAN}3)${NC} $(msg mode.3 'Code review mode (local, context-aware — spec + guidelines as criteria)')"
+    echo -e "  ${CYAN}4)${NC} $(msg mode.4 'Regenerate visual artifacts (screenshots + video — backfill without touching PLAN.md)')"
     echo ""
 
     local answer
-    read -r -p "Choice [1]: " answer < /dev/tty
+    read -r -p "$(msg mode.prompt 'Choice [1]'): " answer < /dev/tty
 
     case "$answer" in
         ""|"1") MODE=1 ;;
@@ -2139,11 +2564,11 @@ select_mode() {
         "3")    MODE=3 ;;
         "4")    MODE=4 ;;
         "q"|"quit"|"exit")
-            echo -e "${YELLOW}Cancelled.${NC}"
+            echo -e "${YELLOW}$(msg mode.cancel 'Cancelled.')${NC}"
             exit 0
             ;;
         *)
-            echo -e "${RED}Invalid choice: $answer (expected 1, 2, 3, 4 or q)${NC}"
+            echo -e "${RED}$(msg mode.bad 'Invalid choice: %s (expected 1, 2, 3, 4 or q)' "$answer")${NC}"
             exit 1
             ;;
     esac
@@ -2154,30 +2579,25 @@ select_mode() {
 # =============================================================================
 if [[ "$NEEDS_CLARIFICATION" == true ]]; then
 
-    # Check that there are files in telesma/spec/ and that the template has been filled in
-    SPEC_TEMPLATE_UNFILLED=false
+    # The technical template is optional: still carrying its TELESMA_SPEC_TEMPLATE marker it means
+    # "no departures from the defaults" (CLARIFY.md says so to the model) — it never blocks the
+    # start. It does not count as a specification either: alone in telesma/spec/ there is nothing
+    # to clarify.
+    SPEC_REAL=$SPEC_COUNT
     for f in "$SPEC_DIR"/*.md; do
         [[ -f "$f" ]] || continue
-        if head -1 "$f" 2>/dev/null | grep -qF "TELESMA_SPEC_TEMPLATE"; then
-            SPEC_TEMPLATE_UNFILLED=true
-            break
-        fi
+        head -1 "$f" 2>/dev/null | grep -qF "TELESMA_SPEC_TEMPLATE" && SPEC_REAL=$((SPEC_REAL - 1))
     done
 
-    if [[ $SPEC_COUNT -eq 0 ]] || [[ "$SPEC_TEMPLATE_UNFILLED" == true ]]; then
+    if [[ $SPEC_REAL -le 0 ]]; then
         echo ""
-        if [[ "$SPEC_TEMPLATE_UNFILLED" == true ]]; then
-            echo -e "${CYAN}Found an unfilled template in telesma/spec/TECHNICAL_GUIDELINES.md${NC}"
-            echo -e "Fill in the template and REMOVE the ${YELLOW}TELESMA_SPEC_TEMPLATE${NC} marker from the first line of the file."
-        else
-            echo -e "${CYAN}The project needs clarification, but telesma/spec/ is empty.${NC}"
-            echo -e "Put into ${CYAN}$SPEC_DIR/${NC} files with:"
-            echo -e "  - The project specification (.md, .txt)"
-            echo -e "  - Technical requirements"
-            echo -e "  - Diagrams / acceptance criteria"
-        fi
+        echo -e "${CYAN}$(msg spec.empty 'The project needs clarification, but telesma/spec/ is empty.')${NC}"
+        echo -e "$(msg spec.put 'Put into %s files with:' "${CYAN}$SPEC_DIR/${NC}")"
+        echo -e "  - $(msg spec.put1 'The project specification (.md, .txt)')"
+        echo -e "  - $(msg spec.put2 'Technical requirements')"
+        echo -e "  - $(msg spec.put3 'Diagrams / acceptance criteria')"
         echo ""
-        echo -e "Then run again: ${GREEN}$0 $PROJECT_DIR${NC}"
+        echo -e "$(msg again 'Run again: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
         exit 0
     fi
 
@@ -2197,10 +2617,23 @@ if [[ "$NEEDS_CLARIFICATION" == true ]]; then
 
     cd "$PROJECT_DIR"
 
+    # A session is closed with /exit; some people press Ctrl+C instead — Claude Code closes on the
+    # second one, and a third pressed to be sure would kill this script before the questions.
+    # While a piped session runs, INT gets a handler
+    # (not an ignore, which the child would inherit); in the questions it stops cleanly.
+    claude_session() { trap ':' INT; "$@" || true; trap - INT; }
+    stop_on_interrupt() {
+        trap 'echo ""; echo -e "${YELLOW}$(msg stopped "Stopped. Run again to continue.")${NC}"; echo -e "$(msg again "Run again: %s" "${GREEN}$0 $PROJECT_DIR${NC}")"; exit 0' INT
+    }
+
     # --- PHASE A: generating SPEC_INDEX + QUESTIONS ---
     if [[ $Q_COUNT -eq 0 ]]; then
-        echo -e "Phase: ${CYAN}generating the index and the questions${NC} ($SPEC_COUNT files in telesma/spec/)"
-        echo -e "${GREEN}Claude is reading the specification...${NC}\n"
+        if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+            echo -e "${GREEN}$(msg a0.b.reading 'Telesma is reading the description and preparing its questions — a few minutes.')${NC}\n"
+        else
+            echo -e "$(msg a0.phase 'Phase: %s (%s files in telesma/spec/)' "${CYAN}$(msg a0.phase.name 'generating the index and the questions')${NC}" "$SPEC_COUNT")"
+            echo -e "${GREEN}$(msg a0.reading 'Claude is reading the specification...')${NC}\n"
+        fi
 
         GENERATE_PROMPT="$INSTRUCTIONS
 
@@ -2218,7 +2651,7 @@ $CONFIG
 
 ---
 
-${LANGUAGE_LINE}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
 
 Perform ONLY steps 1 and 2 of section -1 of the instructions:
 1. Read EVERY file in telesma/spec/ with the Read tool
@@ -2233,19 +2666,24 @@ IMPORTANT: telesma/state/QUESTIONS.md ALREADY EXISTS (the script copied the stru
 
 IMPORTANT: statuses of the generated items: contradictions ⚠️, assumptions 🔵, questions ❓. NEVER ✅ — an item with ✅ is skipped in the Q&A and the user never sees it. Leave the Answer/Resolution fields empty.
 
-IMPORTANT: do NOT ask the user any questions. Generate the files and finish."
+IMPORTANT: do NOT ask the user any questions. Generate the files and finish. $(close_line "Telesma then shows the questions one at a time")"
 
-        echo -e "${YELLOW}When Claude finishes and shows a summary of the generated files,${NC}"
-        echo -e "${YELLOW}press CTRL+C to close the session — the script then moves on to the clarification questions.${NC}"
+        if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+            echo -e "${YELLOW}$(msg exit.b 'When Claude shows a summary, type /exit — that closes only this conversation; Telesma then goes on by itself.')${NC}"
+        else
+            echo -e "${YELLOW}$(msg exit.a 'When Claude finishes and shows a summary of the generated files, type /exit')${NC}"
+            echo -e "${YELLOW}$(msg exit.a2 '— it closes only this conversation; the launcher then moves on to the clarification questions.')${NC}"
+        fi
         echo ""
-        echo "$GENERATE_PROMPT" | claude
+        claude_session run_claude pipe "$GENERATE_PROMPT"
 
         # Check that the questions were generated
         Q_COUNT=$(grep -c "^### Q" "$QUESTIONS_FILE" 2>/dev/null) || Q_COUNT=0
         Q_UNANSWERED=$(grep -c "Status.*❓" "$QUESTIONS_FILE" 2>/dev/null) || Q_UNANSWERED=0
 
         if [[ $Q_COUNT -eq 0 ]]; then
-            echo -e "\n${RED}Failed to generate the questions. Check the files in telesma/spec/ and run again.${NC}"
+            echo -e "\n${RED}$(msg a0.fail 'No questions were written (telesma/state/QUESTIONS.md has no ### Q entries).')${NC}"
+            echo -e "$(msg again 'Run again: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
             exit 1
         fi
 
@@ -2266,12 +2704,14 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish."
             END { print fixed + 0 > "/dev/stderr" }
         ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp") && mv "${QUESTIONS_FILE}.tmp" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp"
         [[ "$NORMALIZED" =~ ^[0-9]+$ ]] || NORMALIZED=0
-        if [[ "$NORMALIZED" -gt 0 ]]; then
+        if [[ "$NORMALIZED" -gt 0 && "${PROJECT_EXPERIENCE:-developer}" != "beginner" ]]; then
             echo -e "${YELLOW}Normalized ${NORMALIZED} statuses in QUESTIONS.md (the model marked them resolved — the user has to see them)${NC}"
         fi
         Q_UNANSWERED=$(grep -c "Status.*❓" "$QUESTIONS_FILE" 2>/dev/null) || Q_UNANSWERED=0
 
-        echo -e "\n${GREEN}Generated $Q_COUNT questions and telesma/state/SPEC_INDEX.md${NC}"
+        if [[ "${PROJECT_EXPERIENCE:-developer}" != "beginner" ]]; then
+            echo -e "\n${GREEN}$(msg a0.done 'Generated %s questions and telesma/state/SPEC_INDEX.md' "$Q_COUNT")${NC}"
+        fi
 
         # Stamp of the spec files' checksums — on later starts it detects that the files
         # changed after indexing (shifted line ranges = silently wrong fragments)
@@ -2285,37 +2725,139 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish."
         fi
     fi
 
+    stop_on_interrupt
+
+    # Safety net on every start, not only right after phase A: a contradiction or question with
+    # ✅ but nothing in its Resolution/Answer was never shown to the user (the model wrote ✅ and
+    # the run was killed before the normalization above, or a session rewrote the file) — it
+    # goes back to the queue. An answered one carries text: the launcher writes the proposal
+    # when ENTER accepts it.
+    UNSEEN=$(awk '
+        function flush() {
+            if (kind != "" && status_line != "" && index(status_line, "✅") && answer_empty) {
+                sub(/✅.*/, (kind == "S" ? "⚠️" : "❓"), status_line); fixed++
+            }
+            for (i = 1; i <= n; i++) print (i == status_at ? status_line : block[i])
+            n = 0; kind = ""; status_line = ""; status_at = 0; answer_empty = 0
+        }
+        /^### [SQ][0-9]+:/ { flush(); kind = substr($0, 5, 1) }
+        /^### / && !/^### [SQ][0-9]+:/ { flush() }
+        /^## /  { flush() }
+        {
+            block[++n] = $0
+            if (kind != "" && /^- \*\*(Answer|Resolution)\*\*:/) {
+                v = $0; sub(/^- \*\*(Answer|Resolution)\*\*:[[:space:]]*/, "", v); answer_empty = (v == "")
+            }
+            if (kind != "" && /^- \*\*Status\*\*:/) { status_line = $0; status_at = n }
+        }
+        END { flush(); print fixed + 0 > "/dev/stderr" }
+    ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp") && mv "${QUESTIONS_FILE}.tmp" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp"
+    [[ "$UNSEEN" =~ ^[0-9]+$ ]] || UNSEEN=0
+    if [[ "$UNSEEN" -gt 0 ]]; then
+        echo -e "${YELLOW}$(msg q.unseen '%s items in QUESTIONS.md were marked resolved without an answer — they are asked now.' "$UNSEEN")${NC}"
+        Q_UNANSWERED=$(grep -c "Status.*❓" "$QUESTIONS_FILE" 2>/dev/null) || Q_UNANSWERED=0
+    fi
+
     # --- PHASE B1: resolving contradictions ---
     # `if !` instead of checking $? after the call — with set -e a non-zero code would kill the script before it is handled
     if ! resolve_contradictions "$QUESTIONS_FILE"; then
-        echo -e "Run again: ${GREEN}$0 $PROJECT_DIR${NC}"
+        echo -e "$(msg again 'Run again: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
         exit 0
     fi
 
     # --- PHASE B2: reviewing assumptions ---
     if ! review_assumptions "$QUESTIONS_FILE"; then
-        echo -e "Run again: ${GREEN}$0 $PROJECT_DIR${NC}"
+        echo -e "$(msg again 'Run again: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
         exit 0
     fi
 
     # --- PHASE B3: Q&A in bash ---
     if [[ $Q_UNANSWERED -gt 0 ]]; then
         if ! ask_questions "$QUESTIONS_FILE"; then
-            echo -e "Run again: ${GREEN}$0 $PROJECT_DIR${NC}"
+            echo -e "$(msg again 'Run again: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
             exit 0
         fi
     fi
+
+    trap - INT
 
     # --- PHASE C: generating telesma/state/PLAN.md ---
     Q_UNANSWERED=$(grep -c "Status.*❓" "$QUESTIONS_FILE" 2>/dev/null) || Q_UNANSWERED=0
 
     if [[ $Q_UNANSWERED -eq 0 ]]; then
-        echo -e "Phase: ${CYAN}generating the plan${NC}"
+        if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+            echo -e "${GREEN}$(msg plan.b.making 'Telesma is now planning the work — a few minutes.')${NC}"
+        else
+            echo -e "Phase: ${CYAN}generating the plan${NC}"
+        fi
 
         # The plan counts as generated when it has tasks with checkboxes and is not the template
         plan_generated() {
             [[ -s "$PLAN_FILE" ]] && grep -q '^- \[' "$PLAN_FILE" 2>/dev/null \
                 && ! grep -q '\[project name\]' "$PLAN_FILE" 2>/dev/null
+        }
+        # The answers in QUESTIONS.md are the human's words. The plan session is told to edit the
+        # file, not to rewrite it — but a model that writes it from memory (its own version from
+        # phase A) silently drops every answer. A copy taken before the session puts them back
+        # afterwards, and the questions whose answer differed from the proposal are named: the
+        # plan was built without those answers and has to be checked against them.
+        QUESTIONS_BEFORE_PLAN="$STATE_DIR/.questions-before-plan"
+        keep_answers() { cp "$QUESTIONS_FILE" "$QUESTIONS_BEFORE_PLAN" 2>/dev/null || true; }
+        restore_answers() {
+            [[ -f "$QUESTIONS_BEFORE_PLAN" ]] || return 0
+            local lost
+            lost=$(python3 - "$QUESTIONS_BEFORE_PLAN" "$QUESTIONS_FILE" <<'PYRESTORE'
+import re, sys
+before, after = (open(p, encoding='utf-8').read() for p in sys.argv[1:3])
+FIELD = {'S': 'Resolution', 'Q': 'Answer'}
+
+def items(text):
+    out = {}
+    for m in re.finditer(r'^### ([SQ])(\d+):.*?(?=^### |^## |\Z)', text, re.M | re.S):
+        kind, block = m.group(1), m.group(0)
+        f = {}
+        for label in ('Proposed answer', 'Proposed resolution', FIELD[kind]):
+            fm = re.search(r'^- \*\*' + re.escape(label) + r'\*\*:[ \t]*(.*)$', block, re.M)
+            f[label] = (fm.group(1).strip() if fm else '')
+        out[kind + m.group(2)] = f
+    return out
+
+old, new = items(before), items(after)
+lost, differing = [], []
+for key, f in old.items():
+    label = FIELD[key[0]]
+    if f[label] and key in new and not new[key][label]:
+        lost.append((key, f[label]))
+        proposal = f['Proposed answer'] or f['Proposed resolution']
+        if f[label] != proposal and f[label] != '(accepted)':
+            differing.append(key)
+if lost:
+    for key, answer in lost:
+        after = re.sub(r'(^### ' + re.escape(key) + r':.*?^- \*\*' + FIELD[key[0]] + r'\*\*:)[ \t]*$',
+                       lambda m: m.group(1) + ' ' + answer, after, count=1, flags=re.M | re.S)
+    open(sys.argv[2], 'w', encoding='utf-8').write(after)
+print(' '.join(differing) if lost else '')
+PYRESTORE
+            ) || lost=""
+            rm -f "$QUESTIONS_BEFORE_PLAN"
+            [[ -n "$lost" ]] || return 0
+            echo -e "\n${RED}$(msg plan.lost 'The plan session rewrote telesma/state/QUESTIONS.md and dropped your answers — they are restored. The plan was made without your answers to: %s. Compare it with them before building; a change request in telesma/changes/ corrects it.' "$lost")${NC}"
+        }
+
+        # The end of the clarification: the plan is there — a developer is asked whether to start
+        # the loop (ENTER) or review the plan first; a beginner hears how many steps there are and
+        # is asked whether to start building.
+        clarification_finished() {
+            restore_answers
+            local steps
+            steps=$(grep -c '^- \[ \]' "$PLAN_FILE" 2>/dev/null) || steps=0
+            if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+                echo -e "\n${GREEN}$(msg plan.b.ready 'The plan is ready: %s steps.' "$steps")${NC}"
+                continue_or_stop "$(msg go.build 'Start building now? Telesma builds the program step by step and tells you after each step what works')" -m 1
+            fi
+            echo -e "\n${GREEN}$(msg plan.done '=== Clarification finished ===')${NC}"
+            echo -e "$(msg plan.review 'The plan: %s (%s tasks).' "${CYAN}$PLAN_FILE${NC}" "$steps")"
+            continue_or_stop "$(msg plan.go 'Start building now? (n = review the plan first; a plain start continues)')" -m 1
         }
 
         # Attempt 1: continue the PHASE A session (claude --continue) — that session already has
@@ -2323,7 +2865,7 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish."
         # plan comes out cheaper and better informed than from the index alone.
         CONTINUE_PROMPT="Continuation of the Telesma clarification. All contradictions are resolved, the assumptions reviewed, the questions answered — the current answers are in telesma/state/QUESTIONS.md (read the file again with the Read tool: the answers were written AFTER your indexing).
 
-${LANGUAGE_LINE}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
 
 Perform ONLY step 4 of section -1 of the instructions:
 1. Read the answers in telesma/state/QUESTIONS.md
@@ -2333,24 +2875,27 @@ Perform ONLY step 4 of section -1 of the instructions:
 
 IMPORTANT: telesma/state/PLAN.md ALREADY EXISTS (the template) and so does telesma/config.md — read each one with the Read tool BEFORE writing/editing (Write and Edit refuse to work on a file that has not been read).
 
+IMPORTANT: telesma/state/QUESTIONS.md holds the user's answers — change its State line with Edit; NEVER write the whole file (a Write from your context drops the answers).
+
 IMPORTANT: if PLAN.md already contains a complete plan (from a previous run) — you must NOT treat it as current without verification. Go through EVERY answer and resolution in QUESTIONS.md and compare it with the plan: a mismatch (e.g. the user chose a different provider/stack than the proposal the plan was built on) → update all affected tasks, the stack and the decision tables. In the summary list the changes per question, or explicitly 'verified QN — consistent' for the unchanged ones.
 
 # GUIDELINES_INDEX (telesma/guidelines/):
 
 ${GUIDELINES_INDEX:-no guidelines}
 
-IMPORTANT: do NOT ask the user any questions. Generate the plan and finish."
+IMPORTANT: do NOT ask the user any questions — with ONE exception (section -1, step 4.2): a rejected assumption (❌) whose User comment is not a decision (a question, 'I do not understand', a doubt). Explain it in plain words, ask the one question that settles it, wait for the answer, write it into QUESTIONS.md — and only then generate the plan. $(close_line "Telesma then checks the plan and goes on")"
 
-        echo -e "${GREEN}Claude is creating telesma/state/PLAN.md (continuing the indexing session)...${NC}"
-        echo -e "${YELLOW}When Claude shows the plan summary, press CTRL+C — the script verifies the plan and finishes clarification.${NC}\n"
-        echo "$CONTINUE_PROMPT" | claude --continue ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} || true
-
-        if plan_generated; then
-            echo -e "\n${GREEN}=== Clarification finished ===${NC}"
-            echo -e "Review the generated plan: ${CYAN}$PLAN_FILE${NC}"
-            echo -e "To start the implementation: ${GREEN}$0 $PROJECT_DIR${NC}"
-            exit 0
+        if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+            echo -e "${YELLOW}$(msg exit.b 'When Claude shows a summary, type /exit — that closes only this conversation; Telesma then goes on by itself.')${NC}\n"
+        else
+            echo -e "${GREEN}$(msg plan.making 'Claude is creating telesma/state/PLAN.md (continuing the indexing session)...')${NC}"
+            echo -e "${YELLOW}$(msg exit.plan 'When Claude shows the plan summary, type /exit — the launcher verifies the plan and finishes clarification.')${NC}\n"
         fi
+        keep_answers
+        claude_session run_claude pipe "$CONTINUE_PROMPT" --continue ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"}
+
+        plan_generated && clarification_finished
+        restore_answers
 
         # Fallback: the PHASE A session expired / --continue hit another session / no plan was created
         # → the full prompt with the clarification instructions, as before
@@ -2387,7 +2932,7 @@ $QUESTIONS_CONTENT
 
 ---
 
-${LANGUAGE_LINE}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
 
 Perform ONLY step 4 of section -1 of the instructions:
 1. Read the answers in telesma/state/QUESTIONS.md
@@ -2397,19 +2942,21 @@ Perform ONLY step 4 of section -1 of the instructions:
 
 IMPORTANT: telesma/state/PLAN.md ALREADY EXISTS (the template) and so does telesma/config.md — read each one with the Read tool BEFORE writing/editing (Write and Edit refuse to work on a file that has not been read).
 
+IMPORTANT: telesma/state/QUESTIONS.md holds the user's answers — change its State line with Edit; NEVER write the whole file (a Write from your context drops the answers).
+
 IMPORTANT: if PLAN.md already contains a complete plan (from a previous run) — you must NOT treat it as current without verification. Go through EVERY answer and resolution in QUESTIONS.md and compare it with the plan: a mismatch (e.g. the user chose a different provider/stack than the proposal the plan was built on) → update all affected tasks, the stack and the decision tables. In the summary list the changes per question, or explicitly 'verified QN — consistent' for the unchanged ones.
 
-IMPORTANT: do NOT ask the user any questions. Generate the plan and finish."
+IMPORTANT: do NOT ask the user any questions — with ONE exception (section -1, step 4.2): a rejected assumption (❌) whose User comment is not a decision (a question, 'I do not understand', a doubt). Explain it in plain words, ask the one question that settles it, wait for the answer, write it into QUESTIONS.md — and only then generate the plan. $(close_line "Telesma then checks the plan and goes on")"
 
-        echo -e "${YELLOW}When Claude shows the plan summary, press CTRL+C — the script verifies the plan and finishes clarification.${NC}\n"
-        echo "$PLAN_PROMPT" | claude
+        echo -e "${YELLOW}$(msg exit.plan 'When Claude shows the plan summary, type /exit — the launcher verifies the plan and finishes clarification.')${NC}\n"
+        keep_answers
+        claude_session run_claude pipe "$PLAN_PROMPT"
 
         if plan_generated; then
-            echo -e "\n${GREEN}=== Clarification finished ===${NC}"
-            echo -e "Review the generated plan: ${CYAN}$PLAN_FILE${NC}"
-            echo -e "To start the implementation: ${GREEN}$0 $PROJECT_DIR${NC}"
+            clarification_finished
         else
-            echo -e "\n${RED}Failed to generate telesma/state/PLAN.md. Check telesma/state/QUESTIONS.md and run again.${NC}"
+            restore_answers
+            echo -e "\n${RED}$(msg plan.failed 'Failed to generate telesma/state/PLAN.md. Check telesma/state/QUESTIONS.md and run again.')${NC}"
             exit 1
         fi
     fi
@@ -3031,12 +3578,24 @@ ${LANGUAGE_LINE}
 Perform ONLY section 18.1 (points 1-5): whoami, what_changed from the cursor in telesma/state/SPECKY.md, get_work_queue, writing every item as a file in telesma/changes/ (format from 18.1 point 3), moving the cursor in telesma/state/SPECKY.md ONLY after the files are written. Do NOT process section 0.3, do NOT modify PLAN.md or REPORT.md, do NOT choose tasks. At the end print: how many items, which files were created (with their kind), the new cursor — and finish. The next normal Telesma start processes the files."
     echo -e "${GREEN}Sync with Specky (project ${INTEG_TRACKER_PROJECT}) — a Claude session for section 18.1 only${NC}"
     cd "$PROJECT_DIR"
-    claude ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} "$SYNC_PROMPT"
+    run_claude arg "$SYNC_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"}
     exit 0
 fi
 
 # Choose the working mode (console menu or the -m flag)
 select_mode
+
+# The tools the project's commands call (## Tests), before a session that builds: a beginner's
+# first build would otherwise fail half-way on a missing `dotnet` or `uv`; a developer is warned.
+if [[ "$MODE" != "3" ]] && ! preflight_stack "$CONFIG_FILE"; then
+    echo ""
+    if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
+        echo -e "${YELLOW}$(msg pre.stack.stop 'Telesma stops here so the build does not fail half-way. When it is installed, run the same command again.')${NC}"
+        exit 1
+    fi
+    echo -e "${YELLOW}$(msg pre.stack.warn 'Continuing: the session will fail on the commands that need it.')${NC}"
+    echo ""
+fi
 
 # Modes 2 (bugfix) and 3 (review) are always interactive — the chat is the point of the mode
 if [[ "$MODE" == "2" ]] || [[ "$MODE" == "3" ]]; then
@@ -3254,9 +3813,37 @@ fi
 # a failed send. Here we check only one thing: the state in which the user THINKS they are sending
 # but are not — there is an endpoint, but the key cannot be read.
 TELEMETRY_TOOL="$SCRIPT_DIR/tools/telesma-telemetry.py"
+# `Endpoint: shared` with `Send: yes` came with the repo — somebody else allowed this project to
+# be reported. The person on THIS machine has not agreed to anything yet: ask once per machine
+# (a "no" is remembered next to the opt-in file), never without a terminal.
+_telemetry_consent="${XDG_CONFIG_HOME:-$HOME/.config}/telesma/hub"
 if [[ -f "$TELEMETRY_TOOL" ]] && command -v python3 &> /dev/null \
    && grep -q '^- \*\*Send\*\*:[[:space:]]*yes' "$CONFIG_FILE" 2>/dev/null \
-   && grep -Eq '^- \*\*Endpoint\*\*:[[:space:]]*https?://' "$CONFIG_FILE" 2>/dev/null; then
+   && grep -Eq '^- \*\*Endpoint\*\*:[[:space:]]*shared[[:space:]]*$' "$CONFIG_FILE" 2>/dev/null \
+   && [[ ! -f "$_telemetry_consent" ]]; then
+    if [[ ! -f "$_telemetry_consent.declined" ]] && { true < /dev/tty; } 2>/dev/null; then
+        echo -e "${CYAN}$(msg tel.header 'Telemetry'):${NC} $(msg tel.start1 "this project is set to report the quality of Telesma's work to the")"
+        echo "$(msg tel.start2 'shared Telesma hub, but you have not opted in on this machine. Sent: task outcomes and')"
+        echo "$(msg tel.start3 "timings, test results, Telesma's own problem/decision entries (secrets removed), counters,")"
+        echo "$(msg tel.start4 'hashes of the origin URL and your git e-mail. Never: spec, code, changes/, commands, prompts.')"
+        echo "$(msg tel.start5 'Privacy: %s · undo: %s' "$(python3 "$TELEMETRY_TOOL" --shared-hub)/privacy" "$0 --telemetry-forget")"
+        read -r -p "$(msg tel.start.ask 'Opt in on this machine? [y/N/metrics]'): " _ans < /dev/tty || _ans=""
+        case "$_ans" in
+            [mM]*) python3 "$TELEMETRY_TOOL" --register --scope metrics ;;
+            [yYtT]*) python3 "$TELEMETRY_TOOL" --register --scope full ;;
+            *) mkdir -p "$(dirname "$_telemetry_consent")" && date +%F > "$_telemetry_consent.declined"
+               echo "$(msg tel.start.no 'Not sending from this machine. Change it later: %s (step Telemetry).' "$0 --setup")" ;;
+        esac
+        echo ""
+    elif [[ ! -f "$_telemetry_consent.declined" ]]; then
+        echo -e "${CYAN}$(msg tel.header 'Telemetry'):${NC} $(msg tel.start.none 'project allows the shared hub, no opt-in on this machine — nothing is sent.')"
+        echo ""
+    fi
+fi
+if [[ -f "$TELEMETRY_TOOL" ]] && command -v python3 &> /dev/null \
+   && grep -q '^- \*\*Send\*\*:[[:space:]]*yes' "$CONFIG_FILE" 2>/dev/null \
+   && { grep -Eq '^- \*\*Endpoint\*\*:[[:space:]]*https?://' "$CONFIG_FILE" 2>/dev/null \
+        || [[ -f "$_telemetry_consent" ]]; }; then
     _telemetry_error=$(python3 "$TELEMETRY_TOOL" "$PROJECT_DIR" --last-error 2>/dev/null)
     if [[ -n "$_telemetry_error" ]]; then
         echo -e "${YELLOW}Telemetry: the previous send did not arrive —${NC} $_telemetry_error"
@@ -3635,7 +4222,7 @@ esac
 
 MODE_SUFFIX+="
 
-${LANGUAGE_LINE}"
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}"
 
 # Trimming the prompt COPY — the files on disk are untouched. Measured on the reference project
 # (2026-09-22, 425k characters): template comments in config.md 13k; PROJECT_CONTEXT table rows
@@ -3830,6 +4417,12 @@ echo ""
 # Start Claude
 cd "$PROJECT_DIR"
 
+# A beginner was told "close this conversation, Telesma asks what next": the launcher outlives the
+# session (Ctrl+C reaches claude, not this script) and comes back to the "what now?" menu.
+BEGINNER_RETURN=false
+[[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" && ( "$MODE" == "1" || "$MODE" == "2" ) ]] && BEGINNER_RETURN=true
+[[ "$BEGINNER_RETURN" == true ]] && trap ':' INT
+
 if [[ "$INTERACTIVE" == true ]]; then
     # The prompt as a positional argument — claude starts interactively WITH the instructions
     # (writing it to a tmp file + a bare `claude` left the session without the Telesma instructions)
@@ -3837,7 +4430,12 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo ""
     # The mode from ## Permissions explicitly, so the session does not start in a mode remembered
     # from elsewhere (`auto` would bypass the permission judge — see docs/PERMISSION_JUDGE.md).
-    claude ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} "$INITIAL_PROMPT"
+    run_claude arg "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} || [[ "$BEGINNER_RETURN" == true ]]
 else
-    echo "$INITIAL_PROMPT" | claude ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"}
+    run_claude pipe "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} || [[ "$BEGINNER_RETURN" == true ]]
+fi
+
+if [[ "$BEGINNER_RETURN" == true ]]; then
+    trap - INT
+    exec bash "$SCRIPT_DIR/telesma.sh" "$PROJECT_DIR"
 fi

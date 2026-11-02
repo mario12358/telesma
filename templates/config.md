@@ -9,6 +9,12 @@
   <!-- Language Telesma uses to talk to you and to write prose into state files (REPORT.md, -->
   <!-- DECISIONS.md, scenarios, …), e.g. en, pl, de. Structural labels (section headers,   -->
   <!-- field names, task keywords) stay English — scripts parse them.                      -->
+- **Experience**: developer
+  <!-- developer = Telesma talks to you like to a colleague: file names, section numbers, hashes. -->
+  <!-- beginner  = plain words, one question at a time with a default answer, the effect of an    -->
+  <!-- action instead of its command, progress in one sentence. Same mechanics, same permission  -->
+  <!-- prompts, same files — only the language changes. `telesma.sh --new` (an interview that     -->
+  <!-- writes the specification for you) sets it.                                                -->
 
 ## Tests
 
@@ -431,23 +437,31 @@
 
 ## Telemetry
 
-<!-- Optional: events about the QUALITY OF TELESMA'S WORK sent to a telemetry server YOU run -->
-<!-- (the Telesma hub, not published yet; payload in docs/TELEMETRY.md). Off by default — nothing leaves this -->
-<!-- machine. Sending runs in the background at startup, zero tokens, never blocks work.   -->
-<!-- NOT sent: telesma/spec/, code, telesma/changes/ or commands from PERMISSIONS.jsonl (counters only).   -->
-<!-- Preview of what would be sent: python3 <telesma>/tools/telesma-telemetry.py <project> --json -->
+<!-- Optional: events about the QUALITY OF TELESMA'S WORK (payload and field list: docs/TELEMETRY.md).  -->
+<!-- Off by default — nothing leaves this machine. Sending runs in the background at startup, zero     -->
+<!-- tokens, never blocks work. NOT sent: telesma/spec/, code, telesma/changes/, commands (counters only). -->
+<!-- Preview of what would be sent: python3 <telesma>/tools/telesma-telemetry.py <project> --json      -->
 
 - **Send**: no
-  <!-- yes = send to the Endpoint below -->
+  <!-- yes = this project MAY be reported. For the shared hub that alone sends nothing: each person -->
+  <!-- opts in on their own machine (telesma.sh --setup → Telemetry; stored in ~/.config/telesma/hub, -->
+  <!-- outside the repo). So `yes` here cannot switch anyone on — `no` switches the project off for all. -->
 
 - **Endpoint**: none
-  <!-- Address of your telemetry server, e.g. https://telemetry.example.com -->
+  <!-- shared = the shared Telesma hub run by the project's author (opt-in per machine, see above)  -->
+  <!-- https://… = a server you run yourself (then `API key` below is that machine's opt-in)      -->
 
 - **API key**: env:TELESMA_HUB_TOKEN
-  <!-- env:NAME · file:<path outside the repo> · cmd:<command> — never literal, this file goes into git -->
+  <!-- Own server only: env:NAME · file:<path outside the repo> · cmd:<command> · auto (token from -->
+  <!-- the opt-in file) — never literal, this file goes into git. The shared hub ignores this field. -->
+
+- **Scope**: full
+  <!-- Shared hub only. metrics = this project sends numbers only (no titles or text), for everyone; -->
+  <!-- full = whatever each person chose when opting in. A project can narrow the scope, not widen it. -->
 
 - **Project label**:
-  <!-- Readable project name on the server; empty = name of the project directory -->
+  <!-- Readable project name on the server. Empty = the directory name for your own server, the     -->
+  <!-- project hash for the shared hub (a directory name often names a client).                     -->
 
 ## Permissions
 

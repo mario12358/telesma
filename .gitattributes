@@ -1,0 +1,6 @@
+# Telesma is Bash and Python run by Git Bash on Windows too: a checkout with CRLF line endings
+# breaks Bash on the first line. Keep LF whatever core.autocrlf says.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

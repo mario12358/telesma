@@ -24,6 +24,7 @@ sentence under the scenario: what you saw instead of the expected outcome.
 
 ## 0. Preparation
 
+- [ ] Start the version: <where the program is and how to start it — the built file with its full path to double-click, one command that works from any folder (see docs/RUNBOOK.md), or the address to open>
 - [ ] <migration command from the project's stack — see docs/RUNBOOK.md> ends in state `<expected>`
 - [ ] Database backup made (if the release changes data, not only the schema)
 - [ ] An account with the required role: <role>

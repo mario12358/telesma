@@ -321,10 +321,19 @@ the user watching still gets its entry and its message.
 
    ```
    ✅ VERSION vX.Y.Z created (git tag, commit <sha7>).
+   Run it: <where the program is and how to start it — see below>
    Scenarios for testers: docs/test-scenarios/vX.Y.Z.md — a click-through list before deployment.
    The version is local only for now. Send it: git push origin vX.Y.Z
    (tags do not travel with a plain `git push`).
    ```
+
+   **Run it** is the line a person looks for first: a version they cannot start is a version they
+   cannot try. Write what *this* project needs, checked, not guessed: the built file with its full
+   path and "double-click it" (a desktop program or game — build it first if the build is not
+   there), or one command that works from any folder (`cd "<full project path>" && <command>`),
+   or the address to open and the command that serves it. Several parts (an API and a web app) —
+   one short line each. The same text goes into `docs/RUNBOOK.md` and into the "Start the version"
+   line of the scenarios file, so the three never disagree.
 
 Nothing beyond that.
 

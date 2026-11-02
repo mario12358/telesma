@@ -32,13 +32,38 @@ live in `templates/setup/wizard.sh`. It writes only `telesma/config.md`, plus th
 |---|---|---|---|
 | `minimal` | off | none | — |
 | `recommended` (ENTER) | on, `rules` | `basic` | — |
-| `full` | on, `rules` | `standard` | integrations, visual artifacts, telemetry |
+| `full` | on, `rules` | `standard` | integrations, visual artifacts |
 
-Steps: git repository (offers `git init`) → stack and tests (detected from manifests, one level
-down in a monorepo; proposals you can edit) → permission prompts → quality-check tier →
-[integrations, visual artifacts, telemetry] → language → summary and next steps. On an existing
-project `--setup` shows a menu with the state of every module and lets you change one at a time.
-Without a terminal the first start applies `recommended` silently and prints the summary.
+Steps: language and experience first (the system's language proposed; from there every line of
+the wizard, the `[Y/n]` letters and the summary are in that language, and `beginner` switches to
+the short setup described below) → profile → git repository (offers `git init`) → stack and tests
+(detected from manifests, one level down in a monorepo; proposals you can edit — with no code yet
+`later` is the default: the plan's `Stack` line decides, and the first start after the plan proposes
+the commands and permission rules for it once) → permission
+prompts → quality-check tier → [integrations, visual artifacts] → telemetry (every profile, default
+no) → summary and next steps → "go on?" (ENTER starts the clarification; "no" prints the one
+command that continues). The next steps say that `telesma/spec/TECHNICAL_GUIDELINES.md` may
+stay as it is: untouched it means the defaults apply, and the start never waits for it. On an
+existing project `--setup` shows a menu with the state of every module and lets you change one at
+a time. Without a terminal the first start applies `recommended` silently and prints the summary.
+
+**Starting from an idea** (`telesma.sh --new <project>`): when there is no specification yet, an
+interactive Claude session interviews you — six plain questions, one at a time (what it does; who
+uses it and where; how you will know it works; what is *not* in the first version; data and
+privacy; look) — and writes `telesma/spec/` itself: `IDEA.md`, `REQUIREMENTS.md` (numbered, each
+with "when …, then …" checks), `APP_FLOW.md` for programs with a window, and the technical template
+filled with the technology it picked from your answers (a fixed table in
+`templates/instructions/INTERVIEW.md`: Windows-only window → C# / .NET 10 + WPF; Windows and Mac →
+Python + PySide6; a page over your own data → FastAPI + HTMX + SQLite; commands → Python). It reads
+the result back and freezes nothing until you say yes. `--new` sets `Experience: beginner`; the
+wizard then applies the recommended profile without the questions a beginner cannot answer, starts
+git, takes the test commands from the chosen stack and asks only about telemetry (in plain words:
+one yes/no, scope `full`; `metrics` and an own server stay in `--setup`). Then, instead of a list of
+commands, it asks whether to go on and runs the clarification; after the plan it asks whether to
+start building (`-m 1`). A beginner's plain start without `-m` offers two choices: build on, or tell
+Telesma what does not work (mode 2). Interrupted → run `--new` again, it continues from the files
+already written. The session runs with
+`--permission-mode acceptEdits` (it only writes files inside `telesma/`; commands still ask).
 
 Check tiers are sets of `### <check>` blocks under `## Checks`: `basic` = secrets, weakenings,
 tests, hygiene; `standard` adds dependencies, dependency-audit, sast, lint-types, dead-entry;
@@ -53,6 +78,7 @@ missing blocks from the template; the merge at startup respects removed blocks.
 |---|---|---|
 | `Clarified` | `no` | `no` = the next start runs the clarification phase; `yes` = the plan is ready, the mode menu appears. Telesma sets it itself at the end of clarification. |
 | `Language` | `en` | The language Telesma uses to talk to you and to write prose into state files (`en`, `pl`, `de`, …). Structural labels — section headers, field names, task keywords, tags — stay English because scripts parse them. Injected into the prompt as `LANGUAGE: <code>`. |
+| `Experience` | `developer` | Who Telesma talks to. `developer` = like a colleague (file names, section numbers, hashes). `beginner` = plain words, one question at a time with a default answer, the effect of an action instead of its command, progress in one sentence; the clarification accepts Telesma's assumptions for you and names the first three. Same mechanics, same permission prompts, same files — only the prose changes. Injected as the `EXPERIENCE: beginner` block (`templates/instructions/BEGINNER.md`); a developer pays no tokens for it. `telesma.sh --new` sets it. |
 
 ### `## Tests`
 
@@ -173,15 +199,16 @@ The permission judge. Off in the template; the setup wizard's recommended profil
 
 ### `## Telemetry`
 
-Optional quality events sent to a server you host. Off by default — nothing leaves your machine.
-Details: [TELEMETRY.md](TELEMETRY.md).
+Optional quality events sent to the shared Telesma hub (after a per-machine opt-in) or to a server
+you host. Off by default — nothing leaves your machine. Details: [TELEMETRY.md](TELEMETRY.md).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Send` | `no` | `yes` = send to `Endpoint`. |
-| `Endpoint` | `none` | Address of your own server. |
-| `API key` | `env:TELESMA_HUB_TOKEN` | A reference, never a literal. |
-| `Project label` | empty | Readable project name; empty = directory name. |
+| `Send` | `no` | `yes` = this project may be reported. For the shared hub each person must also opt in on their machine. |
+| `Endpoint` | `none` | `shared` = the shared Telesma hub; `https://…` = your own server. |
+| `API key` | `env:TELESMA_HUB_TOKEN` | Own server only. A reference (`env:`, `file:`, `cmd:`, `auto`), never a literal. |
+| `Scope` | `full` | Shared hub only: `metrics` = this project sends numbers only, for everyone. Can narrow a person's choice, never widen it. |
+| `Project label` | empty | Readable project name; empty = directory name (own server) or project hash (shared hub). |
 
 ### `## Permissions`
 

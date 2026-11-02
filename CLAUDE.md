@@ -27,8 +27,11 @@ The repository contains:
 
 ```
 telesma.sh                         Launcher: setup, format gate, rotation, validation, prompt assembly, start
+install.sh, install.ps1            One-line installers (macOS / Windows): dependencies, Telesma, desktop shortcut → --home
 templates/
 ├── instructions/                  Model instructions, assembled per mode by the launcher
+│   ├── INTERVIEW.md               Section -2: the --new interview that writes telesma/spec/ (idea, no spec)
+│   ├── BEGINNER.md                EXPERIENCE: beginner block, appended after LANGUAGE for Experience: beginner
 │   ├── CLARIFY.md                 Section -1: clarification and plan generation
 │   ├── CORE.md                    Sections 0-9 + global rules (every implementation mode)
 │   ├── INTERACTIVE.md             Sections 10 (decision log), 13 (backlog), 15 (release versions)
@@ -47,8 +50,11 @@ templates/
 ├── TEST_SCENARIOS_TEMPLATE.md     Skeleton of docs/test-scenarios/vX.Y.Z.md (section 15.7)
 ├── APP_FLOW_TEMPLATE.md           telesma/spec/APP_FLOW.md: user flows (## Step N) for e2e + recordings
 ├── UX_LINKS_TEMPLATE.md           telesma/spec/ux_ui/LINKS.md: registry of external mockup links
-├── guidelines/                    Technology guidelines copied to telesma/guidelines/ (general.md + one per tag, 46 tags)
-├── setup/                         Setup wizard: wizard.sh (questions, first start and --setup) + configure.py (engine:
+├── guidelines/                    Technology guidelines copied to telesma/guidelines/ (general.md + one per tag, 48 tags)
+├── messages/                      msg.sh (msg KEY 'English' → <lang>.txt) + pl.txt: launcher lines in Language
+├── setup/                         preflight.sh (git, python3, claude + sign-in; every start and --doctor;
+│                                  the ## Tests tools before a build session); home.sh (--home start menu);
+│                                  setup wizard: wizard.sh (questions, first start and --setup) + configure.py (engine:
 │                                  stack detection, profiles minimal/recommended/full, check tiers basic/standard/security)
 ├── hooks/telesma-permission-judge.py  Permission judge (PermissionRequest/PreToolUse/PostToolUse hook)
 ├── checks/                        Quality checks (## Checks, section 19), copied to telesma/checks/
@@ -89,6 +95,9 @@ examples/example-plan.md           Example plan
 
 `telesma.sh` never sends one fixed prompt. Per run it concatenates:
 
+- `--new` with no complete spec: `INTERVIEW.md` + `BEGINNER.md` + the list of files already in
+  `telesma/spec/` (an interactive session with `acceptEdits`; config.md is created before it with
+  `Experience: beginner`, the first-start wizard runs after it);
 - clarification (`Clarified: no`): `CLARIFY.md`;
 - implementation modes: `CORE.md` + `INTERACTIVE.md` + the mode file (`MODE_BUGFIX.md`,
   `MODE_REVIEW.md`, `MODE_ARTIFACTS.md`; mode 1 has none) + `CHECKS.md` when checks are enabled +
@@ -96,7 +105,9 @@ examples/example-plan.md           Example plan
   without integrations pays no tokens for them);
 - the state files (PLAN, PROJECT_CONTEXT, REPORT, SPEC_INDEX, config) as **prompt copies**,
   trimmed (finished phases collapsed to ids, template comments stripped, long table rows cut);
-- computed directives: `MODE: <mode>`, `LANGUAGE: <code>`, `VERSIONS: …` (last `v*` tag, its date,
+- computed directives: `MODE: <mode>`, `LANGUAGE: <code>` (+ the `EXPERIENCE: beginner` block
+  from `BEGINNER.md` when `## Project → Experience` is `beginner`; it changes prose only, never
+  mechanics or file structure), `VERSIONS: …` (last `v*` tag, its date,
   commits since, attack-surface changes), `INTEGRATIONS: …`, `GUIDELINES_INDEX:`, the next-task
   `HINT:`, validator `ERRORS:`, pending `telesma/changes/`, and the contents of `telesma/state/BLOCKED.md` /
   `telesma/state/WAITING.md` left by the previous session.
@@ -131,9 +142,11 @@ is written in the user's `Language`; the structure is always English.
 - **Checks never print secrets** (findings carry rule, file, line and a hash) and **never block
   on network failure** (unreachable registry or OSV = warning). Exceptions are the human's: writes
   to `telesma/state/CHECK_EXCEPTIONS.md`, `telesma/checks/` and the `## Checks` section ask the user.
-- **Telemetry is off by default**, goes only to the user's own self-hosted server, never blocks
-  startup, and never sends `telesma/spec/`, source code, `telesma/changes/` or commands from `PERMISSIONS.jsonl`
-  (counters only). `tools/test-telemetry.py` pins this with canaries.
+- **Telemetry is off by default**; it sends only after an explicit per-machine opt-in, to the shared
+  Telesma hub (opt-in file `~/.config/telesma/hub`, never a committed `Send: yes` alone; no sender
+  name, no directory name) or to the user's own server; it never blocks startup, and never sends
+  `telesma/spec/`, source code, `telesma/changes/` or commands from `PERMISSIONS.jsonl` (counters
+  only). `tools/test-telemetry.py` pins this with canaries.
 - **Repair never deletes what git does not know about**, and opens only REPORT.md,
   REPORT_ARCHIVE.md, PLAN.md and PLAN_ARCHIVE.md. A second run changes nothing.
 - **Rotation is block-based and date-driven**: an entry is a block, never a line; the N newest by
@@ -142,7 +155,10 @@ is written in the user's `Language`; the structure is always English.
 - **Prompt-copy trimming never touches files on disk.**
 - **Release version tags are never created without the user's answer**, never with `-f`, never
   pushed by Telesma. Commit/PR footer is exactly `🤖 Generated with Telesma`.
-- **Everything in English** — identifiers, comments, messages, instructions, docs.
+- **Everything in English** — identifiers, comments, messages, instructions, docs. The one
+  exception is `templates/messages/<lang>.txt`: translations of the launcher lines a person sees
+  from the idea to the first build, looked up by `msg KEY 'English text'` (the English stays in
+  the code; a missing key falls back to it). `test-setup.py` keeps every catalog complete.
 - **Python is stdlib-only; Bash is plain Bash 3.2+** (macOS default). Telesma is cloned, not installed.
 
 ## Versions
@@ -177,6 +193,7 @@ A parser change comes with a fixture that would have failed before it. The bench
 
 ```bash
 ./telesma.sh /path/to/project            # first run: creates telesma/spec/; second: config.md + setup wizard; later: mode menu
+./telesma.sh --new /path/to/project          # no spec yet: interview writes telesma/spec/, Experience: beginner, then the wizard
 ./telesma.sh --setup /path/to/project        # configuration menu (tests, judge, checks, integrations, artifacts, language)
 ./telesma.sh /path/to/project -i         # interactive (required for clarification)
 ./telesma.sh /path/to/project -m 1       # autonomous loop over telesma/state/PLAN.md
@@ -184,6 +201,8 @@ A parser change comes with a fixture that would have failed before it. The bench
 ./telesma.sh /path/to/project -m 3       # code review chat (forces -i)
 ./telesma.sh /path/to/project -m 4       # visual artifact backfill (autonomous)
 ./telesma.sh --repair /path/to/project         # repair state files from git history, no Claude
+./telesma.sh --home [folder]                   # start menu of the desktop shortcut: new idea or a project
+./telesma.sh --doctor [project]                # what this machine still needs (git, python3, claude, sign-in; the project's tools)
 ./telesma.sh --integrations /path/to/project   # GitHub / Specky wizard
 ./telesma.sh --sync-specky /path/to/project    # Specky sync into telesma/changes/, no loop
 ```

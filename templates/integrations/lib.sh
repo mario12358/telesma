@@ -68,15 +68,19 @@ ask_value() {
     echo "${answer:-$default}"
 }
 
-# Yes/no question: ask_yes_no "Text" y|n → exit code 0 = yes
+# A setup.sh runs on its own, without the launcher's message catalog: English then.
+declare -F msg > /dev/null 2>&1 || msg() { local text="$2"; shift 2; printf -- "$text" "$@"; }
+
+# Yes/no question: ask_yes_no "Text" y|n → exit code 0 = yes. The letters follow the catalog
+# (Polish: T/n), and `t` counts as yes in every language.
 ask_yes_no() {
     local text="$1" default="${2:-n}" answer
     if [[ "$default" == "y" ]]; then
-        read -r -p "$text [Y/n]: " answer < /dev/tty || answer=""
+        read -r -p "$text [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=""
         [[ ! "$answer" =~ ^[nN] ]]
     else
-        read -r -p "$text [y/N]: " answer < /dev/tty || answer=""
-        [[ "$answer" =~ ^[yY] ]]
+        read -r -p "$text [$(msg no.yes 'y/N')]: " answer < /dev/tty || answer=""
+        [[ "$answer" =~ ^[yYtT] ]]
     fi
 }
 
