@@ -205,6 +205,10 @@ def env_for(tmp, **extra):
     env = dict(os.environ, PATH=f"{fake_bin(tmp)}{os.pathsep}{os.environ.get('PATH', '')}", TELESMA_NO_UPDATE_CHECK="1",
                FAKE_LOG=str(tmp / "claude.log"), CONFIGURE_PY=str(CONFIGURE),
                XDG_CONFIG_HOME=str(tmp / "xdg"), TELESMA_SHARED_HUB="http://127.0.0.1:9")
+    # LC_ALL and LC_MESSAGES win over LANG (POSIX): the macOS CI runner sets LC_ALL=en_US.UTF-8, and
+    # every test that gives LANG=pl_PL to see the Polish lines got English
+    env.pop("LC_ALL", None)
+    env.pop("LC_MESSAGES", None)
     env.update(extra)
     return env
 
@@ -256,8 +260,7 @@ def drive(cmd, answers, env, timeout=120):
     """Runs `cmd` on a pty; sends the next answer after every prompt (a line ending in ': ')."""
     pid, fd = pty.fork()
     if pid == 0:
-        os.environ.update(env)
-        os.execvp(cmd[0], cmd)
+        os.execvpe(cmd[0], cmd, env)       # env as given: a variable env_for removed stays removed
     out, buf, i = b"", b"", 0
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -559,7 +562,8 @@ def test_preflight():
         claude.chmod(0o755)
         project = tmp / "p"
         r = subprocess.run([shutil.which("bash"), str(LAUNCHER), str(project)], capture_output=True, text=True,
-                           env=dict(os.environ, PATH=str(bin_dir), LANG="pl_PL.UTF-8", TELESMA_NO_UPDATE_CHECK="1"),
+                           env=dict(os.environ, PATH=str(bin_dir), LANG="pl_PL.UTF-8", LC_ALL="", LC_MESSAGES="",
+                                    TELESMA_NO_UPDATE_CHECK="1"),
                            stdin=subprocess.DEVNULL, timeout=60)
         out = strip(r.stdout + r.stderr)
         ok(r.returncode == 1 and not project.exists(), f"missing pieces: exit 1, nothing created (exit {r.returncode})")
