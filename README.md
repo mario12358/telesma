@@ -124,7 +124,8 @@ asks before each step; at the end there is a **Telesma** icon on your desktop.
   ```
 
 It installs the few programs Telesma needs, then Claude Code, and opens your browser to sign in to
-your Claude account. The same line, run again later, updates Telesma.
+your Claude account. When a new Telesma version is out, Telesma says so at the start and asks
+whether to update; the same install line, run again, does it too.
 
 **2. Double-click Telesma.** A menu opens: *a new idea*, or one of your programs. Pick a new idea
 and Telesma interviews you: six plain questions, one at a time, about ten minutes. It reads the
@@ -164,7 +165,8 @@ the required column (and that Claude Code is signed in) and says what to install
 runs the same check on its own (`--doctor <project>` also checks the programs its test commands call). On Windows Telesma runs in Git Bash, which Claude Code needs there too.
 The one-line installers above put Telesma in `~/.telesma` (`%USERPROFILE%\.telesma` on Windows, opened in Git
 Bash) and the desktop icon runs `telesma.sh --home`; a rerun updates it, a clone it cannot update is kept as
-`.telesma.old-<date>`.
+`.telesma.old-<date>`. Every start checks for a newer release and offers `git pull --ff-only`
+(`TELESMA_NO_UPDATE_CHECK=1` turns the check off).
 
 ## Quick start
 

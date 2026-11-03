@@ -49,6 +49,7 @@ MODE=""
 TELESMA_FORMAT=18
 
 # Parse flags
+TELESMA_ARGV=("$@")          # the start as typed: the launcher execs itself after updating Telesma
 while [[ $# -gt 0 ]]; do
     case $1 in
         -i|--interactive)
@@ -351,8 +352,14 @@ fi
 # the project from THIS clone. The check never blocks anything: no network, no remote branch,
 # a directory without git = silence. The fetch has a time limit, because starting work must not
 # wait on somebody else's server. To disable: TELESMA_NO_UPDATE_CHECK=1.
+# A newer release (a `v*` tag the clone does not have) is offered right there, in the system
+# language: "yes" is `git pull --ff-only` — nothing local is overwritten; a clone with edits or
+# its own commits does not fast-forward and gets the command instead — and then the launcher
+# starts itself again, because Bash reads a script as it runs it and must not have it swapped
+# underneath (TELESMA_UPDATED stops a second round). A person who clicked the desktop icon
+# never types git; the one who clones and pulls still can.
 check_telesma_up_to_date() {
-    [[ -n "${TELESMA_NO_UPDATE_CHECK:-}" ]] && return 0
+    [[ -n "${TELESMA_NO_UPDATE_CHECK:-}" || -n "${TELESMA_UPDATED:-}" ]] && return 0
     git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null || return 0
     local branch upstream
     branch=$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 0
@@ -362,7 +369,8 @@ check_telesma_up_to_date() {
     fi
     local remote="${upstream%%/*}"
     # fetch in the background with a ~6 s limit — git has no timeout of its own and macOS has no `timeout`
-    git -C "$SCRIPT_DIR" fetch --quiet "$remote" "$branch" &>/dev/null &
+    # the release tags too: a fetch of one branch by name does not follow tags on its own
+    git -C "$SCRIPT_DIR" fetch --quiet "$remote" "$branch" 'refs/tags/v*:refs/tags/v*' &>/dev/null &
     local pid=$! i
     for i in $(seq 1 30); do
         kill -0 "$pid" 2>/dev/null || break
@@ -376,7 +384,30 @@ check_telesma_up_to_date() {
     local behind ahead
     behind=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..$upstream" 2>/dev/null) || return 0
     ahead=$(git -C "$SCRIPT_DIR" rev-list --count "$upstream..HEAD" 2>/dev/null) || return 0
-    if (( behind > 0 )); then
+    local have want answer
+    have=$(git -C "$SCRIPT_DIR" describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
+    want=$(git -C "$SCRIPT_DIR" describe --tags --abbrev=0 --match 'v*' "$upstream" 2>/dev/null || true)
+    if (( behind > 0 )) && [[ -n "$want" && "$want" != "$have" ]]; then
+        echo -e "${YELLOW}$(msg upd.new 'A new Telesma version is out: %s (this one is %s).' "${want#v}" "${have:+${have#v}}${have:-?}")${NC}"
+        if (( ahead == 0 )) && { true < /dev/tty; } 2>/dev/null; then
+            read -r -p "$(msg upd.ask 'Update now? Nothing of yours is touched.') [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
+            case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+                ""|y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
+                    if git -C "$SCRIPT_DIR" pull --quiet --ff-only "$remote" "$branch" 2>/dev/null; then
+                        echo -e "${GREEN}$(msg upd.done 'Telesma updated to %s — starting again.' "${want#v}")${NC}"
+                        echo ""
+                        TELESMA_UPDATED=1 exec bash "$0" "${TELESMA_ARGV[@]}"
+                    fi
+                    echo -e "${RED}$(msg upd.fail 'The update did not go through (changed by hand?). Update it with: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")${NC}" ;;
+                *) echo "$(msg upd.later 'Not now. Telesma asks again at the next start; or run: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")" ;;
+            esac
+        elif (( ahead > 0 )); then
+            echo -e "${YELLOW}  You also have $ahead commit(s) of your own — the pull needs a merge: git -C \"$SCRIPT_DIR\" pull${NC}"
+        else
+            echo "  $(msg upd.cmd 'Update it with: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")"
+        fi
+        echo ""
+    elif (( behind > 0 )); then
         echo -e "${YELLOW}⚠ Telesma: this clone is $behind commit(s) behind $upstream — the templates, hooks and instructions copied into the project are out of date.${NC}"
         git -C "$SCRIPT_DIR" log --oneline "HEAD..$upstream" | head -5 | sed 's/^/    /'
         (( behind > 5 )) && echo "    … and $((behind - 5)) more"

@@ -612,6 +612,52 @@ def test_smart_app_control():
         ok("nie dotyczy" in run("0x1", "uv run pytest -q", "verbose"), "--doctor: on, but this Python project is not affected")
 
 
+def test_update_offer():
+    print("launcher — a newer release upstream is offered at the start and pulled on yes")
+    branch = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if not branch or branch == "HEAD":
+        print("  (skipped: detached HEAD)")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        up, c = tmp / "upstream", tmp / "clone"
+        genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+        subprocess.run(["git", "clone", "-q", str(ROOT), str(up)], check=True)
+        # a clone carries commits only: the launcher and the catalog as they are in the working tree
+        for rel in ("telesma.sh", "templates/messages/pl.txt", "templates/setup/preflight.sh"):
+            shutil.copy(ROOT / rel, up / rel)
+        subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "working tree"], env=genv)
+        subprocess.run(["git", "clone", "-q", str(up), str(c)], check=True)
+        (up / "CHANGELOG.md").write_text((up / "CHANGELOG.md").read_text() + "\n## 99.0.0\n")
+        subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "99.0.0"], check=True, env=genv)
+        subprocess.run(["git", "-C", str(up), "tag", "-a", "v99.0.0", "-m", "99"], check=True, env=genv)
+        launcher = c / "telesma.sh"
+
+        def tag_of(repo):
+            return subprocess.run(["git", "-C", str(repo), "describe", "--tags", "--abbrev=0", "--match", "v*"], capture_output=True, text=True).stdout.strip()
+        # no terminal: the news and the command, nothing pulled
+        p1 = tmp / "p1"
+        r = subprocess.run(["bash", str(launcher), str(p1)], env=env_for(tmp, TELESMA_NO_UPDATE_CHECK="", LANG="pl_PL.UTF-8"),
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        out = strip(r.stdout)
+        ok("Jest nowa wersja Telesmy: 99.0.0" in out and "Zaktualizuj poleceniem" in out and "pull --ff-only" in out,
+           "no terminal: the new version named, the command given")
+        ok(tag_of(c) != "v99.0.0", "no terminal: nothing pulled")
+        # a terminal, "n": nothing pulled, asks again next time
+        out = drive(["bash", str(launcher), str(tmp / "p2")], ["n"], env_for(tmp, TELESMA_NO_UPDATE_CHECK="", LANG="pl_PL.UTF-8"))
+        ok("Zaktualizować teraz?" in out and "Nie teraz" in out and tag_of(c) != "v99.0.0", "answer n: not pulled, told it asks again")
+        # a terminal, ENTER: pulled, the launcher starts again and goes on with the project
+        p3 = tmp / "p3"
+        out = drive(["bash", str(launcher), str(p3)], [""], env_for(tmp, TELESMA_NO_UPDATE_CHECK="", LANG="pl_PL.UTF-8"))
+        ok("zaktualizowana do 99.0.0" in out and tag_of(c) == "v99.0.0", f"ENTER: pulled to the new release ({tag_of(c)})")
+        ok(out.count("Autonomous Development Loop") == 2 and (p3 / "telesma" / "spec").is_dir(),
+           "started again after the update and went on with the project")
+        # up to date: silence
+        r = subprocess.run(["bash", str(launcher), str(p3)], env=env_for(tmp, TELESMA_NO_UPDATE_CHECK=""),
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        ok("new Telesma version" not in strip(r.stdout) and "behind" not in strip(r.stdout), "up to date: no update line")
+
+
 def test_home_menu():
     print("launcher — --home: the desktop shortcut's start menu")
     with tempfile.TemporaryDirectory() as d:
@@ -814,6 +860,7 @@ if __name__ == "__main__":
     test_clarification_end()
     test_preflight()
     test_smart_app_control()
+    test_update_offer()
     test_home_menu()
     test_installer()
     test_message_catalogs()

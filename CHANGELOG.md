@@ -4,7 +4,7 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
-## Unreleased (1.1.1)
+## 1.1.1 — 2026-11-03
 
 State format: 18 (unchanged).
 
@@ -17,6 +17,11 @@ State format: 18 (unchanged).
   tell the model to stop with `TELESMA BLOCKED` on that error instead of retrying — the first
   Windows beginner project hit it three times half-way through.
 - `SHOWCASE.md`: the first six programs built with Telesma, with screenshots.
+- A newer Telesma release is offered at the start: "A new Telesma version is out: 1.2.0 (this one
+  is 1.1.0). Update now?" in the system language; yes is `git pull --ff-only` (nothing local is
+  overwritten — a clone with edits gets the command instead) and the launcher starts itself again.
+  Without a terminal, the news and the command. Commits behind without a new release: the line
+  for developers as before.
 
 ## 1.1.0 — 2026-11-02
 
