@@ -46,7 +46,7 @@ MODE=""
 # migration to the version gate below) AND for every change to the instructions or guidelines
 # whose effect should be measurable: telemetry stamps events with this number and only by it
 # tells "before the change" from "after".
-TELESMA_FORMAT=18
+TELESMA_FORMAT=19
 
 # Parse flags
 TELESMA_ARGV=("$@")          # the start as typed: the launcher execs itself after updating Telesma
@@ -446,7 +446,8 @@ msg_load_language "$TELESMA_DIR/config.md"
 # Format gate — the project's state format vs this Telesma (telesma/state/.telesma-version)
 # =============================================================================
 # Runs BEFORE anything creates, reads or writes a file in the project: every step below expects
-# the layout and the structure of format 18. A project of an earlier, pre-release version keeps
+# the layout and the structure of format 18+ (the one public layout; later numbers so far mark
+# instruction changes only). A project of an earlier, pre-release version keeps
 # its files in ralph/ in the project root; it is converted once by a separate migration tool
 # that its users got with it. Starting on it unconverted would put an empty telesma/ next to the
 # old files, so the launcher stops before touching anything.
@@ -462,6 +463,16 @@ fi
 if [[ -f "$VERSION_FILE" ]]; then
     PROJECT_FORMAT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)
     [[ "$PROJECT_FORMAT" =~ ^[0-9]+$ ]] || PROJECT_FORMAT=0
+    # Steps between public formats. A step that changes no file in the project (an instruction
+    # change the telemetry should be able to date) only stamps the next number; a step that
+    # rewrites files does its migration here, before anything else reads them.
+    while (( PROJECT_FORMAT < TELESMA_FORMAT )); do
+        case "$PROJECT_FORMAT" in
+            18) PROJECT_FORMAT=19 ;;   # 19: recall of earlier decisions (section 0.6), instructions only
+            *) break ;;
+        esac
+        echo "$PROJECT_FORMAT" > "$VERSION_FILE"
+    done
     if (( PROJECT_FORMAT < TELESMA_FORMAT )); then
         echo -e "${RED}Error: telesma/state/.telesma-version says format ${PROJECT_FORMAT}; this Telesma starts at ${TELESMA_FORMAT}.${NC}"
         echo -e "${RED}Nothing in the project has been changed.${NC}"

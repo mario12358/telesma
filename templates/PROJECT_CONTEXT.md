@@ -19,6 +19,11 @@ This file keeps the project context that survives `/compact`.
 <!-- telesma.sh keeps its 40 latest rows in it — older ones go to telesma/state/CONTEXT_ARCHIVE.md     -->
 <!-- (write-only). A decision that is still BINDING — one whose violation would break the project — -->
 <!-- mark with 📌 in the Decision column: a row with 📌 is never rotated.                           -->
+<!-- The row is the conclusion. When a full entry exists (an interactive exchange, a clarification   -->
+<!-- answer), the Reason cell ends with a pointer to it: `→ DECISIONS.md 2026-04-23 16:42`,         -->
+<!-- `→ QUESTIONS.md A7` — the entry keeps the rejected alternatives and the condition for revisiting. -->
+<!-- An overturned decision is EDITED in place (`~~old~~ → new`, today's date, `superseded: …`),     -->
+<!-- never added as a second row: two rows claiming opposite things are two truths in every prompt. -->
 
 | Date | Decision | Reason |
 |------|----------|--------|
@@ -33,6 +38,7 @@ This file keeps the project context that survives `/compact`.
 <!-- telesma.sh keeps the 30 latest rows here, older ones → telesma/state/CONTEXT_ARCHIVE.md.      -->
 <!-- A pitfall that COMES BACK despite being written down (happened ≥2 times): mark it with 📌 -->
 <!-- — such a row never rotates. Leave a one-off slip unmarked.                                -->
+<!-- A pitfall fixed in bugfix mode points at its entry: `… → BUGFIXES.md 2026-05-02 09:10`.    -->
 
 | Problem | Solution |
 |---------|----------|

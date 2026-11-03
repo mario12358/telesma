@@ -33,9 +33,9 @@ and the diagnosis with `--repair`.
 | `telesma/state/PLAN.md` | Phases and tasks with checkboxes, dependencies, tags, acceptance criteria, `## Spec coverage`. | Telesma after clarification, or you |
 | `telesma/state/PROJECT_CONTEXT.md` | Architecture, `## Key decisions`, `## Known problems and solutions`, `## Current state`. Survives compaction. | Telesma |
 | `telesma/state/REPORT.md` | `## Summary`, `## Test status`, `## Task history`, `## Change history`, `## Visual artifacts`, `## Problem log`. | Telesma |
-| `telesma/state/DECISIONS.md` | Append-only log of interactive exchanges after the loop ends. Never loaded into a prompt. | Telesma (section 10) |
-| `telesma/state/BUGFIXES.md` | Append-only log of mode 2 fixes. Never loaded into a prompt. | Telesma (section 11) |
-| `telesma/state/REVIEWS.md` | Append-only log of mode 3 reviews: scope, findings by severity, actions, verdict. Never loaded into a prompt. | Telesma (section 12) |
+| `telesma/state/DECISIONS.md` | Append-only log of interactive exchanges after the loop ends. Never loaded into a prompt; grepped for a topic before an answer, a proposal, a change plan or a question (section 0.6), and read where a `Key decisions` row points (`→ DECISIONS.md <date time>`). | Telesma (section 10) |
+| `telesma/state/BUGFIXES.md` | Append-only log of mode 2 fixes. Never loaded into a prompt; grepped during a diagnosis (section 0.6); a recurring cause also becomes a `Known problems` row pointing at its entry. | Telesma (section 11) |
+| `telesma/state/REVIEWS.md` | Append-only log of mode 3 reviews: scope, findings by severity, actions, verdict. Never loaded into a prompt; grepped so a finding accepted as-is once is not raised again as new (section 0.6). | Telesma (section 12) |
 | `telesma/state/BACKLOG.md` | Topics for later — **read-write**; completed items older than 30 days move to `telesma/state/BACKLOG_DONE.md`. | Telesma + you (section 13) |
 | `telesma/state/BLOCKED.md` | The last `TELESMA BLOCKED`, so it survives pipe mode. Shown and injected at the next start; deleted once resolved. | Telesma (section 5) |
 | `telesma/state/WAITING.md` | The last `TELESMA WAITING` (GitHub integration: open-PR limit reached, nothing broken). Deleted after PR reconciliation. | Telesma (section 17) |

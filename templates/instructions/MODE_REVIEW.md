@@ -43,6 +43,13 @@ For each changed file:
    - The spec fragment through SPEC_INDEX (section 0.1) — only the sections relevant to the task
    - `telesma/guidelines/general.md` + one file per `(tech: ...)` tag (section 0.2)
    - `telesma/state/PROJECT_CONTEXT.md` — architectural decisions (if the file concerns an area described there)
+   - **Recall (section 0.6)**: Grep the changed files' names and the task's topic in
+     `telesma/state/REVIEWS.md`, `DECISIONS.md`, `CONTEXT_ARCHIVE.md`. A finding the user already
+     marked "accepted as-is" with a reason in an earlier review is not raised again as new — mention
+     it in one line with the date and move on. A decision that explains a pattern ("we agreed that
+     handlers return raw dicts here, see 2026-04-23") turns an apparent inconsistency into
+     conformance; a decision the code violates turns a 🟢 nit into a 🔴, with the decision cited
+     as the criterion.
 4. **No mapping to a task** (files outside PLAN.md, e.g. configuration, dotfiles) → load only `general.md` + guidelines deduced from the file extension (`.py` → `python.md`, `.tsx` → `react.md` + `typescript.md`)
 
 ### Step 3: Raising findings

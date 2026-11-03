@@ -372,6 +372,16 @@ After ALL questions are answered and the contradictions and assumptions are reso
    ```
    A section with no tasks and no "out of scope — reason" justification = a hole in the plan: go back and add
    tasks. In an autonomous loop this type of error only surfaces at the end of the project.
+6a. **The user's answers become decisions.** Every contradiction resolution, accepted assumption
+   and answer whose consequences reach beyond one task — the stack, the architecture, the data
+   model, a convention, a scope cut ("MVP without orders"), security — gets a row in `## Key
+   decisions` of `telesma/state/PROJECT_CONTEXT.md`: today's date, the decision in one sentence,
+   a Reason ending with the pointer `→ QUESTIONS.md S1` / `A7` / `Q3`. Mark `📌` those whose
+   violation would break the project (stack, data model, security, an explicit "never X").
+   `QUESTIONS.md` is never read again after this step except through a Grep (section 0.6 of the
+   implementation instructions): without the rows, the most deliberate decisions of the whole
+   project — the ones the user answered in person — are invisible to every later session, and a
+   change request can quietly reverse them.
 7. **Plan self-review (the last step before finishing):** read the generated plan with fresh
    eyes against the checklist: task atomicity / a feasible order / dependencies exist and have no cycles /
    a test with every implementation / e2e at the end of every phase with UI / the packaging task

@@ -18,6 +18,12 @@ You recognise the mode by the `MODE: bugfix` directive at the end of the startup
    - Read the logs/stack trace/message from the user's message
    - Locate the source file (Grep for the function/class/message name, Read the surrounding lines)
    - If the bug concerns a requirement — read the relevant spec fragment through SPEC_INDEX (section 0.1)
+   - **Recall (section 0.6)**: Grep the error message, the function or the module in
+     `telesma/state/BUGFIXES.md`, `DECISIONS.md`, `CONTEXT_ARCHIVE.md`, `REPORT_ARCHIVE.md`. The
+     same bug fixed before means the earlier fix did not hold — say so, and the diagnosis starts
+     from why. A decision that explains the behaviour ("we agreed the import skips rows without a
+     date") means it may not be a bug at all: tell the user what was agreed and when, before
+     proposing a change.
    - Load the guidelines `general.md` + the tag implied by the modified file (e.g. `python.md` for `.py`, `react.md` for `.tsx`)
 
 2. **Fix proposal** — present it to the user in 2-4 sentences:
@@ -62,11 +68,25 @@ You recognise the mode by the `MODE: bugfix` directive at the end of the startup
    ```
    Date format from `date '+%Y-%m-%d %H:%M'`.
 
-8. **Version proposal** — if there was a commit: one sentence in the short form of section 15.1
+8. **A pitfall for the next session.** When the cause is a pattern that will come back on similar
+   code — an API quirk, an ordering rule, a convention nobody wrote down ("the ORM needs a flush
+   before the id is readable", "component X swallows `onChange` when `value` is undefined") — add
+   ONE row to `## Known problems and solutions` in `telesma/state/PROJECT_CONTEXT.md`: the pitfall,
+   the fix in a few words, and the pointer `→ BUGFIXES.md YYYY-MM-DD HH:MM` to the entry you just
+   wrote. Apply section 7's rule: the SECOND time the same pitfall is fixed, it gets a guard in
+   code (`→ guard: <name>`), not a stronger note. A typo, a one-off slip or a bug in logic that
+   exists in one place stays only in BUGFIXES.md — the table is loaded into every session and
+   earns its place only with things that recur. Bugfix mode is the only place where the
+   distillation of section 7 does not run on its own (there is no end of phase here), so this
+   step is the one that keeps production bugs from being fixed from scratch twice.
+   An entry whose cause is a `Key decisions` row that turned out wrong → supersede that row
+   (section 7), do not leave it standing next to the fix.
+
+9. **Version proposal** — if there was a commit: one sentence in the short form of section 15.1
    ("The fix is in the repo. Release it as version vX.Y.(Z+1)? …"). "yes" → section 15 (scenarios file,
    release version tag, push command); "no" → nothing, the fix goes into the next release. A user who
    said "do not ask about releases" is not asked until the end of the session.
-9. After writing the entry — stay in bugfix mode, wait for the next report. The session ends when the user closes the CLI or asks for a restart.
+10. After writing the entry — stay in bugfix mode, wait for the next report. The session ends when the user closes the CLI or asks for a restart.
 
 ### What NOT to do in bugfix mode
 

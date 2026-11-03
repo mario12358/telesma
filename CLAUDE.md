@@ -167,10 +167,13 @@ Two independent numbers:
 
 - **Release version** (`vX.Y.Z` git tag, `CHANGELOG.md`) — what users install.
 - **`TELESMA_FORMAT`** in `telesma.sh` — internal state-format / migration counter, stored per
-  project in `telesma/state/.telesma-version`. Currently **18**. Bump it when a project's files need a
+  project in `telesma/state/.telesma-version`. Currently **19**. Bump it when a project's files need a
   migration, *and* when an instruction change should be measurable (telemetry tells "before" from
   "after" by this number). The format gate in the launcher runs before anything creates, reads or
-  writes a file in the project: 18 = current, the first public format.
+  writes a file in the project: 18 = the first public format (the layout every later number
+  shares), 19 = recall of earlier decisions (section 0.6, instructions only — the gate stamps a
+  format-18 project 19 without touching any other file). A new step is one `case` line in the
+  gate's loop.
 
 ## Tests
 

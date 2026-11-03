@@ -125,6 +125,52 @@ decisions with architectural impact are **dual-written** to the `## Key decision
 `PROJECT_CONTEXT.md`; otherwise the next autonomous session would never see them. Topics for later
 go to `telesma/state/BACKLOG.md`, which, unlike the logs, is read-write.
 
+**Write-only turned out to mean forgotten** (format 19). "Never loaded into a prompt" was read by
+the model as "never read", and the instructions said so outright. A review of every place where
+the model answers, proposes, plans or asks found no step that looked back: section 10 answered a
+design question from scratch and logged the result — a second decision next to the first when the
+topic came back months later; change processing (0.3) analysed impact against the plan alone, so
+a change could silently reverse a `📌` decision or a clarification answer; `QUESTIONS.md` — the
+answers the user gave in person — was a source for plan generation and never again; bugfix mode
+did not touch `PROJECT_CONTEXT.md`, so a production bug fixed there never became a pitfall; a
+reversed decision became two contradictory rows, and a `📌` row never rotates; and nothing pointed
+back into `CONTEXT_ARCHIVE.md` once a row had rotated out.
+
+The fix keeps the prompt diet intact and adds a **way back on demand**, modelled on the spec index:
+a recall step (0.6) — one Grep of the topic's words across the logs and archives before any answer,
+proposal, change plan or question, a hit opening the reply ("on 2026-04-23 we agreed X because
+Y — does that still hold?"); a **pointer** from a `Key decisions` / `Known problems` row to its
+full entry (`→ DECISIONS.md 2026-04-23 16:42`, `→ QUESTIONS.md A7`, `→ BUGFIXES.md …`), so the row
+stays a one-line conclusion and the rejected alternatives are one Read away; clarification answers
+written into `Key decisions` with that pointer; a *conflict with a decision* step in 0.3 that
+blocks instead of planning; bugfix mode feeding `Known problems`; and **supersession** — an
+overturned decision is edited in place (`~~old~~ → new`, `superseded: …`), never added beside the
+old row. No structural token changed, so no parser and no migration; the format number moved so
+that telemetry can tell before from after.
+
+The first live test (two projects, one question each, 2026-11-03) showed where the step is
+fragile. The Grep and the Read happened both times; the failure was in the retelling. Asked
+"shall we switch to OpenAI for images?", the model found the entry that said *Google directly,
+OpenAI only through the proxy* and opened with "we agreed the private build may use OpenAI
+directly" — a paraphrase written while already weighing the proposal, bent towards what the
+proposal needed, which the user who did not remember the entry could not catch. It then
+recommended the switch; one "yes" away from the contradictory second decision the step exists to
+prevent. Two rules followed: the hit is **quoted verbatim** (date and `Outcome` sentence in
+quotation marks) before it is interpreted, and a proposal that contradicts the hit gets *change
+the decision, or the proposal?* as the whole reply — the 0.3 rule for change files, now also for
+the chat. A launcher-side "related decisions" list would not have helped: the model reached the
+right entry and misread it.
+
+The second run of the same question found a third failure, this one in the log itself. The
+first run had logged its unanswered recommendation ("new OpenAI generator… awaiting the owner's
+confirmation and key") as a `Kind: question` entry; the second run's Grep hit that entry first,
+read the repeated question as the awaited confirmation and started writing code — a shared
+helper, a new generator, an edit to the existing one — before saying a word. Two more rules:
+an outcome that decides nothing starts with `No decision — awaits: …`, and recall treats such
+an entry, or any unanswered recommendation, as the question coming back, never as consent; and
+until the user answers *change the decision, or the proposal?* no tool that writes may run — the
+answer is the gate, not the model's confidence that it knows what it will be.
+
 ## 7. Release versions and manual test scenarios
 
 `vX.Y.Z` marks what shipped; it is deliberately separate from the internal `telesma/phase-<ID>`
@@ -651,3 +697,7 @@ Since 1.0 the launcher asks instead of assuming, once, in the order a human can 
   of the visual-artifacts module and appear when that module is turned on; before, every project
   started with three "unfilled template" markers, two of them irrelevant to most projects.
 
+## 21. Adopting an existing project (proposal)
+
+Not implemented yet. The design — why the task history is not reconstructed from commits, what is
+filled from the code and what from git, the `--adopt` flow — is in [`ADOPTION.md`](ADOPTION.md).

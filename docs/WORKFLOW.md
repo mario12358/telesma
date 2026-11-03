@@ -426,9 +426,13 @@ debugging. The file is for you.
 
 What DECISIONS.md does **not** do:
 
-- It is **never loaded into a prompt**. Telesma does not read it in the autonomous loop. Decisions with
-  architectural impact are therefore **also** written to `## Key decisions` in
-  `telesma/state/PROJECT_CONTEXT.md`, which the next autonomous session does see.
+- It is **never loaded into a prompt**. Telesma reads it in one way only: a Grep for the topic's
+  words before answering a design question, proposing a fix, planning a change request or asking you
+  something (section 0.6) — a hit opens the reply with what was agreed and when, and asks whether it
+  still holds. Decisions with architectural impact are therefore **also** written to
+  `## Key decisions` in `telesma/state/PROJECT_CONTEXT.md`, which the next autonomous session does
+  see; the row ends with a pointer back to the entry (`→ DECISIONS.md 2026-04-23 16:42`). A decision
+  you later overturn is edited in that row (`~~old~~ → new`, `superseded: …`), not added beside it.
 - It does not replace `telesma/changes/`: if an outcome requires plan changes, use the change channel.
 - It does not replace REPORT.md: autonomous iterations are logged there.
 

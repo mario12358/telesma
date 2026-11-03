@@ -14,6 +14,24 @@ answering the user's questions. One proposal per session; another one only after
 
 **Procedure per exchange:**
 
+0. **Recall first (section 0.6)** — when the message is a design question, a proposal, a request
+   for a change or a doubt about something built: Grep 2–3 words of its topic in `DECISIONS.md`,
+   `QUESTIONS.md`, `BUGFIXES.md`, `CONTEXT_ARCHIVE.md`. A hit → your answer OPENS with it, **quoted
+   verbatim** — the date and the `**Outcome**` sentence or the row's text in quotation marks, not
+   your summary of it ("On 2026-04-23: «…»; the condition for revisiting was Z — does that still
+   hold?") — and builds on it. The user may not remember; you, without the Grep, certainly do not,
+   and a paraphrase made while already weighing the new idea drifts towards what the idea needs.
+   **A proposal that contradicts the hit** (a `📌` row, a clarification answer, an outcome that
+   rules it out) gets no recommendation and no plan in that reply: first sentence names the
+   decision, second asks *change the decision, or the proposal?* — and the reply ends there
+   (CORE 0.6 step 3). **The user's answer is the gate for every tool that writes**: until it
+   arrives, no Write, no Edit, no Bash that changes a file — not "a small helper first", not
+   the log entry for a decision that has not been made. A hit whose outcome starts with
+   `No decision — awaits:` or is a recommendation nobody answered is NOT an agreement, however
+   recent and however much it resembles the new request: the question is still open, ask it
+   again. A question you answer from scratch while an answer already sits in the log
+   produces a second, different decision — the log then holds both, and the next session picks
+   one at random. Educational questions and "how do I run it" need no recall.
 1. Answer the user normally (a full answer — code, explanations, everything as usual in a chat)
 2. **Append an entry to `telesma/state/DECISIONS.md`** with the Edit tool (append at the end of the file):
    ```markdown
@@ -22,7 +40,7 @@ answering the user's questions. One proposal per session; another one only after
    **Bug source**: [only when Kind = bug: task X.Y, which built it | unknown]
    **Detected by**: [only when Kind = bug: test | scenario | review | telesma | owner | production]
    **Question/context**: [1-2 sentences — what the user asked or brought up, a paraphrase, not a quote]
-   **Outcome**: [2-4 sentences — the essence of your answer: a decision, a recommendation, an explanation. NO code, NO full file lists, NO long technical explanations. If a design decision was made — state it outright ("we agreed that X").]
+   **Outcome**: [2-4 sentences — the essence of your answer: a decision, a recommendation, an explanation. NO code, NO full file lists, NO long technical explanations. If a design decision was made — state it outright ("we agreed that X"). If nothing was decided — a recommendation the user has not answered, an option left open — the FIRST words are `No decision — awaits: <what>` and only then the recommendation. A later session reads this file by Grep (0.6) and takes an outcome for an agreement; a recommendation logged as if agreed is the next session's false decision.]
    **Impact** (optional): [task X.Y / file / phase, if the exchange concerns something specific]
    ```
    **Kind** — one word, always: `bug` — something already built does not work, or works differently from what the task/agreement said (test: had it worked, this exchange would not have happened) · `correction` — it works as agreed, but the user now wants it differently · `feature` — new scope · `question` — an explanation or analysis without
@@ -43,9 +61,15 @@ answering the user's questions. One proposal per session; another one only after
 3. **Dual-write for decisions with architectural consequences:** if the outcome changes the architecture,
    a convention or the direction of further work (e.g. "we are moving to X", "/api/v2 endpoints instead of /api",
    "we are dropping module Y") — add it ALSO to the `Key decisions` table in
-   `telesma/state/PROJECT_CONTEXT.md`. DECISIONS.md is write-only and the next autonomous session will NOT
-   read it — without the dual-write an agreement from the conversation is invisible to mode 1. Educational questions
+   `telesma/state/PROJECT_CONTEXT.md`. DECISIONS.md is never in a prompt: the next autonomous session
+   sees it only through a Grep it has a reason to run (0.6) — without the dual-write an agreement from
+   the conversation is invisible to mode 1. The row's Reason cell ends with the pointer to the entry
+   you just wrote: `→ DECISIONS.md YYYY-MM-DD HH:MM` (section 7) — the row carries the conclusion,
+   the entry carries the alternatives and the condition for revisiting. Educational questions
    and small explanations stay only in DECISIONS.
+   **An outcome that overturns an earlier decision** (recall found one, the user changed it): edit
+   that row — `~~old~~ → new`, today's date, `superseded: <why> → DECISIONS.md …`, `📌` only if
+   the new decision is binding (section 7). Never a second row beside the old one.
    The `Key decisions` table rotates into `telesma/state/CONTEXT_ARCHIVE.md` (the last 40
    rows stay), so mark a decision that is **still binding** — one whose violation would break the project —
    with `📌` in the Decision column: a row with 📌 stays in the file forever. One-off
@@ -65,7 +89,10 @@ answering the user's questions. One proposal per session; another one only after
 
 **Date format:** use the current system date/time (Bash: `date '+%Y-%m-%d %H:%M'`).
 
-**The file is not loaded by Telesma in any other process** — it is a write-only changelog for the user. Do not use it as a source of decisions in the autonomous loop, do not read it at start, do not reference it in PLAN.md.
+**The file is never loaded into a prompt** — not at start, not in the autonomous loop, and never
+referenced from PLAN.md. It is read in exactly one way: a Grep for a topic (0.6) when a question,
+a change or a fix touches something that may have been decided before, and a Read of the one
+entry a `Key decisions` pointer names. Never Read it whole.
 
 **Example entry:**
 ```markdown

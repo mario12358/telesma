@@ -130,6 +130,15 @@ The `telesma/changes/` directory is the channel for changes after clarification 
    - **✅ tasks that need rework** — completed, but their result no longer meets the changed requirement
    - **Pending tasks that need modification** — not done yet, their description/dependencies must be updated
    - **New tasks** — functionality that was not in the original plan
+   - **Conflict with a decision** — recall (0.6) with the change's topic: a `📌` row in
+     `## Key decisions`, an answer in `QUESTIONS.md` or an entry in `DECISIONS.md` that the change
+     contradicts (the user chose A in clarification, the change asks for B; "we are not doing X"
+     and the change does X). Found one → do NOT plan the change. `TELESMA BLOCKED` quoting the
+     decision (date, one sentence, the reason) and asking: *change the decision, or the change?*
+     "The decision" → supersede it (section 7), then plan. "The change" → move the file to
+     `telesma/changes/processed/` with a `## Change history` entry whose Summary says "withdrawn —
+     contradicts decision of <date>". A change that silently overrides a decision is how a project
+     ends up doing both halves of a contradiction.
 6. **Plan the PLAN.md mutations:**
    - Pending → modify in place, add the annotation `(change: <file-name>)` at the end of the task
    - New tasks → append to the right phase with the annotation `(change: <file-name>)`
@@ -301,6 +310,57 @@ In each of these situations **carry on working normally** — artifacts are an o
 
 - By default `Commit artifacts: no` in the config → `telesma/artifacts/` is in `.gitignore` (the `Ignore on commit` field in the config). Recordings stay local, REPORT.md keeps the list for audit.
 - `Commit artifacts: yes` → telesma/artifacts/ goes into git. **Note**: videos can be large, consider Git LFS. The first time 50MB is exceeded → write an info line to REPORT and suggest LFS.
+
+### 0.6 Recalling earlier decisions (before you answer, propose, plan or ask)
+
+The project's history is deliberately NOT in the prompt: `telesma/state/DECISIONS.md`,
+`BUGFIXES.md`, `REVIEWS.md`, `QUESTIONS.md`, `CONTEXT_ARCHIVE.md`, `REPORT_ARCHIVE.md`. Never load
+them whole. But everything that rotated out of `PROJECT_CONTEXT.md`, and the reasoning behind every
+row still in it, lives there — and a question settled twice, each time from scratch, gets two
+different answers. The second one goes into the log as a new decision contradicting the first.
+
+So, **before** any of these: answering a design question (section 10), proposing a fix (11),
+raising a finding (12), planning a change from `telesma/changes/` (0.3), asking the user anything
+(`TELESMA BLOCKED`, `TELESMA: PLAN VALIDATION`):
+
+1. Take 2–3 distinctive words of the topic (a module, an endpoint, a library, an error message,
+   a table) and Grep them, case-insensitive, in `telesma/state/DECISIONS.md`, `BUGFIXES.md`,
+   `REVIEWS.md`, `QUESTIONS.md`, `CONTEXT_ARCHIVE.md` — one Grep call with a path glob, not five
+   Reads.
+2. A hit → Read the entry (offset/limit around the matching line) and **open with it, quoted**:
+   the date and the `**Outcome**` sentence (or the row's text) **verbatim, in quotation marks** —
+   then, separately, what it means for the question at hand. Never a paraphrase: a paraphrase
+   written while already thinking about the new proposal tends to say what the proposal needs
+   ("we agreed OpenAI directly" when the entry says "Google directly, OpenAI only via the
+   proxy"), and the user who does not remember cannot catch it. "On 2026-04-23: *«…quoted
+   outcome…»*; the condition for revisiting was Z. Does that still hold?" Then answer. A
+   decision the user confirms stays as it is; one they overturn is superseded (section 7),
+   never contradicted by a second row. **A hit is not always a decision**: an outcome that
+   starts with `No decision — awaits: …`, or is a recommendation the user never answered
+   (yesterday's "I suggest X; waiting for confirmation"), settles nothing — the user asking
+   about the same thing again is the question returning, not the confirmation arriving. Quote
+   it as what it is ("on 2026-11-03 I recommended X, you did not answer") and ask again; never
+   act on it.
+3. **The request contradicts a decision** (a `📌` row, a `QUESTIONS.md` answer, an entry whose
+   outcome rules out what is asked) → do NOT recommend, plan or start it. Say so in the first
+   sentence — "this changes the decision of 2026-04-23: «…»" — and ask: *change the decision, or
+   the proposal?* Only after the answer: "the decision" → supersede it (section 7), then proceed;
+   "the proposal" → log the exchange (`Kind: question`, Outcome "decision of 2026-04-23 stands")
+   and stop. **Until that answer arrives, no tool that writes**: no Write, no Edit, no Bash that
+   changes a file — not a "shared helper" to prepare the ground, not a log entry for a decision
+   nobody has made. Reading (Read, Grep, a Bash that only prints) is fine. A recommendation
+   built before this question is the second, contradictory decision 0.6 exists to prevent — in
+   a change file (0.3) this is `TELESMA BLOCKED`, in a chat (section 10) it is the question
+   itself.
+4. No hit → go on. Do not mention the search.
+5. A row in `## Key decisions` or `## Known problems and solutions` whose last cell ends with
+   `→ DECISIONS.md 2026-04-23 16:42` (or `→ BUGFIXES.md 2026-05-02 09:10`, `→ QUESTIONS.md A7`,
+   `→ REVIEWS.md …`) points at the full entry. When the row's reason is not enough to decide,
+   Grep that date (or id) in that file and read the entry — it holds the alternatives that were
+   rejected and why.
+
+Cost: one Grep per exchange. It replaces the expensive thing — re-deriving a settled question and
+logging a second, contradictory decision.
 
 ### Detecting a resumed session
 
@@ -503,11 +563,15 @@ typo in the command). Diagnose the configuration instead of marking the task ✅
 gives the same error):
 - **Try 2**: widen the context — read the neighbouring spec sections (not only the fragment from the tag)
   and the WHOLE modified file instead of an excerpt
-- **Try 3**: read the tech guidelines for the task again + search the Problem log in REPORT.md
-  for similar cases (Grep by module/error name)
+- **Try 3**: read the tech guidelines for the task again + search for similar cases by module or
+  error name (Grep) in the Problem log of REPORT.md AND in `REPORT_ARCHIVE.md`, `BUGFIXES.md`,
+  `CONTEXT_ARCHIVE.md` (0.6) — the same error was often fixed once already, in a phase that
+  rotated out of the prompt
 - Only after running out of tries → TELESMA BLOCKED
 
-Format of the question to the user:
+Format of the question to the user (the `Related history` line is what recall 0.6 found —
+a decision or an earlier fix on this topic, with its date — or `none`; a question that ignores
+what was already decided gets answered a second time, possibly differently):
 ```
 TELESMA BLOCKED
 
@@ -515,6 +579,7 @@ Task: [task name]
 Problem: [description of the problem]
 Fix attempts: [what I tried, max 2 sentences per try]
 Impact: [whether it blocks other tasks]
+Related history: [2026-04-23 DECISIONS.md: "…" | none]
 
 Need help with: [a concrete question]
 ```
@@ -574,6 +639,22 @@ and loaded every session. On the SECOND occurrence of a recorded pitfall:
 If you cannot write a guard within fifteen minutes → say so in the row (`→ guard: none, because …`)
 instead of quietly pinning it. Do not create a separate `## Known pitfalls` section: it is the same job,
 and a second section splits the knowledge into two places and falls outside rotation.
+
+**A row is a conclusion; the pointer is the way back to the reasoning.** A decision or pitfall
+that has a full entry elsewhere ends its last cell with a pointer to it: `→ DECISIONS.md 2026-04-23
+16:42` (the entry's header date and time), `→ BUGFIXES.md 2026-05-02 09:10`, `→ REVIEWS.md …`,
+`→ QUESTIONS.md A7` / `S1` / `Q3`. The row stays short (the prompt carries it every session); the
+alternatives rejected and the condition for revisiting stay in the entry, one Grep away (0.6).
+A decision taken inside the autonomous loop, with no entry anywhere, has no pointer — its
+reasoning goes into the Reason cell, in one sentence.
+
+**Overturning a decision: edit the row, never add a second one.** When a `Key decisions` row no
+longer holds (the user changed their mind in section 10, a change from `telesma/changes/` replaced
+it through 0.3, a later task proved it wrong): set the Date to today, rewrite the Decision cell as
+`~~<old>~~ → <new>`, the Reason as `superseded: <why>` plus the pointer to the entry that
+overturned it, and remove `📌` unless the NEW decision is binding. Two rows claiming opposite
+things put two truths into every later prompt — and a `📌` row never rotates, so an overturned one
+would stay forever. The same for a `Known problems` row whose solution turned out wrong.
 
 **Size limit: ~40 KB, measured in characters, not lines.** A line count says nothing when
 one line has 2 thousand characters — the file fits in "150 lines" and weighs 80 KB, i.e.

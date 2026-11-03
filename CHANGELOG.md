@@ -4,6 +4,30 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.2.0 — 2026-11-03
+
+State format: 19 (instruction change only — a format-18 project is stamped 19 at the next start,
+no file is migrated).
+
+- Earlier decisions are recalled instead of re-made. The logs that are never in a prompt
+  (`DECISIONS.md`, `BUGFIXES.md`, `REVIEWS.md`, `QUESTIONS.md`, the archives) were also never read:
+  a design question that came back months later was answered from scratch and logged as a second,
+  different decision; a change request could silently reverse an answer given in clarification; a
+  bug fixed in bugfix mode never became a known pitfall; an overturned decision stood next to the
+  old one, pinned forever. Now, before any answer, fix proposal, change plan or question to the
+  user, one Grep of the topic across those files (section 0.6) — a hit opens the reply with what was
+  agreed, when and why — the outcome quoted verbatim, not paraphrased (a paraphrase written while
+  weighing a new idea drifts towards what the idea needs) — and asks whether it still holds; a
+  proposal that contradicts the hit gets the question "change the decision, or the proposal?"
+  before any recommendation, and no tool that writes runs until the user answers. A logged
+  recommendation nobody answered is not a decision: its entry starts with `No decision —
+  awaits: …`, and recall treats it as the question returning, not as consent. `Key decisions` and `Known problems` rows
+  end with a pointer to their full entry (`→ DECISIONS.md 2026-04-23 16:42`, `→ QUESTIONS.md A7`,
+  `→ BUGFIXES.md …`); clarification answers become `Key decisions` rows; a change that contradicts a
+  decision blocks with the decision quoted instead of being planned; bugfix mode adds recurring
+  causes to `Known problems`; an overturned decision is edited in place (`~~old~~ → new`,
+  `superseded: …`), never added beside the old row. No structural token changed.
+
 ## 1.1.1 — 2026-11-03
 
 State format: 18 (unchanged).
