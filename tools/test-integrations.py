@@ -240,6 +240,8 @@ def test_specky_template():
     on_block = "\n".join(l for l in ci.split("\njobs:")[0].split("\non:")[-1].splitlines() if not l.lstrip().startswith("#"))
     ok("continue-on-error: true" in ci and "v0.45.0" in ci and "paths" not in on_block,
        "specky-ci.yml: v0.45 header, continue-on-error on the test step, no path filter in on:")
+    ok("permissions:\n  contents: read" in ci and "timeout-minutes:" in ci and "persist-credentials: false" in ci,
+       "specky-ci.yml: read-only token, a job timeout, no token left in .git/config (guidelines/github-actions.md)")
     gh = (TELESMA / "templates" / "integrations" / "git" / "github" / "INSTRUCTIONS.md").read_text(encoding="utf-8")
     ok("Specky-Req: none" in gh, "GitHub 17.3 mentions Specky-Req: none")
 

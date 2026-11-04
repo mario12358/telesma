@@ -4,6 +4,15 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## Unreleased
+
+State format: 19 (unchanged).
+
+- CI hardened the way `guidelines/github-actions.md` tells user projects to: read-only token,
+  `persist-credentials: false`, a 30-minute job timeout, actions pinned to a commit SHA with
+  Dependabot bumping them, stale runs cancelled. The Specky CI template delivered to projects
+  gets the same read-only token, a timeout, `persist-credentials: false` and PR-only cancellation.
+
 ## 1.2.1 — 2026-11-04
 
 State format: 19 (unchanged).

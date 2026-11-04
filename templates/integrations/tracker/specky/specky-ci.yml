@@ -27,11 +27,27 @@ on:
   push:
     branches: [main]
 
+# The job only reads the repository and uploads a run artifact; the Specky GitHub App reads
+# the artifact with its own installation token, not with this one.
+permissions:
+  contents: read
+
+# A newer commit on a PR cancels the run still going for the older one. A run on main is never
+# cancelled: Specky collects the evidence of every merge commit from it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Adapt to the stack; the 6-hour default only serves a hang.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step here pushes, and the test command must not see the token.
+          persist-credentials: false
 
       # --- Adapt to the stack (examples; keep one; keep continue-on-error on the test step) ---
       # Python:
