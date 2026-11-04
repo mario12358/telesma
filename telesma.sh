@@ -46,7 +46,7 @@ MODE=""
 # migration to the version gate below) AND for every change to the instructions or guidelines
 # whose effect should be measurable: telemetry stamps events with this number and only by it
 # tells "before the change" from "after".
-TELESMA_FORMAT=19
+TELESMA_FORMAT=20
 
 # Parse flags
 TELESMA_ARGV=("$@")          # the start as typed: the launcher execs itself after updating Telesma
@@ -86,6 +86,12 @@ while [[ $# -gt 0 ]]; do
             NEW_PROJECT=true
             shift
             ;;
+        --adopt)
+            # Existing code, no Telesma yet: a test baseline, a git digest and a survey session that
+            # writes telesma/spec/AS_BUILT.md (SURVEY.md, section -3). Sets Adopted: yes.
+            ADOPT=true
+            shift
+            ;;
         --home)
             # The desktop shortcut's start menu: a new idea or one of the projects in a folder
             # (the positional argument; default ~/Telesma) — templates/setup/home.sh.
@@ -114,6 +120,12 @@ Options:
                           and runs the setup. Sets Experience: beginner in telesma/config.md —
                           Telesma then talks in plain words for the rest of the project.
                           Needs a terminal. Interrupted → run again, it continues.
+      --adopt             Existing code, no Telesma yet: the setup wizard, then a start that runs
+                          the test suite once (the baseline), mines the git history and lets a
+                          survey session describe the system as found in telesma/spec/AS_BUILT.md
+                          — module by module, writing only inside telesma/. Sets Adopted: yes.
+                          Then you correct AS_BUILT.md, add what should happen next to
+                          telesma/spec/, and a plain start runs the clarification.
       --repair           Repair the state files and exit (without starting Claude).
                           Restores entries that the rotation of versions before 6 cut
                           in half from git history, moves realization notes out of
@@ -469,6 +481,8 @@ if [[ -f "$VERSION_FILE" ]]; then
     while (( PROJECT_FORMAT < TELESMA_FORMAT )); do
         case "$PROJECT_FORMAT" in
             18) PROJECT_FORMAT=19 ;;   # 19: recall of earlier decisions (section 0.6), instructions only
+            19) PROJECT_FORMAT=20 ;;   # 20: adoption of existing projects (--adopt, Phase 0, AS_BUILT.md); the
+                                       #     Adopted fields reach config.md through the merge — nothing else changes
             *) break ;;
         esac
         echo "$PROJECT_FORMAT" > "$VERSION_FILE"
@@ -581,7 +595,13 @@ continue_or_stop() {    # continue_or_stop <question> [arguments of the next run
     local question="$1" answer
     shift
     echo ""
-    read -r -p "${question} [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
+    # no terminal (a script, CI): the answer is "no", quietly — the shell's own "/dev/tty: Device
+    # not configured" line would be the only thing a log reader saw
+    if { true < /dev/tty; } 2>/dev/null; then
+        read -r -p "${question} [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
+    else
+        answer=n
+    fi
     case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
         ""|y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
             exec bash "$SCRIPT_DIR/telesma.sh" "$PROJECT_DIR" "$@" ;;
@@ -589,6 +609,109 @@ continue_or_stop() {    # continue_or_stop <question> [arguments of the next run
     echo -e "$(msg later 'When you want to go on, type: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
     exit 0
 }
+
+# =============================================================================
+# --adopt: an existing codebase (templates/instructions/SURVEY.md, section -3)
+# =============================================================================
+# Telesma starts from a specification and an empty directory; a project that already exists has
+# neither telesma/spec/ nor a plan. Adoption fills what the loop needs and nothing it does not
+# (docs/ARCHITECTURE.md §21): a test baseline in REPORT.md (run by the launcher, zero tokens), a
+# git digest for the prompt (tools/telesma-survey.py), a Phase 0 in PLAN.md with one task per part
+# of the code, and a survey session that writes telesma/spec/AS_BUILT.md — the system as found —
+# as the ordinary loop over Phase 0 (resumable; /compact for free). No task history is rebuilt
+# from commits: nothing reads it. The first --adopt creates config.md (`Adopted: yes`) and runs the
+# setup wizard; the survey runs on the next start of the project (a plain one is enough) and on
+# every start until Phase 0 is done. Then the owner corrects AS_BUILT.md, writes what should
+# happen next into telesma/spec/, and a plain start runs the clarification over all of it.
+AS_BUILT_TEMPLATE_FILE="$SCRIPT_DIR/templates/AS_BUILT_TEMPLATE.md"
+AS_BUILT_FILE="$SPEC_DIR/AS_BUILT.md"
+SURVEY_TOOL="$SCRIPT_DIR/tools/telesma-survey.py"
+project_adopted() { grep -qi '^- \*\*Adopted\*\*:[[:space:]]*yes' "$TELESMA_DIR/config.md" 2>/dev/null; }
+# Done = AS_BUILT.md written (its template marker gone) and no open task left in Phase 0
+survey_complete() {
+    [[ -f "$AS_BUILT_FILE" && -f "$STATE_DIR/PLAN.md" ]] || return 1
+    head -1 "$AS_BUILT_FILE" 2>/dev/null | grep -qF "TELESMA_AS_BUILT_TEMPLATE" && return 1
+    ! awk '/^### Phase 0:/{p=1; next} /^### Phase /{p=0} /^## /{p=0} p && /^- \[ \]/{found=1} END{exit !found}' "$STATE_DIR/PLAN.md"
+}
+clean_tree() { [[ -z "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]]; }
+
+# Before the first commit: files that look like secrets and the usual build output, when present
+# and not ignored, go into .gitignore (an .env.example stays — it is the documented shape, not
+# the values). The pilot committed __pycache__ and the hygiene check flagged it an hour later.
+adopt_ignore_junk() {
+    local pat f added=""
+    [[ -f "$PROJECT_DIR/.gitignore" ]] || touch "$PROJECT_DIR/.gitignore"
+    for pat in '.env' '.env.*' '*.pem' '*.key' '*.p12' '*.pfx' 'id_rsa' 'id_ed25519' '*.keystore' \
+               '__pycache__/' 'node_modules/' '.venv/' 'venv/' 'dist/' 'build/' 'target/' '.DS_Store'; do
+        while IFS= read -r f; do
+            [[ -n "$f" ]] || continue
+            case "$f" in *.example|*.sample|*.template|*.dist) continue ;; esac
+            if ! git -C "$PROJECT_DIR" check-ignore -q "$f"; then
+                echo "$pat" >> "$PROJECT_DIR/.gitignore"; added+=" $pat"; break
+            fi
+        done < <(cd "$PROJECT_DIR" && if [[ "$pat" == */ ]]; then find . -maxdepth 3 -type d -name "${pat%/}" ! -path './.git/*' 2>/dev/null; else find . -maxdepth 3 -type f -name "$pat" ! -path './.git/*' 2>/dev/null; fi | sed 's|^\./||')
+    done
+    [[ -n "$added" ]] && echo -e "  ${YELLOW}$(msg adopt.ignored '.gitignore: added%s — secrets and build output stay out of the first commit' "$added")${NC}"
+    return 0
+}
+
+# Preconditions and the baseline commit. config.md is created further down by the usual first-start
+# path (which also runs the wizard); its Adopted fields are set right after the config merge.
+adopt_prepare() {
+    local cfg="$TELESMA_DIR/config.md" configure="$SCRIPT_DIR/templates/setup/configure.py"
+    local code answer untracked
+    if grep -qi '^- \*\*Clarified\*\*:.*yes' "$cfg" 2>/dev/null || grep -q '^- \[' "$STATE_DIR/PLAN.md" 2>/dev/null; then
+        echo -e "${RED}$(msg adopt.exists 'This project already runs with Telesma (a plan exists) — --adopt is for code Telesma has not seen yet.')${NC}"
+        echo -e "$(msg adopt.usual 'Start as usual: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
+        exit 1
+    fi
+    code=$(python3 "$configure" detect "$PROJECT_DIR" 2>/dev/null | sed -n 's/^code_files=//p')
+    if [[ "${code:-0}" -eq 0 ]]; then
+        echo -e "${RED}$(msg adopt.nocode 'No source code found in %s — nothing to adopt.' "$PROJECT_DIR")${NC}"
+        echo -e "$(msg adopt.nocode.how 'An idea without code: %s; a written specification: put it into %s and start as usual.' "${GREEN}$0 --new $PROJECT_DIR${NC}" "${CYAN}telesma/spec/${NC}")"
+        exit 1
+    fi
+    echo -e "${GREEN}$(msg adopt.title '=== Telesma — adopting an existing project ===')${NC}"
+    if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo "$(msg adopt.git.need 'Telesma needs a git repository: the baseline is a commit, and the survey commits what it writes.')"
+        if ! { true < /dev/tty; } 2>/dev/null; then
+            echo -e "${RED}$(msg adopt.git.notty "No repository and no terminal to ask — run 'git init' and a first commit, then start again.")${NC}"
+            exit 1
+        fi
+        read -r -p "$(msg adopt.git.ask "Run 'git init' and commit the existing files as the starting point?") [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
+        if [[ "$answer" =~ ^[nN] ]]; then
+            echo "$(msg adopt.git.no 'Nothing created. Initialise git, commit, and start again.')"
+            exit 0
+        fi
+        git -C "$PROJECT_DIR" init -q || exit 1
+        adopt_ignore_junk
+        if ! git -C "$PROJECT_DIR" add -A || ! git -C "$PROJECT_DIR" commit -q -m "Existing system before Telesma"; then
+            echo -e "${RED}$(msg adopt.git.fail 'The first commit did not go through (git user.name / user.email set?). Commit by hand and start again.')${NC}"
+            exit 1
+        fi
+        echo -e "  ${GREEN}✓${NC} $(msg adopt.git.done 'git init + first commit (%s files)' "$(git -C "$PROJECT_DIR" ls-files | wc -l | tr -d ' ')")"
+    elif ! git -C "$PROJECT_DIR" rev-parse --verify -q HEAD &>/dev/null; then
+        echo -e "${RED}$(msg adopt.nocommit 'The repository has no commit yet — commit the existing files first, then start again.')${NC}"
+        exit 1
+    fi
+    if ! clean_tree; then
+        echo -e "${RED}$(msg adopt.dirty 'Uncommitted changes in %s — commit or stash them first: the baseline must be a commit.' "$PROJECT_DIR")${NC}"
+        git -C "$PROJECT_DIR" status --short --untracked-files=no | head -10 | sed 's/^/  /'
+        exit 1
+    fi
+    untracked=$(git -C "$PROJECT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')
+    [[ "$untracked" -gt 0 ]] && echo -e "${YELLOW}  $(msg adopt.untracked '%s untracked file(s) are not part of the baseline — commit them first if they belong to the system.' "$untracked")${NC}"
+    ADOPT_SHA=$(git -C "$PROJECT_DIR" rev-parse --short HEAD)
+    ADOPT_DATE=$(git -C "$PROJECT_DIR" log -1 --format=%cs)
+    [[ -f "$SPEC_DIR/TECHNICAL_GUIDELINES.md" ]] || cp "$SPEC_TEMPLATE_FILE" "$SPEC_DIR/TECHNICAL_GUIDELINES.md"
+    [[ -f "$AS_BUILT_FILE" ]] || cp "$AS_BUILT_TEMPLATE_FILE" "$AS_BUILT_FILE"
+    echo -e "$(msg adopt.at 'Adopted at %s (%s, branch %s): %s+ code files. The survey will describe this commit.' "${CYAN}$ADOPT_SHA${NC}" "$ADOPT_DATE" "$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD)" "$code")"
+    [[ -f "$cfg" ]] || echo "$(msg adopt.settings 'A few settings first — the test command matters most: its result is the baseline.')"
+    echo ""
+}
+if [[ "${ADOPT:-false}" == "true" ]] && ! project_adopted; then
+    adopt_prepare
+fi
 
 # Empty telesma/spec/ → copy the technical guidelines template and explain what goes where
 SPEC_CONTENT_COUNT=$(ls -A "$SPEC_DIR" 2>/dev/null | grep -v '^APP_FLOW\.md$' | grep -v '^ux_ui$' | wc -l | tr -d ' ')
@@ -700,7 +823,7 @@ fi
 
 # Modular instructions — assembled per mode (clarification/1/2/3/4), so that the prompt does
 # not carry sections of modes Claude is not working in
-for _instr in CLARIFY.md CORE.md INTERACTIVE.md MODE_BUGFIX.md MODE_REVIEW.md MODE_ARTIFACTS.md INTERVIEW.md BEGINNER.md; do
+for _instr in CLARIFY.md CORE.md INTERACTIVE.md MODE_BUGFIX.md MODE_REVIEW.md MODE_ARTIFACTS.md INTERVIEW.md BEGINNER.md SURVEY.md; do
     if [[ ! -f "$INSTR_DIR/$_instr" ]]; then
         echo -e "${RED}Error: missing $INSTR_DIR/$_instr${NC}"
         exit 1
@@ -886,6 +1009,13 @@ elif added_sections or added or custom:
 PYMERGE
 fi
 
+# --adopt: the Adopted fields, now that the merge guarantees them in the file (a config from an
+# earlier format gets them from the template above)
+if [[ -n "${ADOPT_SHA:-}" ]]; then
+    python3 "$SCRIPT_DIR/templates/setup/configure.py" set "$CONFIG_FILE" Project Adopted yes > /dev/null
+    python3 "$SCRIPT_DIR/templates/setup/configure.py" set "$CONFIG_FILE" Project "Adopted at" "$ADOPT_SHA $ADOPT_DATE" > /dev/null
+fi
+
 # =============================================================================
 # Integrations — section ## Integrations in telesma/config.md (git repository / requirements tracker)
 # =============================================================================
@@ -923,6 +1053,8 @@ if [[ "${SETUP_WIZARD_AUTO:-false}" == "true" || "${SETUP_WIZARD:-false}" == "tr
     fi
     if [[ "${WIZARD_NEXT:-}" == "clarify" ]]; then
         continue_or_stop "$(msg go.clarify 'Go on now? Telesma reads the description, asks a few questions about the details and plans the work')"
+    elif [[ "${WIZARD_NEXT:-}" == "survey" ]]; then
+        continue_or_stop "$(msg go.survey 'Survey the code now? Telesma runs the tests once as the baseline, then reads the code module by module and writes what it found — it changes no code')"
     fi
     exit 0
 fi
@@ -950,6 +1082,14 @@ PROJECT_EXPERIENCE=${PROJECT_EXPERIENCE:-developer}
 EXPERIENCE_BLOCK=""
 if [[ "$PROJECT_EXPERIENCE" == "beginner" ]]; then
     EXPERIENCE_BLOCK=$'\n\n'"$(cat "$INSTR_DIR/BEGINNER.md")"
+fi
+
+# An adopted project (## Project → Adopted: yes): the clarification prompts carry one line that
+# points at the "Adopted project" notes of section -1 — AS_BUILT.md is the system as found, Phase 0
+# of the plan is done and stays, the plan starts at Phase 1. A greenfield project pays nothing.
+ADOPTED_LINE=""
+if project_adopted; then
+    ADOPTED_LINE=$'\n\n'"ADOPTED: yes — this project adopts an existing codebase (telesma/config.md → Adopted at $(config_field Project 'Adopted at')). Follow the \"Adopted project\" notes of section -1: telesma/spec/AS_BUILT.md is the system as found; telesma/state/PLAN.md already holds a completed Phase 0 — edit the file and add the plan from Phase 1, never rewrite or re-tick Phase 0."
 fi
 
 # =============================================================================
@@ -2242,6 +2382,12 @@ NEEDS_CLARIFICATION=true
 if grep -qi 'clarified.*yes' "$CONFIG_FILE" 2>/dev/null; then
     NEEDS_CLARIFICATION=false
 fi
+# An adopted project between the survey and the clarification: bugfix and review need only the
+# context and the code, not a plan — the first tangible value of an adoption (ARCHITECTURE §21).
+if [[ "$NEEDS_CLARIFICATION" == true && ( "$MODE" == "2" || "$MODE" == "3" ) ]] && project_adopted && survey_complete; then
+    NEEDS_CLARIFICATION=false
+    echo -e "${CYAN}Adopted project before clarification: mode $MODE works from the survey (AS_BUILT.md, PROJECT_CONTEXT.md); the plan comes with the clarification.${NC}"
+fi
 
 # Load the list of files in telesma/spec/ (names + sizes, NOT the content)
 # Scans top-level telesma/spec/ + telesma/spec/ux_ui/ (mockups, design tokens, reference components)
@@ -2617,6 +2763,231 @@ select_mode() {
 }
 
 # =============================================================================
+# SURVEY (adopted project, Phase 0 not done) — before the clarification, on every start
+# =============================================================================
+# Deterministic part first, zero tokens: the Phase 0 skeleton (one task per part of the code),
+# the full test suite once (the baseline the loop compares against), one dry run of the quality
+# checks when they are on, the git digest. Then the survey session: the loop over Phase 0 with
+# permission mode `default` and Edit/Write allowed for telesma/** only — a write anywhere else is
+# a question nobody answers in pipe mode, i.e. refused; with -i the human sees it.
+run_survey() {
+    local today cmd rc out tmp parts stack i name files tests sample n b w
+    local baseline="" checks_line="" survey_block prompt config_plain adopted_at sha date
+    today=$(date +%F)
+    adopted_at=$(config_field Project "Adopted at"); sha=${adopted_at%% *}; date=${adopted_at#* }
+    if ! clean_tree; then
+        echo -e "${RED}$(msg survey.dirty 'Uncommitted changes in %s — the survey commits what it writes. Commit or stash first.' "$PROJECT_DIR")${NC}"
+        git -C "$PROJECT_DIR" status --short --untracked-files=no | head -10 | sed 's/^/  /'
+        exit 1
+    fi
+    [[ -f "$AS_BUILT_FILE" ]] || cp "$AS_BUILT_TEMPLATE_FILE" "$AS_BUILT_FILE"
+    [[ -f "$CONTEXT_FILE" ]] || cp "$SCRIPT_DIR/templates/PROJECT_CONTEXT.md" "$CONTEXT_FILE"
+    [[ -f "$REPORT_FILE" ]] || cp "$SCRIPT_DIR/templates/REPORT.md" "$REPORT_FILE"
+
+    # Phase 0: one task per part of the code (tools/telesma-survey.py --parts) — written once
+    if [[ ! -f "$PLAN_FILE" ]] || grep -q '\[project name\]' "$PLAN_FILE" || ! grep -q '^### Phase 0:' "$PLAN_FILE"; then
+        parts=$(python3 "$SURVEY_TOOL" "$PROJECT_DIR" --parts 2>/dev/null || true)
+        stack=$(python3 "$SCRIPT_DIR/templates/setup/configure.py" detect "$PROJECT_DIR" 2>/dev/null | sed -n 's/^stacks=//p')
+        i=1
+        {
+            echo "# telesma/state/PLAN.md - Project task list"
+            echo ""
+            echo "## Project information"
+            echo ""
+            echo "- **Name**: $(basename "$PROJECT_DIR")"
+            echo "- **Stack**: as found${stack:+ ($stack)} — telesma/spec/TECHNICAL_GUIDELINES.md"
+            echo ""
+            echo "## Tasks"
+            echo ""
+            echo "### Phase 0: Existing system (adopted at $sha, $date)"
+            echo ""
+            echo "- [ ] Task 0.1: Overview — purpose, entry points, module map, stack and conventions as found → AS_BUILT.md Overview, TECHNICAL_GUIDELINES.md, PROJECT_CONTEXT.md"
+            while IFS=$'\t' read -r name files tests sample; do
+                [[ -n "$name" ]] || continue
+                i=$((i + 1))
+                echo "- [ ] Task 0.$i: Survey $name — behaviours with evidence (${files} files, ${tests} tests${sample:+; e.g. $sample}) → AS_BUILT.md (requires: 0.1)"
+            done <<< "$parts"
+            i=$((i + 1))
+            echo "- [ ] Task 0.$i: Wrap-up — decisions and pitfalls from the git digest, the test baseline, open questions → PROJECT_CONTEXT.md, AS_BUILT.md (requires: 0.1)"
+            echo ""
+            echo "## Spec coverage"
+            echo ""
+            echo "<!-- Filled in by the clarification: every AS_BUILT.md section → \"exists — 0.N\" or the tasks that change it. -->"
+            echo ""
+            echo "| File | Section | Tasks |"
+            echo "|------|---------|-------|"
+        } > "$PLAN_FILE"
+        echo -e "  ${GREEN}+${NC} $(msg survey.plan 'telesma/state/PLAN.md — Phase 0 with %s tasks (one per part of the code)' "$i")"
+    fi
+
+    # The baseline: the full suite, once, before anything is read. Written into REPORT.md as a
+    # Test status run paragraph (rotation keeps the three newest by date) and the Summary.
+    if ! grep -q 'Baseline at adoption' "$REPORT_FILE"; then
+        cmd=$(config_field Tests "Full suite command")
+        [[ -z "$cmd" || "$cmd" == \[* ]] && cmd=$(config_field Tests "Test command")
+        if [[ -z "$cmd" || "$cmd" == \[* ]]; then
+            baseline="**Baseline at adoption ($today) — NOT RUN:** no test command in telesma/config.md (## Tests) — Telesma cannot tell a regression from an inherited failure until one exists."
+            echo -e "${YELLOW}$(msg survey.notests 'No test command — no baseline. Set ## Tests (%s) and start again, or go on without one.' "$0 --setup $PROJECT_DIR")${NC}"
+        elif ! preflight_stack "$CONFIG_FILE"; then
+            baseline="**Baseline at adoption ($today) — NOT RUN:** \`$cmd\` — a tool it needs is not installed on this machine (telesma.sh --doctor)."
+        else
+            echo -e "${CYAN}$(msg survey.baseline 'Baseline: running the full suite once — %s' "$cmd")${NC}"
+            tmp=$(mktemp "${TMPDIR:-/tmp}/telesma-baseline.XXXXXX")
+            started=$(date +%s)
+            (cd "$PROJECT_DIR" && bash -c "$cmd") 2>&1 | tee "$tmp" || true
+            rc=${PIPESTATUS[0]}
+            # the last three lines of output, on one line; and the numbers — JUnit XML the run
+            # wrote (Gradle, Maven, --junitxml) or the summary line of the log (pytest, jest, cargo, dotnet)
+            out=$(python3 -c 'import sys; ls=[l.strip()[:200] for l in open(sys.argv[1], encoding="utf-8", errors="replace") if l.strip()]; print(" / ".join(ls[-3:]))' "$tmp" 2>/dev/null || true)
+            counts=$(python3 "$SURVEY_TOOL" "$PROJECT_DIR" --test-results --since "$started" --log "$tmp" 2>/dev/null || true)
+            rm -f "$tmp"
+            numbers=""
+            if [[ -n "$counts" ]]; then
+                numbers=" — $(sed -E 's/total=([0-9]+) pass=([0-9]+) fail=([0-9]+) skip=([0-9]+) source=(.*)/\1 tests: \2 passed, \3 failed, \4 skipped (\5)/' <<<"$counts")"
+            fi
+            if [[ "$rc" -eq 0 ]]; then
+                baseline="**Baseline at adoption ($today) — GREEN (exit 0):** \`$cmd\`${numbers} — ${out}"
+                echo -e "  $(msg survey.green 'Baseline: green')${numbers}"
+            else
+                baseline="**Baseline at adoption ($today) — RED (exit $rc):** \`$cmd\`${numbers} — ${out}. Failures listed here are inherited, not regressions (section 2 of the instructions)."
+                echo -e "  ${RED}$(msg survey.red 'Baseline: red (exit %s) — inherited failures, recorded as such' "$rc")${NC}${numbers}"
+            fi
+        fi
+    fi
+    # One dry run of the quality checks over the whole repository (the ci point reads every
+    # tracked file when there is no reference tag). Findings are listed, nothing is blocked:
+    # exceptions are the owner's (telesma/state/CHECK_EXCEPTIONS.md), a real one becomes a task.
+    if [[ "$CHECKS_ENABLED" == "yes" && -f "$CHECKS_DIR/telesma-checks.py" ]] && ! grep -q 'Adoption: checks dry run' "$REPORT_FILE"; then
+        echo -e "${CYAN}$(msg survey.checks 'Quality checks: one dry run over the whole repository (ci point) — nothing is blocked')${NC}"
+        out=$(cd "$PROJECT_DIR" && python3 telesma/checks/telesma-checks.py --point ci 2>&1) || true
+        printf '%s\n' "$out" | head -30 | sed 's/^/  /'
+        b=$(printf '%s\n' "$out" | sed -n 's/^BLOCK (\([0-9]*\)).*/\1/p' | head -1)
+        w=$(printf '%s\n' "$out" | sed -n 's/^WARN (\([0-9]*\)).*/\1/p' | head -1)
+        checks_line="[$today] Adoption: checks dry run (ci point, whole repository): ${b:-0} blocking, ${w:-0} warnings — rules and files in telesma/state/CHECKS.jsonl; a false alarm is waived by the owner in telesma/state/CHECK_EXCEPTIONS.md, a real finding becomes a task"
+    fi
+    if [[ -n "$baseline" || -n "$checks_line" ]]; then
+        python3 - "$REPORT_FILE" "$baseline" "$checks_line" "$today" "${counts:-}" <<'PYBASE'
+import re, sys
+from pathlib import Path
+p, para, problem, today, counts = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+t = p.read_text(encoding="utf-8")
+if para:
+    t = re.sub(r"^- \*\*Start\*\*: .*$", f"- **Start**: {today} (adoption)", t, count=1, flags=re.M)
+    t = re.sub(r"^- \*\*Status\*\*: .*$", "- **Status**: In progress — survey of the existing system", t, count=1, flags=re.M)
+    n = dict(kv.split("=", 1) for kv in counts.split() if "=" in kv)
+    if n.get("total"):
+        # the metrics table is current state: the baseline's numbers go in, the model keeps them up to date
+        for label, key in (("Total tests", "total"), ("Pass", "pass"), ("Fail", "fail"), ("Skip", "skip")):
+            t = re.sub(r"^\| " + label + r" \| .* \|$", f"| {label} | {n[key]} |", t, count=1, flags=re.M)
+        t = re.sub(r"^\| Last run \| .* \|$", f"| Last run | {today} (baseline at adoption) |", t, count=1, flags=re.M)
+lines, out, placed, in_ts = t.split("\n"), [], not para, False
+for l in lines:
+    if l.startswith("## "):
+        in_ts = l.strip() == "## Test status"
+    if in_ts and not placed and l.startswith("| Metric"):
+        out += [para, ""]
+        placed = True
+    out.append(l)
+if not placed:
+    out += ["", "## Test status", "", para]
+if problem:
+    idx = next((i for i, l in enumerate(out) if l.strip() == "## Problem log"), None)
+    if idx is None:
+        out += ["", "## Problem log", "", problem]
+    else:
+        end = next((i for i in range(idx + 1, len(out)) if out[i].startswith("## ")), len(out))
+        while end > idx + 1 and not out[end - 1].strip():
+            end -= 1
+        out[end:end] = [problem]
+p.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+PYBASE
+    fi
+
+    # The survey commits with `git add telesma/`: the judge's decision log (full commands, this
+    # machine's data) must not ride along — the pilot committed it. Same place as CHECKS.jsonl.
+    _excl=$(git -C "$PROJECT_DIR" rev-parse --git-path info/exclude 2>/dev/null || true)
+    if [[ -n "$_excl" ]]; then
+        [[ "$_excl" = /* ]] || _excl="$PROJECT_DIR/$_excl"
+        mkdir -p "$(dirname "$_excl")"
+        grep -qxF 'telesma/state/PERMISSIONS.jsonl' "$_excl" 2>/dev/null || echo 'telesma/state/PERMISSIONS.jsonl' >> "$_excl"
+    fi
+    survey_block=$(python3 "$SURVEY_TOOL" "$PROJECT_DIR" 2>/dev/null || echo "SURVEY: unavailable (tools/telesma-survey.py failed) — read git log yourself, sparingly")
+    config_plain=$(sed '/^[[:space:]]*<!--.*-->[[:space:]]*$/d' "$CONFIG_FILE")
+    prompt="$(cat "$INSTR_DIR/SURVEY.md")
+
+---
+
+# Current telesma/config.md:
+
+$config_plain
+
+---
+
+# Current telesma/state/PLAN.md (Phase 0 — the survey's tasks):
+
+$(cat "$PLAN_FILE")
+
+---
+
+# Current telesma/state/PROJECT_CONTEXT.md:
+
+$(cat "$CONTEXT_FILE")
+
+---
+
+# Current telesma/state/REPORT.md (the baseline is in Test status):
+
+$(cat "$REPORT_FILE")
+
+---
+
+$survey_block
+
+---
+
+MODE: survey
+
+${LANGUAGE_LINE}
+
+Start the survey (section -3): take the first open task of Phase 0 in telesma/state/PLAN.md and work through the phase task by task — read, write inside telesma/ only, tick the box, commit. The files above are in your context already; read telesma/spec/AS_BUILT.md and telesma/spec/TECHNICAL_GUIDELINES.md with the Read tool before editing them (Edit refuses a file it has not read). You cannot ask the person anything in this session — open questions go into AS_BUILT.md. End with TELESMA: SURVEY DONE (section -3.6)."
+
+    echo ""
+    echo -e "${GREEN}$(msg survey.start 'Survey: Claude reads the code module by module and writes telesma/spec/AS_BUILT.md — no code is changed.')${NC}"
+    echo -e "$(msg survey.progress 'Phase 0 of telesma/state/PLAN.md shows the progress; interrupted, the next start continues from the first open task.')"
+    echo ""
+    cd "$PROJECT_DIR"
+    if [[ "$INTERACTIVE" == true ]]; then
+        run_claude arg "$prompt" --allowedTools "Edit(telesma/**)" --permission-mode default || true
+    else
+        run_claude pipe "$prompt" --allowedTools "Edit(telesma/**)" --permission-mode default || true
+    fi
+    echo ""
+    if survey_complete; then
+        n=$(grep -c '^## ' "$AS_BUILT_FILE" 2>/dev/null || echo 0)
+        echo -e "${GREEN}$(msg survey.done '=== Survey done === telesma/spec/AS_BUILT.md: %s modules, %s open questions.' "$((n > 2 ? n - 2 : 0))" "$(grep -c '^- OQ[0-9]' "$AS_BUILT_FILE" 2>/dev/null || echo 0)")${NC}"
+        adopt_next_steps
+    else
+        echo -e "${YELLOW}$(msg survey.unfinished 'The survey did not finish — Phase 0 still has open tasks. Start again to continue: %s' "${GREEN}$0 $PROJECT_DIR${NC}${YELLOW}")${NC}"
+    fi
+    exit 0
+}
+adopt_next_steps() {
+    echo ""
+    echo -e "${GREEN}$(msg next.title '=== Next steps ===')${NC}"
+    echo -e "  1. $(msg next.a1 'Read %s — correct what the survey got wrong, answer the open questions in place or leave them.' "${CYAN}telesma/spec/AS_BUILT.md${NC}")"
+    echo -e "  2. $(msg next.a2 'Put into %s a file with what should happen next (features, fixes, a refactor — any format).' "${CYAN}telesma/spec/${NC}")"
+    echo -e "  3. $(msg next.a3 'Start as usual: %s — the clarification reads all of it, asks, and plans from Phase 1.' "${GREEN}$0 $PROJECT_DIR${NC}")"
+    echo -e "  $(msg next.a4 'Already useful now: %s (code review) and %s (bugfix) work from the survey alone.' "${GREEN}$0 $PROJECT_DIR -m 3${NC}" "${GREEN}-m 2${NC}")"
+}
+if project_adopted && ! survey_complete; then
+    run_survey
+elif [[ "${ADOPT:-false}" == "true" ]]; then
+    echo -e "${GREEN}$(msg survey.already 'Already adopted (telesma/config.md → Adopted at %s); the survey is done.' "$(config_field Project 'Adopted at')")${NC}"
+    adopt_next_steps
+    exit 0
+fi
+
+# =============================================================================
 # CLARIFICATION MODE
 # =============================================================================
 if [[ "$NEEDS_CLARIFICATION" == true ]]; then
@@ -2693,7 +3064,7 @@ $CONFIG
 
 ---
 
-${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}${ADOPTED_LINE}
 
 Perform ONLY steps 1 and 2 of section -1 of the instructions:
 1. Read EVERY file in telesma/spec/ with the Read tool
@@ -2833,10 +3204,12 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish. $(c
             echo -e "Phase: ${CYAN}generating the plan${NC}"
         fi
 
-        # The plan counts as generated when it has tasks with checkboxes and is not the template
+        # The plan counts as generated when it has tasks with checkboxes and is not the template;
+        # an adopted project has Phase 0 from the survey already, so it needs a Phase 1 as well
         plan_generated() {
             [[ -s "$PLAN_FILE" ]] && grep -q '^- \[' "$PLAN_FILE" 2>/dev/null \
-                && ! grep -q '\[project name\]' "$PLAN_FILE" 2>/dev/null
+                && ! grep -q '\[project name\]' "$PLAN_FILE" 2>/dev/null \
+                && { ! project_adopted || grep -qE '^### Phase [1-9]' "$PLAN_FILE" 2>/dev/null; }
         }
         # The answers in QUESTIONS.md are the human's words. The plan session is told to edit the
         # file, not to rewrite it — but a model that writes it from memory (its own version from
@@ -2907,7 +3280,7 @@ PYRESTORE
         # plan comes out cheaper and better informed than from the index alone.
         CONTINUE_PROMPT="Continuation of the Telesma clarification. All contradictions are resolved, the assumptions reviewed, the questions answered — the current answers are in telesma/state/QUESTIONS.md (read the file again with the Read tool: the answers were written AFTER your indexing).
 
-${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}${ADOPTED_LINE}
 
 Perform ONLY step 4 of section -1 of the instructions:
 1. Read the answers in telesma/state/QUESTIONS.md
@@ -2974,7 +3347,7 @@ $QUESTIONS_CONTENT
 
 ---
 
-${LANGUAGE_LINE}${EXPERIENCE_BLOCK}
+${LANGUAGE_LINE}${EXPERIENCE_BLOCK}${ADOPTED_LINE}
 
 Perform ONLY step 4 of section -1 of the instructions:
 1. Read the answers in telesma/state/QUESTIONS.md
@@ -4383,6 +4756,53 @@ if [[ ${#ACTIVE_INTEGRATIONS[@]} -gt 0 ]]; then
 INTEGRATIONS: ${ACTIVE_INTEGRATIONS[*]}.${_integ_desc}"
 fi
 
+# GUIDELINES_INDEX on a diet — in the prompt copy only. Fifty lines of tag + keywords are 8 KB in
+# every session of a project that uses two or three tags. Full lines stay for the tags the project
+# uses (every `(tech:)` in the plan, the plan's Stack line, the detected manifests) and for
+# general.md; the other tags are named in one line, so a task that needs one of them still finds
+# the file (the files are all in telesma/guidelines/ — nothing to keep in sync). The clarification
+# keeps the full index: it is the step that assigns tags. A plan without a single tag keeps it too.
+GUIDELINES_INDEX_PROMPT="$GUIDELINES_INDEX"
+if [[ -n "$GUIDELINES_INDEX" ]] && command -v python3 &> /dev/null; then
+    _stacks=$(python3 "$SCRIPT_DIR/templates/setup/configure.py" detect "$PROJECT_DIR" 2>/dev/null | sed -n 's/^stacks=//p')
+    GUIDELINES_INDEX_PROMPT=$(TELESMA_GI="$GUIDELINES_INDEX" python3 - "$PLAN_FILE" "$_stacks" <<'PYGI'
+import os, re, sys
+from pathlib import Path
+plan = Path(sys.argv[1]).read_text(encoding="utf-8") if Path(sys.argv[1]).is_file() else ""
+stacks = sys.argv[2].split()
+index = os.environ.get("TELESMA_GI", "").rstrip("\n").split("\n")
+tags = {}
+for line in index:
+    m = re.search(r"\[tag:\s*([^\]]+)\]", line)
+    if m:
+        tags[m.group(1).strip()] = line
+used = {t.strip() for m in re.finditer(r"\(tech:\s*([^)]*)\)", plan) for t in m.group(1).split(",") if t.strip()}
+stack_line = next((l for l in plan.split("\n") if l.startswith("- **Stack**:")), "").lower()
+ALIAS = {"node.js": "node", "nodejs": "node", "next.js": "nextjs", "react native": "react-native", "c#": "csharp",
+         ".net": "csharp", "dotnet": "csharp", "postgresql": "postgres", "nest": "nestjs", "nest.js": "nestjs",
+         "mongo": "mongodb", "k8s": "kubernetes", "js": "node", "ts": "typescript"}
+for word, tag in ALIAS.items():
+    if word in stack_line:
+        used.add(tag)
+for tag in tags:
+    if re.search(r"(^|[^a-z0-9-])" + re.escape(tag) + r"([^a-z0-9-]|$)", stack_line):
+        used.add(tag)
+for s in stacks:
+    used.add({"dotnet": "csharp"}.get(s, s))
+active = [t for t in tags if t == "general" or t in used]
+if len(active) <= 1:
+    print("\n".join(index))          # no tags anywhere yet: nothing to trim safely
+else:
+    rest = [t for t in tags if t not in active]
+    out = [tags[t] for t in active]
+    if rest:
+        out.append("- Also available in telesma/guidelines/ (same format, load one when a task's (tech:) tag names it): "
+                   + ", ".join(rest))
+    print("\n".join(out))
+PYGI
+    ) || GUIDELINES_INDEX_PROMPT="$GUIDELINES_INDEX"
+fi
+
 INITIAL_PROMPT="$INSTRUCTIONS
 
 ---
@@ -4395,7 +4815,7 @@ ${SPEC_INDEX:-No index. Files in telesma/spec/: ${SPEC_LIST:-none}}
 
 # GUIDELINES_INDEX (telesma/guidelines/ — technology guidelines, load per task according to the (tech: ...) tags):
 
-${GUIDELINES_INDEX:-no guidelines}
+${GUIDELINES_INDEX_PROMPT:-no guidelines}
 
 ---
 

@@ -371,3 +371,42 @@ upd.done = Telesma zaktualizowana do %s — uruchamia się ponownie.
 upd.fail = Aktualizacja się nie powiodła (zmieniona ręcznie?). Zaktualizuj poleceniem: %s
 upd.later = Nie teraz. Telesma zapyta przy następnym starcie; albo uruchom: %s
 upd.cmd = Zaktualizuj poleceniem: %s
+
+# --adopt: an existing codebase (adopt_prepare, the wizard's next step, run_survey)
+adopt.title = === Telesma — przejęcie istniejącego projektu ===
+adopt.exists = Ten projekt już pracuje z Telesmą (istnieje plan) — --adopt jest dla kodu, którego Telesma jeszcze nie widziała.
+adopt.usual = Uruchom jak zwykle: %s
+adopt.nocode = W %s nie ma kodu źródłowego — nie ma czego przejmować.
+adopt.nocode.how = Pomysł bez kodu: %s; gotowa specyfikacja: włóż ją do %s i uruchom jak zwykle.
+adopt.git.need = Telesma potrzebuje repozytorium git: linia bazowa to commit, a przegląd commituje to, co zapisze.
+adopt.git.notty = Brak repozytorium i terminala, żeby zapytać — wykonaj 'git init' i pierwszy commit, potem uruchom ponownie.
+adopt.git.ask = Wykonać 'git init' i zacommitować istniejące pliki jako punkt wyjścia?
+adopt.git.no = Nic nie utworzono. Zainicjuj git, zacommituj i uruchom ponownie.
+adopt.git.fail = Pierwszy commit się nie udał (ustawione git user.name / user.email?). Zacommituj ręcznie i uruchom ponownie.
+adopt.git.done = git init + pierwszy commit (plików: %s)
+adopt.ignored = .gitignore: dopisano%s — sekrety i wyniki budowania nie trafiają do pierwszego commita
+adopt.nocommit = Repozytorium nie ma jeszcze commita — najpierw zacommituj istniejące pliki, potem uruchom ponownie.
+adopt.dirty = Niezacommitowane zmiany w %s — najpierw commit albo stash: linia bazowa musi być commitem.
+adopt.untracked = Plików nieśledzonych: %s — nie wchodzą do linii bazowej; zacommituj je najpierw, jeśli należą do systemu.
+adopt.at = Przejęto na %s (%s, gałąź %s): plików z kodem: %s+. Przegląd opisze ten commit.
+adopt.settings = Najpierw kilka ustawień — najważniejsze jest polecenie testów: jego wynik to linia bazowa.
+wiz.next.survey1 = Przegląd kodu: %s — Telesma raz uruchamia testy (linia bazowa), potem czyta
+wiz.next.survey2 = kod moduł po module i zapisuje, co znalazła, w telesma/spec/AS_BUILT.md. Nie zmienia kodu.
+wiz.next.survey3 = Potem poprawiasz ten plik, dopisujesz do telesma/spec/, co ma być dalej, i uruchamiasz ponownie.
+go.survey = Przejrzeć kod teraz? Telesma raz uruchamia testy jako linię bazową, potem czyta kod moduł po module i zapisuje, co znalazła — nie zmienia kodu
+survey.dirty = Niezacommitowane zmiany w %s — przegląd commituje to, co zapisze. Najpierw commit albo stash.
+survey.plan = telesma/state/PLAN.md — Phase 0 z zadaniami: %s (jedno na część kodu)
+survey.notests = Brak polecenia testów — brak linii bazowej. Ustaw ## Tests (%s) i uruchom ponownie albo idź dalej bez niej.
+survey.baseline = Linia bazowa: pełny zestaw testów, jeden raz — %s
+survey.green = Linia bazowa: zielona
+survey.red = Linia bazowa: czerwona (kod %s) — odziedziczone błędy, zapisane jako takie
+survey.checks = Kontrole jakości: jeden suchy bieg po całym repozytorium (punkt ci) — nic nie blokuje
+survey.start = Przegląd: Claude czyta kod moduł po module i zapisuje telesma/spec/AS_BUILT.md — kod nie jest zmieniany.
+survey.progress = Postęp widać w Phase 0 w telesma/state/PLAN.md; po przerwaniu kolejny start kontynuuje od pierwszego otwartego zadania.
+survey.done = === Przegląd zakończony === telesma/spec/AS_BUILT.md: modułów: %s, otwartych pytań: %s.
+survey.unfinished = Przegląd się nie skończył — w Phase 0 zostały otwarte zadania. Uruchom ponownie, żeby kontynuować: %s
+survey.already = Projekt już przejęty (telesma/config.md → Adopted at %s); przegląd zrobiony.
+next.a1 = Przeczytaj %s — popraw, co przegląd źle zgadł, odpowiedz na otwarte pytania w pliku albo je zostaw.
+next.a2 = Włóż do %s plik z tym, co ma się dalej dziać (funkcje, poprawki, refaktor — dowolny format).
+next.a3 = Uruchom jak zwykle: %s — doprecyzowanie czyta całość, pyta i planuje od Phase 1.
+next.a4 = Już teraz przydatne: %s (przegląd kodu) i %s (naprawa błędów) działają na samym przeglądzie.

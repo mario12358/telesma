@@ -158,8 +158,18 @@ FAKE_CLAUDE = r'''#!/bin/sh
 pf=""; prev=""
 for a in "$@"; do [ "$prev" = "--append-system-prompt-file" ] && pf="$a"; prev="$a"; done
 if [ -n "$pf" ]; then cat "$pf" > "${FAKE_LOG:-/dev/null}"
-elif [ "$#" -gt 0 ]; then printf '%s' "$*" > "${FAKE_LOG:-/dev/null}"; else cat > "${FAKE_LOG:-/dev/null}"; fi
+elif [ "$#" -gt 0 ]; then
+  # options and the prompt (an argument, or stdin in pipe mode — never read from a terminal)
+  printf '%s\n' "$*" > "${FAKE_LOG:-/dev/null}"; [ -t 0 ] || cat >> "${FAKE_LOG:-/dev/null}"
+else cat > "${FAKE_LOG:-/dev/null}"; fi
 case "$(cat "${FAKE_LOG:-/dev/null}")" in
+  *"-3. Survey phase"*)
+    [ -n "$FAKE_WRITE" ] || exit 0
+    tail -n +2 telesma/spec/AS_BUILT.md > ab.tmp && mv ab.tmp telesma/spec/AS_BUILT.md
+    printf '\n## Cart\n\nTotals.\n\n- When items are summed, then the total is returned. (`src/shop/cart.py:1-2`) [verified by test: `test_total`]\n\n## Open questions\n\n- OQ1: is tax applied anywhere? — src/shop/cart.py:2 (assume no)\n' >> telesma/spec/AS_BUILT.md
+    tail -n +2 telesma/spec/TECHNICAL_GUIDELINES.md > tg.tmp && mv tg.tmp telesma/spec/TECHNICAL_GUIDELINES.md
+    sed 's/^- \[ \] Task 0\./- [x] Task 0./' telesma/state/PLAN.md > pl.tmp && mv pl.tmp telesma/state/PLAN.md
+    ;;
   *"Interview phase"*)
     [ -n "$FAKE_WRITE" ] || exit 0
     printf '# Sorter\n\n## What it does\nSorts photos.\n' > telesma/spec/IDEA.md
@@ -194,7 +204,7 @@ def fake_bin(tmp):
     claude.chmod(0o755)
     # The interview's stack tests with `pytest -q`; the launcher checks that the project's tools exist
     pytest = b / "pytest"
-    pytest.write_text("#!/bin/sh\nexit 0\n")
+    pytest.write_text("#!/bin/sh\necho '3 passed in 0.02s'\nexit 0\n")
     pytest.chmod(0o755)
     return b
 
@@ -469,6 +479,128 @@ def test_new_project():
         ok("already has a specification" in out and "telesma/changes/" in out, "--new on a clarified project: refused, points at changes/")
 
 
+def test_adopt():
+    print("launcher — --adopt: preconditions, the wizard, the baseline, the survey session, what comes after")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        project = tmp / "legacy"
+        (project / "src" / "shop").mkdir(parents=True)
+        (project / "tests").mkdir()
+        (project / "pyproject.toml").write_text("[project]\nname='shop'\n")
+        (project / "src" / "shop" / "__init__.py").write_text("")
+        (project / "src" / "shop" / "cart.py").write_text("def total(items):\n    return sum(items)  # TODO tax\n")
+        (project / "tests" / "test_cart.py").write_text("from shop.cart import total\n\ndef test_total():\n    assert total([1, 2]) == 3\n")
+        ident = dict(GIT_AUTHOR_NAME="T", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="T", GIT_COMMITTER_EMAIL="t@example.com",
+                     LANG="en_US.UTF-8")
+        c = project / "telesma" / "config.md"
+
+        # 1. preconditions: no git and no terminal; a repository without a commit; a dirty tree
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        ok(r.returncode == 1 and "No repository and no terminal" in strip(r.stdout) and not c.exists(),
+           "no git, no terminal: refused before config.md is created")
+        subprocess.run(["git", "init", "-q", "-b", "main", str(project)], check=True)
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        ok(r.returncode == 1 and "has no commit yet" in strip(r.stdout), "a repository without a commit: refused")
+        subprocess.run(["git", "-C", str(project), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(project), "commit", "-q", "-m", "legacy"], check=True, env=dict(os.environ, **ident))
+        (project / "src" / "shop" / "cart.py").write_text("def total(items):\n    return sum(items) + 0\n")
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        ok(r.returncode == 1 and "Uncommitted changes" in strip(r.stdout) and not c.exists(), "a dirty tree: refused")
+        subprocess.run(["git", "-C", str(project), "checkout", "--", "."], check=True)
+        sha = subprocess.run(["git", "-C", str(project), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+        # 2. the first --adopt: config.md with the Adopted fields, the silent wizard (no terminal),
+        #    the detected stack, the spec templates; the next step is the survey
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        out = strip(r.stdout)
+        ok(r.returncode == 0 and c.is_file() and f"Adopted at {sha}" in out, f"first --adopt: config.md created, the commit named (exit {r.returncode})")
+        text = c.read_text()
+        ok("- **Adopted**: yes" in text and re.search(rf"- \*\*Adopted at\*\*: {sha} \d{{4}}-\d\d-\d\d", text), "Adopted / Adopted at set in config.md")
+        s = kv(cfg("status", c))
+        ok(s["test_command"] == "pytest -q" and s["judge"] == "rules" and s["checks"] == "basic",
+           f"the wizard applied the recommended profile with the detected stack: tests={s['test_command']}")
+        ok("Survey the code:" in out and "AS_BUILT.md" in out and "When you want to go on" in out,
+           "next steps name the survey; 'go on?' without a terminal prints the command")
+        ok("=== Next steps ===" in out and "Następne" not in out and "/dev/tty" not in out + strip(r.stderr),
+           "no terminal: one language for the summary (the config's), no /dev/tty error line")
+        ok("Adopted at" in out and "__pycache__" not in out, "the untracked-files note does not list build output")
+        spec = project / "telesma" / "spec"
+        ok((spec / "AS_BUILT.md").is_file() and "TELESMA_AS_BUILT_TEMPLATE" in (spec / "AS_BUILT.md").read_text().split("\n", 1)[0]
+           and (spec / "TECHNICAL_GUIDELINES.md").is_file(), "AS_BUILT.md and the technical template in telesma/spec/")
+        ok(not (project / "telesma" / "state" / "PLAN.md").exists(), "no plan before the survey start")
+        ok("1. Put the project description" not in out, "the empty-spec instructions are not printed")
+
+        # 3. a plain start: Phase 0 skeleton, the baseline, the checks' dry run, the survey session
+        r = run_launcher(tmp, project, FAKE_WRITE="1", **ident)
+        out = strip(r.stdout)
+        plan = (project / "telesma" / "state" / "PLAN.md").read_text()
+        ok(f"### Phase 0: Existing system (adopted at {sha}," in plan and "Task 0.1: Overview" in plan
+           and "Task 0.2: Survey src/shop" in plan and "Wrap-up" in plan and "- **Name**: legacy" in plan,
+           "PLAN.md: Phase 0 with overview, one task per part, wrap-up")
+        report = (project / "telesma" / "state" / "REPORT.md").read_text()
+        ok("**Baseline at adoption (" in report and "GREEN (exit 0):** `pytest -q` — 3 tests: 3 passed, 0 failed, 0 skipped (log:pytest)" in report
+           and "(adoption)" in report, "REPORT.md: the baseline paragraph in Test status with the numbers, and the start date")
+        ok("| Total tests | 3 |" in report and "| Pass | 3 |" in report and "(baseline at adoption)" in report,
+           "REPORT.md: the metrics table filled from the baseline")
+        ok(report.index("Baseline at adoption") < report.index("| Metric |"), "the baseline paragraph stands above the metrics table")
+        ok("Adoption: checks dry run (ci point, whole repository): 0 blocking" in report, "REPORT.md: the checks' dry run in the Problem log")
+        log = (tmp / "claude.log").read_text()
+        ok("--allowedTools Edit(telesma/**) --permission-mode default" in log,
+           "the survey session: permission mode default, an Edit rule for telesma/** only")
+        ok("-3. Survey phase" in log and "MODE: survey" in log and "SURVEY: git digest" in log and "1 commits by 1 author" in log
+           and "### Phase 0: Existing system" in log and "Baseline at adoption" in log,
+           "the prompt carries SURVEY.md, the plan, the report with the baseline and the git digest")
+        ok("Baseline: running the full suite once" in out and "=== Survey done ===" in out and "=== Next steps ===" in out,
+           "the launcher ran the baseline and reports the finished survey with the next steps")
+        ok("- [ ] Task 0." not in (project / "telesma" / "state" / "PLAN.md").read_text()
+           and "TELESMA_AS_BUILT_TEMPLATE" not in (spec / "AS_BUILT.md").read_text(), "Phase 0 ticked, AS_BUILT.md written")
+        ok("Perform ONLY steps 1 and 2" not in log, "no clarification in the same run")
+
+        # 4. --adopt again: already adopted; a plain start: the clarification with the ADOPTED line
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        ok(r.returncode == 0 and "Already adopted" in strip(r.stdout), "--adopt on an adopted project: status and next steps")
+        r = run_launcher(tmp, project, **ident)
+        log = (tmp / "claude.log").read_text()
+        ok("Perform ONLY steps 1 and 2" in log and "ADOPTED: yes" in log and "- AS_BUILT.md (" in log,
+           "the next start runs clarification phase A with the ADOPTED line and AS_BUILT.md among the spec files")
+        report = (project / "telesma" / "state" / "REPORT.md").read_text()
+        ok(report.count("Baseline at adoption") == 1, "the baseline is run once")
+
+        # 5. before the clarification, bugfix and review work from the survey
+        r = run_launcher(tmp, project, "-m", "3", **ident)
+        log = (tmp / "claude.log").read_text()
+        ok("Adopted project before clarification: mode 3" in strip(r.stdout) and "MODE: review" in log,
+           "-m 3 on an adopted, unclarified project skips the clarification")
+
+        # 6. an interrupted survey: an open Phase 0 task → the next start continues the survey, not the clarification
+        p = project / "telesma" / "state" / "PLAN.md"
+        p.write_text(p.read_text().replace("- [x] Task 0.2", "- [ ] Task 0.2"))
+        r = run_launcher(tmp, project, **ident)
+        log = (tmp / "claude.log").read_text()
+        ok("MODE: survey" in log and "did not finish" in strip(r.stdout), "an open Phase 0 task: the survey session again (the fake writes nothing)")
+        ok((project / "telesma" / "state" / "REPORT.md").read_text().count("Baseline at adoption") == 1, "no second baseline")
+
+        # 7. --adopt on a project that already has a plan is refused
+        p.write_text(p.read_text().replace("- [ ] Task 0.2", "- [x] Task 0.2"))
+        cfg("set", c, "Project", "Clarified", "yes")
+        r = run_launcher(tmp, project, "--adopt", **ident)
+        ok(r.returncode == 0 and "Already adopted" in strip(r.stdout), "an adopted project after clarification: status only")
+        other = tmp / "greenfield"
+        (other / "telesma" / "state").mkdir(parents=True)
+        (other / "telesma" / "spec").mkdir()
+        (other / "telesma" / "spec" / "s.md").write_text("# S\n")
+        shutil.copy(TEMPLATE, other / "telesma" / "config.md")
+        (other / "telesma" / "state" / "PLAN.md").write_text("# Plan\n\n### Phase 1: A\n\n- [ ] Task 1.1: x\n")
+        r = run_launcher(tmp, other, "--adopt", **ident)
+        ok(r.returncode == 1 and "already runs with Telesma" in strip(r.stdout), "--adopt on a project with a plan: refused")
+        empty = tmp / "nocode"
+        empty.mkdir()
+        r = run_launcher(tmp, empty, "--adopt", **ident)
+        ok(r.returncode == 1 and "No source code found" in strip(r.stdout), "--adopt on a folder without code: refused, --new suggested")
+        r = run_launcher(tmp, empty, "--adopt", **dict(ident, LANG="pl_PL.UTF-8"))
+        ok("nie ma kodu źródłowego" in strip(r.stdout), "the adoption lines follow the language (Polish system)")
+
+
 def test_experience_in_prompt():
     print("launcher — the EXPERIENCE block reaches the clarification prompt only for a beginner")
     with tempfile.TemporaryDirectory() as d:
@@ -494,6 +626,55 @@ def test_experience_in_prompt():
         run_launcher(tmp, project)
         prompt = (tmp / "claude.log").read_text()
         ok("LANGUAGE: en" in prompt and "EXPERIENCE: beginner — the person" not in prompt, "developer: no EXPERIENCE block, no tokens spent")
+
+
+def test_guidelines_index_diet():
+    print("launcher — the guidelines index in the implementation prompt names only the project's tags in full")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        project = tmp / "p"
+        spec = project / "telesma" / "spec"
+        spec.mkdir(parents=True)
+        (spec / "shop.md").write_text("# Shop\n")
+        (project / "pyproject.toml").write_text("[project]\nname='shop'\n")
+        subprocess.run(["git", "init", "-q", str(project)], check=True)
+        r = run_launcher(tmp, project)                       # first start → config.md + silent wizard
+        c = project / "telesma" / "config.md"
+        cfg("set", c, "Project", "Clarified", "yes")
+        plan = project / "telesma" / "state" / "PLAN.md"
+        plan.write_text("# Plan\n\n## Project information\n\n- **Name**: shop\n- **Stack**: Python 3.12, FastAPI, PostgreSQL\n\n"
+                        "## Tasks\n\n### Phase 1: Start\n\n- [ ] Task 1.1: API (tech: fastapi, python)\n"
+                        "- [ ] Task 1.2: E2E (requires: 1.1) (tech: playwright, typescript)\n", encoding="utf-8")
+        r = run_launcher(tmp, project, "-m", "1")
+        log = (tmp / "claude.log").read_text()
+        idx = log.split("# GUIDELINES_INDEX")[1].split("\n---\n")[0]
+        full = [l for l in idx.split("\n") if l.startswith("- ") and "[tag:" in l]
+        ok(r.returncode == 0 and "MODE: autonomous" in log, f"mode 1 started (exit {r.returncode})")
+        ok("general.md [tag: general] (ALWAYS LOADED)" in idx, "general.md always in full")
+        ok(all(any(f"[tag: {t}]" in l for l in full) for t in ("fastapi", "python", "playwright", "typescript", "postgres")),
+           "full lines for the plan's (tech:) tags and the Stack line (PostgreSQL → postgres)")
+        ok(not any("[tag: angular]" in l or "[tag: rust]" in l for l in full) and len(full) < 12,
+           f"the other tags are not listed in full ({len(full)} full lines)")
+        ok("Also available in telesma/guidelines/" in idx and "angular" in idx.split("Also available")[1]
+           and "rust" in idx.split("Also available")[1], "the rest named in one line")
+        # the clarification keeps the whole index (it assigns the tags)
+        cfg("set", c, "Project", "Clarified", "no")
+        plan.unlink()
+        run_launcher(tmp, project, FAKE_QUESTIONS="1")
+        q = project / "telesma" / "state" / "QUESTIONS.md"
+        q.write_text(q.read_text().replace("- **Answer**:\n", "- **Answer**: 10x10\n").replace("❓", "✅") + "\n- **State**: done\n")
+        run_launcher(tmp, project)
+        log = (tmp / "claude.log").read_text()
+        idx = log.split("# GUIDELINES_INDEX")[1].split("\n---\n")[0]
+        ok("Perform ONLY step 4" in log and "[tag: angular] —" in idx and "Also available" not in idx,
+           "the plan prompt of the clarification carries the full index")
+        # a plan without any tag: nothing is trimmed
+        cfg("set", c, "Project", "Clarified", "yes")
+        plan.write_text("# Plan\n\n### Phase 1: Start\n\n- [ ] Task 1.1: API\n", encoding="utf-8")
+        (project / "pyproject.toml").unlink()
+        run_launcher(tmp, project, "-m", "1")
+        idx = (tmp / "claude.log").read_text().split("# GUIDELINES_INDEX")[1].split("\n---\n")[0]
+        ok("[tag: angular] —" in idx and "Also available" not in idx, "no tags anywhere: the full index stays")
 
 
 def test_clarification_end():
@@ -859,7 +1040,9 @@ if __name__ == "__main__":
     test_not_a_project_folder()
     test_first_start_tty()
     test_new_project()
+    test_adopt()
     test_experience_in_prompt()
+    test_guidelines_index_diet()
     test_clarification_end()
     test_preflight()
     test_smart_app_control()

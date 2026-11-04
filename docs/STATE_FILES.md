@@ -17,6 +17,7 @@ and the diagnosis with `--repair`.
 |---|---|---|
 | `telesma/spec/TECHNICAL_GUIDELINES.md` | Departures from the defaults in `telesma/guidelines/` (stack, hosting, integrations, non-functional requirements). Template copied on the first run; left as it is (marker `TELESMA_SPEC_TEMPLATE` in line 1) it means the defaults apply and never blocks the start; delete the marker once you fill something in. | You, before the start |
 | `telesma/spec/*` | Business and functional requirements, use cases, domain model, diagrams — any format. Frozen after clarification. | You, before the start |
+| `telesma/spec/AS_BUILT.md` | Adopted projects only (`telesma.sh --adopt`): the system as found at `Adopted at` — one section per module, one `When …, then …` line per behaviour with `path:lines` and a `[verified by test: …]` / `[inferred]` tag, `## Open questions` at the end. Template with a marker until the survey writes it; frozen with the rest of the spec. | The survey session; you correct it |
 | `telesma/spec/ux_ui/` | Mockups, design tokens, reference components (CSS, HTML, JSX, TSX, images). Loaded fragment by fragment through `(ui-*:)` tags. Always created; empty is fine. | You, before the start |
 | `telesma/spec/ux_ui/LINKS.md` | Registry of mockups kept outside the repository (`## <id> — Title` + `- link:`). Template created by the setup wizard when screenshots are turned on (or copy `templates/UX_LINKS_TEMPLATE.md` yourself). **Exempt from the freeze** — add links any time; Telesma indexes new entries at the next start. The link must be shared. | You, any time |
 | `telesma/spec/APP_FLOW.md` | User flows (`## Step N — Title`), mapped 1:1 to e2e tests and recordings. Template created by the setup wizard when recordings are turned on; used only with `Recordings: yes`. | You, optional |
@@ -30,7 +31,7 @@ and the diagnosis with `--repair`.
 | `telesma/config.md` | Configuration ([CONFIGURATION.md](CONFIGURATION.md)). | You (Telesma sets `Clarified`) |
 | `telesma/state/SPEC_INDEX.md` | Two-level spec index with line ranges and anchors, documentation quality assessment, `## UX/UI guidelines` and `## Flows` tables, spec checksums. | Telesma, during clarification |
 | `telesma/state/QUESTIONS.md` | Contradictions (`S`), assumptions (`A`), questions (`Q`), each with its source. | Telesma, during clarification |
-| `telesma/state/PLAN.md` | Phases and tasks with checkboxes, dependencies, tags, acceptance criteria, `## Spec coverage`. | Telesma after clarification, or you |
+| `telesma/state/PLAN.md` | Phases and tasks with checkboxes, dependencies, tags, acceptance criteria, `## Spec coverage`. An adopted project starts with a completed `### Phase 0: Existing system` (one survey task per part of the code, written by the launcher). | Telesma after clarification, or you |
 | `telesma/state/PROJECT_CONTEXT.md` | Architecture, `## Key decisions`, `## Known problems and solutions`, `## Current state`. Survives compaction. | Telesma |
 | `telesma/state/REPORT.md` | `## Summary`, `## Test status`, `## Task history`, `## Change history`, `## Visual artifacts`, `## Problem log`. | Telesma |
 | `telesma/state/DECISIONS.md` | Append-only log of interactive exchanges after the loop ends. Never loaded into a prompt; grepped for a topic before an answer, a proposal, a change plan or a question (section 0.6), and read where a `Key decisions` row points (`→ DECISIONS.md <date time>`). | Telesma (section 10) |
@@ -139,6 +140,10 @@ carries it again. The launcher trims it — **in the prompt copy only**; files o
   `## Current state` is cut at 2 KB.
 - Ad-hoc `Change history` sections in REPORT.md are reduced to their header — their text lives in
   `telesma/changes/processed/`, which Telesma reads for `(change:)` tasks anyway.
+- `GUIDELINES_INDEX` keeps the full `tag — keywords` line only for the tags the project uses (its
+  plan's `(tech:)` tags and Stack line, the detected manifests) and for `general.md`; the other
+  guidelines are named in one line. Every file is still in `telesma/guidelines/`; the clarification
+  sees the full index.
 
 Measured on the reference project: 425k → 286k characters. The diagnosis below flags table rows over
 400 characters, so Claude shortens them at the source — what the model does not do consistently,

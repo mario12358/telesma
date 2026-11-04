@@ -77,7 +77,7 @@ When you need information from the documentation (before implementing a task, on
 
 ### 0.2 Loading technology guidelines
 
-The `telesma/guidelines/` directory holds style/convention guidelines for languages and frameworks. At session start you see ONLY the index (`GUIDELINES_INDEX` in the prompt) — you load the full content on demand, per task.
+The `telesma/guidelines/` directory holds style/convention guidelines for languages and frameworks. At session start you see ONLY the index (`GUIDELINES_INDEX` in the prompt) — you load the full content on demand, per task. The index gives the full keyword line only for the tags this project uses (its plan and its stack); the other guidelines are named in one "Also available" line and are in `telesma/guidelines/` all the same — a task whose `(tech:)` tag names one of them loads it like any other.
 
 **Procedure (run BEFORE implementing each task):**
 
@@ -456,6 +456,12 @@ Run the full test suite (the full suite command from `telesma/config.md`):
 - after completing **all tasks in a phase**
 - after processing files from `telesma/changes/` (section 0.3) — the plan mutation may have invalidated assumptions
 - after completing each rework phase `.Z<n>`
+
+A regression is a test that **used to pass** and now fails. In an adopted project (`Adopted: yes`)
+the first green state is the baseline the launcher recorded in `REPORT.md → Test status` at
+adoption: a test that was already red there (listed in `## Known problems and solutions`) is an
+inherited failure, not a regression — it is fixed or removed by a planned task, never in the
+regression procedure.
 
 If a regression is detected (a test that used to pass now fails):
 1. **STOP** working on new tasks

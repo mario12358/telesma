@@ -308,6 +308,12 @@ next_steps() {
     echo -e "${GREEN}$(msg next.title '=== Next steps ===')${NC}"
     if [[ "$(config_field Project Clarified)" == "yes" ]]; then
         echo -e "  $(msg next.loop 'Start the loop:    %s' "${CYAN}$0 $PROJECT_DIR -m 1${NC}")"
+    elif [[ "$(config_field Project Adopted | tr '[:upper:]' '[:lower:]')" == "yes" ]]; then
+        # --adopt: the code exists; the survey describes it (telesma.sh, section -3)
+        echo -e "  $(msg wiz.next.survey1 'Survey the code: %s — Telesma runs the tests once (the baseline), then reads' "${CYAN}$0 $PROJECT_DIR${NC}")"
+        echo    "     $(msg wiz.next.survey2 'the code module by module and writes what it found into telesma/spec/AS_BUILT.md. It changes no code.')"
+        echo    "     $(msg wiz.next.survey3 'Afterwards you correct that file, add what should happen next to telesma/spec/, and start again.')"
+        WIZARD_NEXT=survey
     else
         echo -e "  $(msg next.1 'Put the specification into %s (any format) — if you have not yet.' "${CYAN}telesma/spec/${NC}")"
         echo -e "  $(msg next.tg 'Technical guidelines: %s — left as it is, the defaults from telesma/guidelines/ apply;' "${CYAN}telesma/spec/TECHNICAL_GUIDELINES.md${NC}")"
@@ -326,11 +332,14 @@ next_steps() {
 setup_wizard_first_run() {
     load_kv DET "$(cfg detect "$PROJECT_DIR")"
     if ! has_tty; then
+        msg_load_language "$CONFIG_FILE"       # the template's `en`: one language for the whole summary
         cfg profile "$CONFIG_FILE" recommended --template "$CONFIG_TEMPLATE" > /dev/null
         [[ -n "$DET_parts" ]] && cfg tests "$CONFIG_FILE" --stack auto --project "$PROJECT_DIR" > /dev/null
         echo -e "${CYAN}No terminal — applied the 'recommended' profile${NC} (judge: rules, checks: basic)."
         cfg summary "$CONFIG_FILE"
         echo -e "Adjust it with: $0 --setup $PROJECT_DIR"
+        # an adopted project (--adopt) has a next step of its own: the survey
+        [[ "$(config_field Project Adopted | tr '[:upper:]' '[:lower:]')" == "yes" ]] && next_steps
         return 0
     fi
     # Language and experience come first: every later line is asked in that language, and a

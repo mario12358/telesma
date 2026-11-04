@@ -11,6 +11,37 @@ write the file another way (Bash, `python -c`) and never edit `.claude/` or `tel
 
 This phase runs ONLY when telesma/config.md says `Clarified: no`. If it says `Clarified: yes` — skip this section and go to section 0.
 
+### Adopted project (`Adopted: yes` in telesma/config.md)
+
+The code existed before Telesma. The survey session (section -3) described it in
+`telesma/spec/AS_BUILT.md` — the system as found, one `When …, then …` line per behaviour with a
+confidence tag — and left `telesma/state/PLAN.md` with a completed `### Phase 0: Existing system`,
+`PROJECT_CONTEXT.md` filled from the code and the git history, and the test baseline in
+`REPORT.md → Test status`. The other files in `telesma/spec/` are what the owner wants next. In
+this phase:
+
+- **Step 1**: index `AS_BUILT.md` like any other file — its `## <Module>` sections are the anchors
+  later tasks cite with `(spec: AS_BUILT.md)`. Rate the documentation quality for the *new* work
+  only: a short "what next" file is not a gap when `AS_BUILT.md` covers the rest.
+- **Step 2**: every `OQ<n>` in `AS_BUILT.md → ## Open questions` becomes an assumption (when the
+  survey's guess in the brackets is the usual answer) or a question, with `Source:
+  AS_BUILT.md:<lines>` — none is dropped. When the owner wrote nothing about what comes next, ask
+  one question: which of the open questions and known problems the first phase should take on;
+  the plan is then the safety net plus those.
+- **Step 4**: keep Phase 0 exactly as it is — its tasks are done; do not rewrite, renumber or
+  re-tick it — and plan from `### Phase 1`. No "architecture skeleton" task: the architecture
+  exists and is in `PROJECT_CONTEXT.md`; a task that departs from it is a decision for `## Key
+  decisions`, not a silent change. A red baseline or no tests → propose, as an assumption in
+  step 2, a **safety net** first: `Task 1.1: Characterisation tests for <the modules the plan
+  touches>` — tests that pin the `[inferred]` behaviour lines of `AS_BUILT.md` before anything
+  changes them. A task that changes existing behaviour cites `(spec: AS_BUILT.md)` next to the
+  owner's file, so the loop reads the as-built lines it is about to change. `## Spec coverage`:
+  every `## <Module>` section of `AS_BUILT.md` gets a row — `exists — 0.N` (the Phase 0 task that
+  surveyed it) when nothing changes it, or the tasks that do.
+- **Step 6a**: the decisions the code already made (the `📌` rows the survey wrote) are not
+  re-made here; an answer that overturns one edits that row (`~~old~~ → new`, the rules of
+  section 7 of the implementation instructions).
+
 ### Step 1: Analysing the documentation and indexing
 
 1. Read ALL files in the `telesma/spec/` directory (use the Read tool for each file on the list given in the startup prompt)

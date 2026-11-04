@@ -92,7 +92,7 @@ Modified 7.3, created Phase 7.Z1 (rework 7.1).
 
 FILES = {
     "telesma/state/.telesma-version": "7\n",
-    "telesma/config.md": "## Tests\n\n- **Smoke suite**: none\n\n## Integrations\n\n"
+    "telesma/config.md": "## Project\n\n- **Adopted**: yes\n\n## Tests\n\n- **Smoke suite**: none\n\n## Integrations\n\n"
                        "- **Repository**: github\n- **Merge**: agent\n- **Tracker**: none\n\n"
                        "## Telemetry\n\n"
                        "- **Send**: yes\n- **Endpoint**: ENDPOINT\n"
@@ -308,6 +308,7 @@ def main():
         st = next(e for e in ev if e["type"] == "state")["metrics"]
         check(st["plan"] == {"done": 2, "waiting_for_human": 1} and st["smoke"] is False,
               "state: ⛔ counted separately, missing smoke suite visible")
+        check(st["adopted"] is True, "state: an adopted project is flagged (Adopted: yes)")
         check(by[("change", "2026-02-03-new-limit.md")]["metrics"]["rework"], "change → rework")
 
         print("repository integration (counters only)")

@@ -15,6 +15,13 @@
   <!-- action instead of its command, progress in one sentence. Same mechanics, same permission  -->
   <!-- prompts, same files — only the language changes. `telesma.sh --new` (an interview that     -->
   <!-- writes the specification for you) sets it.                                                -->
+- **Adopted**: no
+  <!-- yes = an existing codebase Telesma took over with `telesma.sh --adopt`: Phase 0 of PLAN.md   -->
+  <!-- is the system as found (telesma/spec/AS_BUILT.md), the clarification plans from Phase 1,    -->
+  <!-- and the test baseline in REPORT.md tells a regression from an inherited failure. Set by     -->
+  <!-- the launcher, never by hand.                                                                 -->
+- **Adopted at**:
+  <!-- the commit the survey described: short SHA and date — set by the launcher -->
 
 ## Tests
 

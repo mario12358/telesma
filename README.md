@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>Describe it. It builds it.</b><br>
-  From a written specification to tested, committed code — in one continuous Claude Code session.
+  From a written specification — or the code you already have — to tested, committed code, in one continuous Claude Code session.
 </p>
 
 <p align="center">
@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="#quick-start"><b>Developer quick start</b></a> ·
+  <a href="#existing-code-adopt-it"><b>Existing code?</b></a> ·
   <a href="#not-a-programmer-start-here"><b>Not a programmer?</b></a> ·
   <a href="SHOWCASE.md"><b>Showcase</b></a> ·
   <a href="#faq"><b>FAQ</b></a> ·
@@ -28,7 +29,9 @@
 **Telesma is an autonomous development loop for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 Put a specification into `telesma/spec/`, answer the questions Telesma asks about it, and it turns
 the spec into a plan and works through that plan task by task — implement, test, commit, report,
-next — until the plan is done.
+next — until the plan is done. **Code that already exists** gets the same treatment:
+`telesma --adopt` records a test baseline, mines the git history and describes the system module
+by module before anything is planned — [see below](#existing-code-adopt-it).
 
 It builds on the [Ralph loop](https://ghuntley.com/ralph/) technique — run an agent in a loop over
 a plan until the plan is done — and adds what a real project needs around it: a clarification
@@ -40,6 +43,7 @@ comes from it.
 ```mermaid
 flowchart LR
     spec["telesma/spec/<br/>your specification"] --> clarify["Clarification<br/>contradictions · assumptions · questions"]
+    adopt["telesma --adopt<br/>existing code → baseline + AS_BUILT.md"] --> clarify
     clarify --> plan["PLAN.md<br/>phases · tasks · acceptance criteria"]
     plan --> loop
     subgraph loop["One Claude Code session"]
@@ -65,6 +69,7 @@ what it was doing. Telesma does neither:
 | Who enforces the rules       | the prompt                           | the prompt                         | the launcher (validation, prompt diet) and git hooks (checks)  |
 | A change after the start     | a new chat message                   | edit the prompt                    | a file in `telesma/changes/` → plan edits or a rework phase    |
 | Releases                     | by hand                              | —                                  | proposed per phase, tagged only after you say yes              |
+| Code that already exists     | you explain it in the chat, again    | —                                  | `--adopt`: a test baseline, a git digest, the system described module by module, then a plan from there |
 
 In short: **one continuous session** in which Claude drives the loop itself, **state in files, not in
 the context window**, and **the rules that matter enforced by scripts**, not by the model's memory.
@@ -74,6 +79,9 @@ the context window**, and **the rules that matter enforced by scripts**, not by 
 **A good fit:** a new product or a substantial feature with a written specification (any format —
 Markdown, Word, PDF, mockups), built over days or weeks, where you want the work to stay traceable:
 the plan, the report, the decisions and every change request live in files in your repository.
+Also an **existing codebase** — written by hand or with an assistant used the ordinary way — that
+you want to keep developing with the same discipline: `telesma --adopt` describes it first, then
+the next features are planned on top of what is really there.
 
 **Not a fit:** a one-off fix or a small script (use Claude Code directly), or a project with no
 automated tests — Telesma treats green tests as the definition of done, and the launcher stops
@@ -90,6 +98,10 @@ usage limits.
 
 - **Clarification first** — Telesma reads the whole spec, rates its quality, and walks you through
   contradictions, assumptions and an adaptive number of questions before it plans anything.
+- **Adopt existing code** — `telesma --adopt` runs the tests once as the baseline, mines the git
+  history (reverts, churn, fix hot spots, tag scheme) and lets a survey session write
+  `telesma/spec/AS_BUILT.md`: one line per behaviour with the place in the code and whether a test
+  covers it, plus the conventions found. Nothing in the code changes. → [Adopting](#existing-code-adopt-it)
 - **Plan with contracts** — every task carries dependencies, spec references, technology
   guidelines, UI mockup references and acceptance criteria, including "what triggers this in the
   running product". → [Workflow](docs/WORKFLOW.md)
@@ -241,6 +253,9 @@ or two starts. Skip the menu with `telesma /path/to/project -m 1`; add `-i` to w
 checks, the user flows, the technology), then runs the setup. It sets `Experience: beginner`
 (plain words); `--setup` switches it back.
 
+**Code that already exists?** Start with `telesma --adopt /path/to/project` instead — the
+section [Existing code? Adopt it](#existing-code-adopt-it) walks through it.
+
 **3. Write the specification.** Everything Telesma reads and writes in your project lives in one
 `telesma/` directory:
 
@@ -271,10 +286,54 @@ the permission judge, the quality-check tier — and writes `telesma/config.md`,
 commented. Change anything later with `telesma --setup` or by editing the file.
 → [Configuration](docs/CONFIGURATION.md)
 
+## Existing code? Adopt it
+
+Telesma used to start only from a specification and an empty directory. Since 1.3 it takes over
+code it did not write — a project built by hand, or with Claude Code, Codex or Cursor used the
+ordinary way — without inventing a history for it:
+
+```bash
+telesma --adopt /path/to/project     # preconditions, the setup wizard, Adopted: yes
+telesma /path/to/project             # the baseline and the survey; add -i to watch
+```
+
+1. **Preconditions a survey can stand on.** Source code, a git repository with a commit (none →
+   Telesma offers `git init` and a first commit, after putting anything that looks like a secret
+   or build output into `.gitignore`), a clean tree. The commit it finds becomes `Adopted at` in
+   `telesma/config.md` — the state the survey describes. Then the setup wizard, as on any first
+   start; the test command matters most here.
+2. **The launcher, without a model.** It runs the **full test suite once** and records the result
+   in `telesma/state/REPORT.md` as the baseline — from then on a test that was already red is an
+   inherited failure, not a regression; runs the quality checks once over the whole repository
+   when they are on (findings listed, nothing blocked); mines the git history into a short digest —
+   tag scheme, reverts, churn, the files with the most fix commits, dependency changes, test ratio,
+   never an author or a commit subject; and writes `### Phase 0: Existing system` into the plan,
+   one task per part of the code.
+3. **The survey session** works through Phase 0 like any other phase. For each part it reads the
+   tests and the public surface and appends a section to `telesma/spec/AS_BUILT.md`: one
+   `When …, then …` line per behaviour, with the place in the code and a tag — `[verified by
+   test: …]` or `[inferred]` — plus open questions for what the code does not explain. It fills
+   `PROJECT_CONTEXT.md` (stack, architecture, decisions and pitfalls visible in the code and the
+   history) and records the conventions it found — including what your own `CLAUDE.md` says — in
+   `TECHNICAL_GUIDELINES.md`. It may write only inside `telesma/`; a write anywhere else is
+   refused by the session's permissions. It commits after every part, so an interrupted survey
+   continues at the next start.
+4. **Then it is your turn.** Correct `AS_BUILT.md` where the survey guessed wrong, answer the
+   open questions in place or leave them, put a file into `telesma/spec/` with what should happen
+   next — and start as usual. The clarification indexes everything, keeps Phase 0 as it is and
+   plans from Phase 1; a red baseline or no tests makes it propose a safety net of
+   characterisation tests first. Code review (`-m 3`) and bugfix (`-m 2`) already work from the
+   survey alone, before any plan exists.
+
+Why no task history is rebuilt from the commits, and what the first version deliberately leaves
+out: [docs/ARCHITECTURE.md §21](docs/ARCHITECTURE.md#21-adopting-an-existing-project). The user's
+side in full: [docs/WORKFLOW.md §19](docs/WORKFLOW.md#19-adopting-an-existing-project).
+
 ## How a session works
 
 1. **Clarification** (interactive, once): Telesma indexes `telesma/spec/` with line ranges and a
    quality assessment, then asks — few questions for a small, well-written spec, many for a thin one.
+   An adopted project gets here after the survey, with `AS_BUILT.md` among the spec files.
 2. **Planning**: from the spec and your answers it writes `telesma/state/PLAN.md` — phases, tasks
    with dependencies, acceptance criteria, and a coverage table mapping every spec section to tasks.
 3. **Startup checks** (every run, no tokens): the launcher validates the plan and the config,
@@ -352,11 +411,12 @@ and files. `telesma --new` sets it; `--setup` changes it. → [docs/CONFIGURATIO
 ## FAQ
 
 **Can I use it on an existing codebase?**
-Not yet as a first-class path. Telesma starts from a specification and reconstructs nothing from
-an existing history; a design for adopting an existing project is in
-[docs/ADOPTION.md](docs/ADOPTION.md). What works today: write the spec for the *next* feature,
-describe the existing stack in `telesma/spec/TECHNICAL_GUIDELINES.md`, and let the clarification
-ask about the rest.
+Yes: `telesma --adopt /path/to/project`. Telesma does not reconstruct a task history from commits
+(nothing would read it); it records a test baseline, mines the git history into a short digest,
+and a survey session writes `telesma/spec/AS_BUILT.md` — the system as found, one line per
+behaviour with the place in the code and whether a test covers it — plus the project context. You
+correct that file, add what should happen next, and the clarification plans from Phase 1; code
+review and bugfix work right after the survey. → [docs/WORKFLOW.md §19](docs/WORKFLOW.md#19-adopting-an-existing-project)
 
 **Does it work with an API key instead of a Pro or Max plan?**
 Yes. Claude Code runs on either; with `ANTHROPIC_API_KEY` set, the sign-in check is skipped.
@@ -388,7 +448,7 @@ criteria the definition of done — so a project survives compactions, restarts 
 | Document                                             | Contents                                                                  |
 | ---------------------------------------------------- | ------------------------------------------------------------------------- |
 | [SHOWCASE.md](SHOWCASE.md)                           | Programs built with Telesma, and how to add yours                         |
-| [docs/WORKFLOW.md](docs/WORKFLOW.md)                 | Clarification, plan format and tags, modes, changes, releases, monitoring |
+| [docs/WORKFLOW.md](docs/WORKFLOW.md)                 | Clarification, plan format and tags, modes, changes, releases, monitoring, adopting existing code |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md)       | The setup wizard, every `telesma/config.md` section and key, launcher flags |
 | [docs/STATE_FILES.md](docs/STATE_FILES.md)           | Files Telesma creates in your project, rotation, prompt diet, `--repair`  |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)   | Common problems and what to do                                            |
@@ -396,7 +456,6 @@ criteria the definition of done — so a project survives compactions, restarts 
 | [docs/PERMISSION_JUDGE.md](docs/PERMISSION_JUDGE.md) | The permission judge: layers, variants, evaluation                        |
 | [docs/CHECKS.md](docs/CHECKS.md)                     | Quality checks, attack-surface map, PR status                             |
 | [docs/TELEMETRY.md](docs/TELEMETRY.md)               | Optional self-hosted quality telemetry                                    |
-| [docs/ADOPTION.md](docs/ADOPTION.md)                 | Adopting an existing project — design proposal                            |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)         | How the launcher, instructions, hooks and tools fit together              |
 | [benchmark/README.md](benchmark/README.md)           | Frozen benchmark for comparing Telesma versions                           |
 | [CONTRIBUTING.md](CONTRIBUTING.md)                   | How to contribute, conventions, self-tests                                |

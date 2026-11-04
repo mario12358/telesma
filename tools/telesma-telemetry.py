@@ -939,7 +939,10 @@ def from_state(project, state, cfg, tags):
             (Path(__file__).resolve().parent.parent / "templates/instructions").glob("*.md"))},
         smoke=tests.get("Smoke suite", "none").lower() not in ("none", ""),
         max_tries=loop.get("Max tries per task"), judge=auto.get("Judge"),
-        auto_approve=auto.get("Auto-approve")))
+        auto_approve=auto.get("Auto-approve"),
+        # An adopted codebase (telesma.sh --adopt) is not greenfield: its defects, test ratio and
+        # task sizes come with history Telesma did not make — the hub keeps the two apart.
+        adopted=cfg.get("Project", {}).get("Adopted", "no").lower() == "yes"))
 
 
 def from_git_tasks(project, state, tags):

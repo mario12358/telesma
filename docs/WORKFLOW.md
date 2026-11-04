@@ -26,6 +26,7 @@ Section numbers such as "section 0.3" refer to the instruction modules in
 - [16. Releases and manual test scenarios](#16-releases-and-manual-test-scenarios)
 - [17. Resuming a session](#17-resuming-a-session)
 - [18. Monitoring progress](#18-monitoring-progress)
+- [19. Adopting an existing project](#19-adopting-an-existing-project)
 
 ## 1. Clarification
 
@@ -711,3 +712,49 @@ to `telesma/state/WAITING.md` with the GitHub integration.
 git log --oneline | grep "Telesma:"
 git tag --list 'telesma/phase-*'
 ```
+
+## 19. Adopting an existing project
+
+Code that exists already — written by hand or with an assistant — has no `telesma/spec/` and no
+plan. `telesma.sh --adopt` gives it both without inventing a history: Telesma describes the system
+as it finds it, you say what should happen next, and the clarification plans from there. The
+reasoning is in [ARCHITECTURE.md §21](ARCHITECTURE.md#21-adopting-an-existing-project).
+
+```bash
+telesma --adopt /path/to/project
+```
+
+**What the first start needs.** Source code in the directory, a git repository with a commit (no
+repository → Telesma offers `git init` and a first commit of the existing files, after adding
+anything that looks like a secret to `.gitignore`), and a clean tree: the commit it finds becomes
+`Adopted at` in `telesma/config.md`, the state the survey describes. The setup wizard runs as on any
+first start — the test command matters most here, because its result is the baseline.
+
+**The next start (a plain one) surveys the code.** First the launcher, without a model: it writes
+`### Phase 0: Existing system` into `PLAN.md` with one task per part of the code, runs the **full
+suite once** and records it in `REPORT.md → Test status` as the baseline (red tests there are
+inherited failures, not regressions), runs the quality checks once over the whole repository when
+they are on (findings are listed, nothing is blocked), and mines the git history into a short
+digest for the prompt — tag scheme, reverts, churn, files with the most fix commits, dependency
+changes, test ratio. Then a Claude session works through Phase 0 like any other phase: for each
+part it reads the tests and the public surface and appends a section to
+`telesma/spec/AS_BUILT.md` — one `When …, then …` line per behaviour with the place in the code and
+a tag, `[verified by test: …]` or `[inferred]` — fills `PROJECT_CONTEXT.md` (stack, architecture,
+decisions and pitfalls visible in the code and the history), records the conventions it found in
+`TECHNICAL_GUIDELINES.md`, and lists what the code does not explain under `## Open questions`. It
+writes only inside `telesma/`; a write anywhere else is refused by the session's permissions. It
+commits after every part, so an interrupted survey continues from the first open task at the next
+start. Add `-i` to watch it.
+
+**Then it is your turn.** Read `AS_BUILT.md`: correct what the survey guessed wrong (a wrong "as
+built" becomes a wrong plan), answer the open questions in place or leave them for the
+clarification. Put a file into `telesma/spec/` with what should happen next — features, fixes, a
+refactor, in any format. Start as usual: the clarification indexes everything, turns the open
+questions into assumptions and questions, keeps Phase 0 as it is and plans from Phase 1. When the
+baseline is red or there are no tests, it proposes a safety net first — characterisation tests
+for the modules the plan touches. Before any plan exists, `-m 3` (code review) and `-m 2` (bugfix)
+already work from the survey alone.
+
+What stays the same afterwards: `AS_BUILT.md` is part of the spec, frozen after clarification and
+describing the system at `Adopted at`; later changes go through `telesma/changes/`; a test that was
+red at adoption is fixed or removed by a planned task, never by the regression procedure.

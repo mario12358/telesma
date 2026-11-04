@@ -31,6 +31,7 @@ install.sh, install.ps1            One-line installers (macOS / Windows): depend
 templates/
 ├── instructions/                  Model instructions, assembled per mode by the launcher
 │   ├── INTERVIEW.md               Section -2: the --new interview that writes telesma/spec/ (idea, no spec)
+│   ├── SURVEY.md                  Section -3: the --adopt survey of an existing codebase (loop over Phase 0 → AS_BUILT.md)
 │   ├── BEGINNER.md                EXPERIENCE: beginner block, appended after LANGUAGE for Experience: beginner
 │   ├── CLARIFY.md                 Section -1: clarification and plan generation
 │   ├── CORE.md                    Sections 0-9 + global rules (every implementation mode)
@@ -45,6 +46,7 @@ templates/
 ├── QUESTIONS_TEMPLATE.md          Clarification: contradictions (S), assumptions (A), questions (Q)
 ├── SPEC_INDEX_TEMPLATE.md         Spec index with line ranges, anchors and quality assessment
 ├── SPEC_TEMPLATE.md               telesma/spec/TECHNICAL_GUIDELINES.md skeleton
+├── AS_BUILT_TEMPLATE.md           telesma/spec/AS_BUILT.md skeleton (adopted projects: the system as found)
 ├── CHANGES_TEMPLATE.md            Change request format for telesma/changes/
 ├── BACKLOG_TEMPLATE.md            telesma/state/BACKLOG.md skeleton
 ├── TEST_SCENARIOS_TEMPLATE.md     Skeleton of docs/test-scenarios/vX.Y.Z.md (section 15.7)
@@ -81,6 +83,7 @@ templates/
 tools/
 ├── telesma-repair.py                State-file diagnosis (every start) and repair (--repair)
 ├── telesma-telemetry.py             Optional quality telemetry collector (schema 2)
+├── telesma-survey.py                Git digest + survey units for --adopt (SURVEY: block, Phase 0 tasks)
 ├── telesma-specky-snapshots.py      Backfill Specky release snapshots for existing vX.Y.Z tags
 ├── telesma-judge-eval.py            Judge evaluation on a labelled set; gate = zero false allows
 ├── judge-eval/dataset.jsonl       The labelled set (dangerous / safe / disputed)
@@ -98,7 +101,10 @@ examples/example-plan.md           Example plan
 - `--new` with no complete spec: `INTERVIEW.md` + `BEGINNER.md` + the list of files already in
   `telesma/spec/` (an interactive session with `acceptEdits`; config.md is created before it with
   `Experience: beginner`, the first-start wizard runs after it);
-- clarification (`Clarified: no`): `CLARIFY.md`;
+- `--adopt` / an adopted project with an open task in Phase 0: `SURVEY.md` + the plan, context and
+  report (with the test baseline the launcher ran) + the `SURVEY:` git digest from
+  `tools/telesma-survey.py`; permission mode `default` with an `Edit(telesma/**)` allow rule;
+- clarification (`Clarified: no`): `CLARIFY.md` (+ an `ADOPTED: yes` line for adopted projects);
 - implementation modes: `CORE.md` + `INTERACTIVE.md` + the mode file (`MODE_BUGFIX.md`,
   `MODE_REVIEW.md`, `MODE_ARTIFACTS.md`; mode 1 has none) + `CHECKS.md` when checks are enabled +
   each configured integration's `INSTRUCTIONS.md` (appended after the mode block, so a project
@@ -167,13 +173,14 @@ Two independent numbers:
 
 - **Release version** (`vX.Y.Z` git tag, `CHANGELOG.md`) — what users install.
 - **`TELESMA_FORMAT`** in `telesma.sh` — internal state-format / migration counter, stored per
-  project in `telesma/state/.telesma-version`. Currently **19**. Bump it when a project's files need a
+  project in `telesma/state/.telesma-version`. Currently **20**. Bump it when a project's files need a
   migration, *and* when an instruction change should be measurable (telemetry tells "before" from
   "after" by this number). The format gate in the launcher runs before anything creates, reads or
   writes a file in the project: 18 = the first public format (the layout every later number
   shares), 19 = recall of earlier decisions (section 0.6, instructions only — the gate stamps a
-  format-18 project 19 without touching any other file). A new step is one `case` line in the
-  gate's loop.
+  format-18 project 19 without touching any other file), 20 = adoption of existing projects
+  (`--adopt`, section -3; the `Adopted` fields reach an older config through the merge). A new
+  step is one `case` line in the gate's loop.
 
 ## Tests
 
@@ -187,7 +194,8 @@ python3 tools/telesma-judge-eval.py   # judge gate: zero false allows on "danger
 Self-tests: `test-setup.py` (configure.py engine; the launcher's first start without a terminal and
 through a pty), `test-repair.py` (no word lost, out-of-scope files byte-identical, idempotent),
 `test-telemetry.py` (canaries), `test-judge.py` (mocked `gh`), `test-checks.py`,
-`test-integrations.py` (launcher heredocs on fixtures), `test-specky-snapshots.py` (fake Specky).
+`test-integrations.py` (launcher heredocs on fixtures), `test-specky-snapshots.py` (fake Specky),
+`test-survey.py` (git digest: numbers, never an author; survey units).
 A parser change comes with a fixture that would have failed before it. The benchmark
 (`benchmark/bench.py`, see `benchmark/README.md`) costs real tokens; do not edit `project/`,
 `telesma/changes/` or `hidden/` casually — any edit changes its fingerprint.
@@ -197,6 +205,7 @@ A parser change comes with a fixture that would have failed before it. The bench
 ```bash
 ./telesma.sh /path/to/project            # first run: creates telesma/spec/; second: config.md + setup wizard; later: mode menu
 ./telesma.sh --new /path/to/project          # no spec yet: interview writes telesma/spec/, Experience: beginner, then the wizard
+./telesma.sh --adopt /path/to/project        # existing code: wizard + Adopted: yes; the next start = test baseline + survey → AS_BUILT.md
 ./telesma.sh --setup /path/to/project        # configuration menu (tests, judge, checks, integrations, artifacts, language)
 ./telesma.sh /path/to/project -i         # interactive (required for clarification)
 ./telesma.sh /path/to/project -m 1       # autonomous loop over telesma/state/PLAN.md
@@ -216,7 +225,8 @@ Terminal states the model reports: `TELESMA COMPLETE`, `TELESMA BLOCKED` (writte
 ## Files in the user's project (short)
 
 Everything lives in **one directory, `telesma/`**: `config.md`; `spec/` (frozen after clarification,
-except `spec/ux_ui/LINKS.md`); `changes/` and `changes/processed/`; `state/` (`PLAN.md`,
+except `spec/ux_ui/LINKS.md`; adopted projects also hold `spec/AS_BUILT.md`, the system as found);
+`changes/` and `changes/processed/`; `state/` (`PLAN.md`,
 `REPORT.md`, `PROJECT_CONTEXT.md`, `SPEC_INDEX.md`, `QUESTIONS.md`, write-only logs `DECISIONS.md` /
 `BUGFIXES.md` / `REVIEWS.md`, read-write `BACKLOG.md`, archives `*_ARCHIVE.md`, `SECURITY_MAP.md`,
 `CHECK_EXCEPTIONS.md`, `CHECKS.jsonl`, `PERMISSIONS.jsonl`, `SPECKY.md`, `.telesma-version`,

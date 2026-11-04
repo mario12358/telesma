@@ -4,10 +4,36 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
-## Unreleased
+## 1.3.0 — 2026-11-04
 
-State format: 19 (unchanged).
+State format: 20 (a new instruction module, two new `## Project` fields that the config merge adds
+on the next start — a format-19 project is stamped 20 without any other change).
 
+- **Adopting an existing project**: `telesma.sh --adopt` takes over code Telesma did not build.
+  The launcher checks the preconditions (code, a git commit, a clean tree — `git init` and a first
+  commit are offered, secrets go into `.gitignore` first), runs the setup wizard and sets
+  `Adopted: yes` / `Adopted at`. The next start records the test baseline in `REPORT.md`, runs the
+  quality checks once over the whole repository when they are on, mines the git history into a
+  `SURVEY:` block (`tools/telesma-survey.py` — counts and paths, never an author or a subject) and
+  writes `### Phase 0: Existing system` into the plan, one task per part of the code; a survey
+  session (`templates/instructions/SURVEY.md`, section -3) then works through Phase 0 and writes
+  `telesma/spec/AS_BUILT.md` — the system as found, one `When …, then …` line per behaviour with
+  `path:lines` and a `[verified by test]` / `[inferred]` tag — plus `PROJECT_CONTEXT.md` and the
+  conventions found, writing only inside `telesma/` (permission mode `default`, an `Edit(telesma/**)` allow rule — a write anywhere
+  else is refused). The clarification has one branch for adopted projects (open questions become
+  assumptions or questions, Phase 0 stays, the plan starts at Phase 1, a red baseline proposes
+  characterisation tests first); a test red at adoption is an inherited failure, not a regression;
+  modes 2 and 3 work before the clarification. The telemetry `state` event carries an `adopted`
+  flag. The baseline's numbers (JUnit XML of the run, or the summary line of pytest, jest, cargo,
+  dotnet) fill the metrics table of `REPORT.md`; a deep single-root layout (`app/src/main/java/…`)
+  is split into one survey task per child directory; every line of the adoption the person reads
+  is in the project's language (Polish catalog). `docs/ADOPTION.md` (the proposal) is replaced by
+  `ARCHITECTURE.md` §21 and `WORKFLOW.md` §19.
+- Startup-prompt diet for the guidelines index: in the implementation modes the full `tag —
+  keywords` line stays only for the tags the project uses (the plan's `(tech:)` tags and Stack
+  line, the detected manifests) and for `general.md`; the other guidelines are named in one line.
+  Every file is still delivered to `telesma/guidelines/`, and the clarification sees the full index.
+  Measured: 8 KB → under 2 KB per session on a project with three tags.
 - CI hardened the way `guidelines/github-actions.md` tells user projects to: read-only token,
   `persist-credentials: false`, a 30-minute job timeout, actions pinned to a commit SHA with
   Dependabot bumping them, stale runs cancelled. The Specky CI template delivered to projects

@@ -79,6 +79,8 @@ missing blocks from the template; the merge at startup respects removed blocks.
 | `Clarified` | `no` | `no` = the next start runs the clarification phase; `yes` = the plan is ready, the mode menu appears. Telesma sets it itself at the end of clarification. |
 | `Language` | `en` | The language Telesma uses to talk to you and to write prose into state files (`en`, `pl`, `de`, …). Structural labels — section headers, field names, task keywords, tags — stay English because scripts parse them. Injected into the prompt as `LANGUAGE: <code>`. |
 | `Experience` | `developer` | Who Telesma talks to. `developer` = like a colleague (file names, section numbers, hashes). `beginner` = plain words, one question at a time with a default answer, the effect of an action instead of its command, progress in one sentence; the clarification accepts Telesma's assumptions for you and names the first three. Same mechanics, same permission prompts, same files — only the prose changes. Injected as the `EXPERIENCE: beginner` block (`templates/instructions/BEGINNER.md`); a developer pays no tokens for it. `telesma.sh --new` sets it. |
+| `Adopted` | `no` | `yes` = an existing codebase taken over with `telesma.sh --adopt` ([WORKFLOW.md §19](WORKFLOW.md#19-adopting-an-existing-project)): Phase 0 of the plan is the system as found (`telesma/spec/AS_BUILT.md`), the clarification plans from Phase 1, and the baseline in `REPORT.md` tells a regression from an inherited failure. Set by the launcher, never by hand; injected into the clarification prompts as an `ADOPTED: yes` line. |
+| `Adopted at` | empty | The commit the survey described (short SHA and date). Set by the launcher. |
 
 ### `## Tests`
 
@@ -349,6 +351,7 @@ same either way.
 |---|---|
 | `-i`, `--interactive` | Start Claude interactively (an open chat) instead of in pipe mode. |
 | `-m`, `--mode <1\|2\|3\|4>` | Choose the mode and skip the menu: 1 autonomous, 2 bugfix, 3 review, 4 artifacts. |
+| `--adopt` | Existing code, no Telesma yet: preconditions (code, a git commit, a clean tree), the setup wizard, `Adopted: yes`; the next start runs the test baseline, the git digest and the survey session that writes `telesma/spec/AS_BUILT.md` ([WORKFLOW.md §19](WORKFLOW.md#19-adopting-an-existing-project)). |
 | `--repair` | Repair state files from git history and exit, without starting Claude ([STATE_FILES.md](STATE_FILES.md#diagnosis-and---repair)). |
 | `--setup` | Configuration menu on an existing project: the state of every module, pick one to change ([Setup wizard](#setup-wizard)). Exits afterwards. |
 | `--integrations` | Run only the integrations wizard on an existing project; writes only `telesma/config.md`. |
@@ -357,6 +360,10 @@ same either way.
 
 Behaviour by mode:
 
+- **Survey** (`Adopted: yes` with an open task in Phase 0) runs before the clarification on every
+  start until Phase 0 is done, in pipe mode by default; the session may write only inside
+  `telesma/` (permission mode `default`, an `Edit(telesma/**)` allow rule). With `-i` you watch
+  it and answer. Before the clarification, `-m 2` and `-m 3` work from the survey alone.
 - **Clarification** (`Clarified: no`) always runs interactively; `-i` is forced. Interrupt with
   Ctrl+C at any time; the next start resumes from the first unanswered item.
 - **Modes 2 and 3** always run interactively (the chat is the point).

@@ -272,6 +272,16 @@ to the file. The diagnosis flags oversized rows so the model shortens them at th
 425k → 286k characters (−33%). The side effect to watch is retries — the model occasionally needs
 a grep for something the prompt no longer shows.
 
+The guidelines index got the same treatment later: fifty `tag — keywords` lines are 8 KB in every
+session of a project that uses two or three tags. In the implementation modes the full line stays
+for the tags the project uses — every `(tech:)` in the plan, the plan's Stack line, the detected
+manifests — and for `general.md`; the other tags are named in one line. The files themselves are
+all delivered to `telesma/guidelines/` as before: copying only the "used" ones was tried earlier
+and abandoned, because a growing project keeps adding technologies and every new tag became a
+sync problem and a blocked task. Trimming the prompt instead of the directory has no state to keep
+in sync — the launcher recomputes the set from the plan at every start — and the clarification,
+which assigns the tags, still sees the whole index.
+
 ## 10. State-file diagnosis and repair
 
 Nothing used to measure the state files themselves; the reference project grew to 550 KB of prompt
@@ -697,7 +707,64 @@ Since 1.0 the launcher asks instead of assuming, once, in the order a human can 
   of the visual-artifacts module and appear when that module is turned on; before, every project
   started with three "unfilled template" markers, two of them irrelevant to most projects.
 
-## 21. Adopting an existing project (proposal)
+## 21. Adopting an existing project
 
-Not implemented yet. The design — why the task history is not reconstructed from commits, what is
-filled from the code and what from git, the `--adopt` flow — is in [`ADOPTION.md`](ADOPTION.md).
+Telesma starts from a specification and an empty directory. A project that already exists — built
+by hand, or with an assistant used the ordinary way — has neither `telesma/spec/` nor a plan, and
+the obvious worry is that Telesma would plan the next feature without knowing the stages the code
+went through or the decisions taken along the way. The question was what to reconstruct, and from
+where: the commit and pull-request history, or the code.
+
+What decided it is what the loop actually reads (§1, §8, §9). After a few phases a project built by
+Telesma looks to the model exactly like one built by someone else: **the code, git, and a
+distillate** — `PROJECT_CONTEXT.md` plus the spec behind its index. Completed phases collapse to
+their ids, the task history rotates to an archive nothing loads, `DECISIONS.md` is grepped, never
+read. A task history rebuilt from commits would therefore be read by nothing, verified by nothing
+(no acceptance criteria, no test that belongs to the task) and, in telemetry, would pass for
+Telesma's own work. What an adopted project lacks is the distillate and a baseline. Code is the
+truth about *what*; git is the only source of *why*, and a cheap one.
+
+`telesma.sh --adopt` builds exactly that, in two starts:
+
+- **The launcher, deterministic, zero tokens.** Preconditions a survey can stand on: code present,
+  a git repository (offered with a first commit when there is none — files that look like secrets
+  go into `.gitignore` first), a clean tree, so the baseline is a commit (`Adopted at` in
+  `config.md`); then the setup wizard with its stack detection, as on any first start. On the next
+  start: the **full suite once**, written into `REPORT.md → Test status` as a dated run paragraph
+  (`Baseline at adoption … GREEN|RED`) — the loop later compares against this state, not against
+  zero, and a test red at adoption is an inherited failure, not a regression (section 2 of the
+  instructions); one **dry run of the quality checks** over the whole repository when they are on,
+  summarised in the Problem log — hygiene and secrets light up on an old repository, and the owner,
+  not the first task, decides what is a false alarm; a **git digest** (`tools/telesma-survey.py`:
+  tag scheme, reverts, churn, fix density per file, dependency changes, documentation and CI
+  present, test ratio, TODO count — counts and paths only, never an author or a commit subject)
+  as a `SURVEY:` block in the prompt, like `VERSIONS:`; and `### Phase 0: Existing system` in
+  `PLAN.md` with one task per part of the code, from the same tool.
+- **The survey session is the ordinary loop over Phase 0** (`SURVEY.md`, section -3): a task reads
+  one part — tests first, because test names are behaviours, then the public surface, then a
+  sample — and appends a `## <Module>` section to `telesma/spec/AS_BUILT.md`: `When …, then …`
+  lines, each pointing at `path:lines` and tagged `[verified by test: …]` or `[inferred]`; rows
+  to `PROJECT_CONTEXT.md`; open questions at the end of the file; tick; commit. The loop form
+  gives resumption and `/compact` for free and lets the owner strike a part they do not care
+  about. The session runs with permission mode `default` and an `Edit(telesma/**)` allow rule (Edit rules cover every file-writing tool)
+  only: in pipe mode a write anywhere else is a question nobody answers, i.e. refused — the one
+  restriction that makes "the survey changes no code" a property of the run, not a hope. The
+  project's own `CLAUDE.md` loads as always; the survey records its conventions in
+  `TECHNICAL_GUIDELINES.md`, which win over the defaults.
+- **Then the owner, not the machine:** correct `AS_BUILT.md` where the survey guessed, put into
+  `telesma/spec/` what should happen next, and a plain start runs the **clarification unchanged**
+  over all of it. Its one branch for `Adopted: yes`: `AS_BUILT.md` is indexed like any file and
+  its open questions become assumptions or questions; Phase 0 stays as it is and the plan starts
+  at Phase 1; there is no "architecture skeleton" task; a red or absent baseline proposes a
+  characterisation-test safety net first; `## Spec coverage` says `exists — 0.N` for what nothing
+  changes. Modes 2 and 3 work right after the survey, before any plan exists — the first tangible
+  value of an adoption.
+
+Deliberate limits of the first version: the survey samples (the confidence tag per line is what
+makes that honest); `AS_BUILT.md` is frozen with the rest of the spec and describes the system at
+`Adopted at` — later changes live in the plan and `telesma/changes/`, as in any project; a tag
+scheme other than `v*` is named in the digest, but the launcher still counts only `v*` tags as
+releases; the beginner path (`--new`) has no adoption variant. No structural token was added
+beyond the two `Adopted` fields in `config.md` and the new spec file, so no parser changed; the
+telemetry `state` event carries an `adopted` flag so that adopted and greenfield projects are
+never compared as one population.
