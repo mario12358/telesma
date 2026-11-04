@@ -709,6 +709,9 @@ def test_installer():
         ok("=== Telesma — instalacja ===" in out and "Telesma pobrana" in out and (dest / "telesma.sh").is_file(),
            "piped like curl | bash: Telesma cloned, lines in the system language")
         ok(projects.is_dir() and "Uruchomić Telesmę teraz?" in out, "projects folder made, asked whether to start")
+        cmd = home / ".local" / "bin" / "telesma"
+        ok(cmd.is_symlink() and cmd.resolve() == (dest / "telesma.sh").resolve() and "Polecenie telesma jest w" in out,
+           "the `telesma` command in ~/.local/bin is a symlink to the clone")
         if sys.platform == "darwin":
             sc = desktop / "Telesma.command"
             ok(sc.is_file() and os.access(sc, os.X_OK) and f'--home "{projects}"' in sc.read_text(),

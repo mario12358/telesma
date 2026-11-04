@@ -206,10 +206,18 @@ function Install-Telesma {
         if ($LASTEXITCODE -ne 0) { Fail (msg inst.fail 'The installation did not finish - see the lines above, then run the installer again.'); return }
         Ok (msg inst.cloned 'Telesma downloaded: %s' $Dest)
     }
+    # The `telesma` command: a script for Git Bash, a .cmd for PowerShell and cmd that runs it through bash.exe
+    $localBin = Join-Path $HOME '.local\bin'
+    New-Item -ItemType Directory -Force -Path $localBin | Out-Null
+    $bashExe = Join-Path (Split-Path $gitBash) 'bin\bash.exe'
+    $scriptPosix = ($Dest -replace '\\', '/') + '/telesma.sh'
+    [IO.File]::WriteAllText((Join-Path $localBin 'telesma'), "#!/bin/bash`nexec `"$scriptPosix`" `"`$@`"`n")
+    [IO.File]::WriteAllText((Join-Path $localBin 'telesma.cmd'), "@echo off`r`n`"$bashExe`" `"$scriptPosix`" %*`r`n")
+    if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -eq $localBin })) { Add-UserPath $localBin }
+    Ok (msg inst.command 'The command %s is in %s' 'telesma' $localBin)
 
     # --- 4. Claude Code and the sign-in ---
     Step (msg inst.s.claude.win '4/5  Claude Code')
-    $localBin = Join-Path $HOME '.local\bin'
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         Say (msg inst.claude 'Claude Code is not installed. It needs a Claude account with a paid plan (Pro or Max).')
         if (-not (Ask ('  ' + (msg inst.claude.ask 'Install it now (the official installer from claude.ai)?')))) { Fail (msg inst.stop 'Stopped. Run the installer again when you are ready.'); return }

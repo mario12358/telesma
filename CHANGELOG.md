@@ -4,6 +4,18 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.2.1 — 2026-11-04
+
+State format: 19 (unchanged).
+
+- The installers put a `telesma` command in `~/.local/bin` (a symlink on macOS and Linux; on
+  Windows a Git Bash script plus a `telesma.cmd` for PowerShell and cmd, the folder added to the
+  user's PATH), so the quick start no longer repeats `~/tools/telesma/telesma.sh`.
+- README reworked around one install path and one command: a comparison table under "Why
+  Telesma", a "which start does what" table in the quick start, three showcase thumbnails, an FAQ,
+  the 48 guidelines folded away, the wizard, session, integrations, safety and language sections
+  cut to a few lines each with links into `docs/`.
+
 ## 1.2.0 — 2026-11-03
 
 State format: 19 (instruction change only — a format-18 project is stamped 19 at the next start,

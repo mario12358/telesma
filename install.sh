@@ -1,6 +1,7 @@
 #!/bin/bash
 # Telesma installer for macOS (Linux: everything but the shortcut). Gets what Telesma needs, then
-# Telesma itself, signs in to Claude and puts a «Telesma» shortcut on the desktop that opens the
+# Telesma itself (plus the `telesma` command in ~/.local/bin), signs in to Claude and puts a
+# «Telesma» shortcut on the desktop that opens the
 # start menu (telesma.sh --home) — after this a person never types a path or a command:
 #
 #   curl -fsSL https://raw.githubusercontent.com/mario12358/telesma/main/install.sh | bash
@@ -120,6 +121,14 @@ main() {
         git clone -q --branch "$BRANCH" "$REPO" "$DEST"
         echo -e "  ✓ $(msg inst.cloned 'Telesma downloaded: %s' "$DEST")"
     fi
+    # The `telesma` command for the terminal, next to where Claude Code's installer puts `claude`
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$DEST/telesma.sh" "$HOME/.local/bin/telesma"
+    echo -e "  ✓ $(msg inst.command 'The command %s is in %s' telesma "$HOME/.local/bin")"
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) echo -e "  $(msg inst.command.path 'Add that folder to your PATH (in ~/.zshrc or ~/.bashrc): %s' 'export PATH="$HOME/.local/bin:$PATH"')" ;;
+    esac
 
     # --- 3. Claude Code and the sign-in ---------------------------------------------------------------------
     step "$(msg inst.s.claude '3/4  Claude Code')"

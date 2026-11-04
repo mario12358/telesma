@@ -342,6 +342,9 @@ Telesma evolves centrally and many projects use it, so projects update **themsel
 telesma.sh [options] [project_dir]
 ```
 
+The installers put a `telesma` command in `~/.local/bin` that runs `telesma.sh`; the flags are the
+same either way.
+
 | Flag | Meaning |
 |---|---|
 | `-i`, `--interactive` | Start Claude interactively (an open chat) instead of in pipe mode. |
