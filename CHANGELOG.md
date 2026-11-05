@@ -4,10 +4,16 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
-## Unreleased
+## 1.3.1 — 2026-11-05
 
-State format: 20 (unchanged).
+State format: 20 (unchanged — no migration, projects are not touched).
 
+- **The `telesma` command works again.** `install.sh` puts a symlink in `~/.local/bin`; the
+  launcher took its own directory from the link, not from the file it points to, and stopped on
+  the first line that needs its templates (`msg.sh: No such file or directory`). Every install
+  since 1.2.1 was affected when started as `telesma …`; `~/.telesma/telesma.sh …` worked. The
+  launcher now follows the link (also a relative one). `test-setup.py` starts it through a
+  symlink.
 - The baseline at adoption checks only the tools its own command calls. The wizard's default
   linter and typechecker for Python (`ruff check .`, `mypy .`) are often not installed on the
   machine that adopts a project; the baseline does not run them, yet their absence left it

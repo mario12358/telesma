@@ -35,7 +35,17 @@ if [[ "$(uname -s 2>/dev/null)" == Darwin && -t 0 ]]; then
     [[ -c "$TELESMA_TTY" ]] && exec < "$TELESMA_TTY"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The installer puts a symlink in ~/.local/bin (`telesma` → <clone>/telesma.sh); the templates,
+# hooks and tools live next to the real file, not next to the link — follow it (readlink -f is
+# not on every macOS, so by hand; a relative link target is relative to the link's directory).
+TELESMA_SELF="${BASH_SOURCE[0]}"
+while [[ -L "$TELESMA_SELF" ]]; do
+    TELESMA_LINK_TARGET="$(readlink "$TELESMA_SELF")"
+    [[ "$TELESMA_LINK_TARGET" == /* ]] || TELESMA_LINK_TARGET="$(dirname "$TELESMA_SELF")/$TELESMA_LINK_TARGET"
+    TELESMA_SELF="$TELESMA_LINK_TARGET"
+done
+SCRIPT_DIR="$(cd "$(dirname "$TELESMA_SELF")" && pwd)"
+unset TELESMA_SELF TELESMA_LINK_TARGET
 PROJECT_DIR=""
 INTERACTIVE=false
 MODE=""

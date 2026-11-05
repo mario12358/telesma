@@ -247,6 +247,18 @@ def test_first_start_no_tty():
         ok("1. Put the project description" in out and "3. Run again" in out, "three next steps printed")
         ok(not (project / "telesma" / "config.md").exists(), "config.md not yet created (spec first)")
 
+        # install.sh puts a symlink in ~/.local/bin: the launcher must find its templates next to the
+        # real file, not next to the link (1.2.1–1.3.0 died on msg.sh). Absolute and relative targets.
+        bin_dir = tmp / "lbin"
+        bin_dir.mkdir()
+        (bin_dir / "telesma").symlink_to(LAUNCHER)
+        (bin_dir / "telesma-rel").symlink_to(Path(os.path.relpath(LAUNCHER.resolve(), bin_dir.resolve())))   # /var → /private/var
+        for name in ("telesma", "telesma-rel"):
+            r = subprocess.run([str(bin_dir / name), str(tmp / f"p-{name}")], env=env_for(tmp), capture_output=True,
+                               text=True, stdin=subprocess.DEVNULL, start_new_session=True, timeout=120)
+            ok(r.returncode == 0 and "No such file" not in r.stderr and "3. Run again" in strip(r.stdout),
+               f"started through the symlink {name}: templates found, exit {r.returncode}")
+
         (spec / "TECHNICAL_GUIDELINES.md").write_text("# Project technical guidelines\n\n- **Language / runtime**: Go\n")
         (spec / "shop.md").write_text("# Shop\n\nOrders.\n")
         (project / "go.mod").write_text("module x\n")
