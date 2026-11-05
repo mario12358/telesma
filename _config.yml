@@ -1,0 +1,18 @@
+# GitHub Pages (the repository's homepage renders README.md). Jekyll must not touch the
+# templates Telesma copies into projects: their frontmatter is a format of their own
+# (`date: "YYYY-MM-DD"` in CHANGES_TEMPLATE.md broke the build), not page metadata.
+title: Telesma
+description: "Describe it. It builds it. An autonomous development loop for Claude Code."
+theme: jekyll-theme-primer
+exclude:
+  - templates/
+  - tools/
+  - benchmark/
+  - examples/
+  - install.sh
+  - install.ps1
+  - telesma.sh
+  - CLAUDE.md
+  - OSS_CHECKLIST.md
+  - Gemfile
+  - vendor/
