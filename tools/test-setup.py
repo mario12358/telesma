@@ -530,9 +530,13 @@ def test_adopt():
         ok(not (project / "telesma" / "state" / "PLAN.md").exists(), "no plan before the survey start")
         ok("1. Put the project description" not in out, "the empty-spec instructions are not printed")
 
-        # 3. a plain start: Phase 0 skeleton, the baseline, the checks' dry run, the survey session
+        # 3. a plain start: Phase 0 skeleton, the baseline, the checks' dry run, the survey session.
+        #    The wizard's default linter is not on this machine (ruff and mypy are not on the CI
+        #    runners either): the baseline runs the suite alone, so only the suite's tools matter.
+        cfg("set", c, "Tests", "Linter/formatter", "nosuchlint-xyz check .")
         r = run_launcher(tmp, project, FAKE_WRITE="1", **ident)
         out = strip(r.stdout)
+        ok("nosuchlint-xyz is not installed" not in out, "a linter missing from the machine does not stop the baseline")
         plan = (project / "telesma" / "state" / "PLAN.md").read_text()
         ok(f"### Phase 0: Existing system (adopted at {sha}," in plan and "Task 0.1: Overview" in plan
            and "Task 0.2: Survey src/shop" in plan and "Wrap-up" in plan and "- **Name**: legacy" in plan,

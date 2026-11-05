@@ -4,6 +4,16 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## Unreleased
+
+State format: 20 (unchanged).
+
+- The baseline at adoption checks only the tools its own command calls. The wizard's default
+  linter and typechecker for Python (`ruff check .`, `mypy .`) are often not installed on the
+  machine that adopts a project; the baseline does not run them, yet their absence left it
+  `NOT RUN` — on such machines, and on the CI runners, where `test-setup.py` failed since 1.3.0.
+  `preflight_stack` takes the command as a third argument; the pre-build check is unchanged.
+
 ## 1.3.0 — 2026-11-04
 
 State format: 20 (a new instruction module, two new `## Project` fields that the config merge adds

@@ -51,19 +51,28 @@ preflight_fix_windows_python() {
 
 # The programs the project's own commands call (## Tests in telesma/config.md): the first word of
 # each command — `dotnet`, `uv`, `npm` … — space-separated, each once.
+#   preflight_stack_tools <config>            every command of ## Tests
+#   preflight_stack_tools --command "<cmd>"   one command only (the baseline at adoption runs just
+#                                             the suite: a missing linter must not stop it)
 preflight_stack_tools() {
-    python3 - "$1" <<'PYTOOLS'
+    python3 - "$1" "${2:-}" <<'PYTOOLS'
 import re, sys
 from pathlib import Path
-try:
-    text = Path(sys.argv[1]).read_text(encoding="utf-8")
-except OSError:
-    sys.exit()
-section = re.search(r"^## Tests[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+values = []
+if sys.argv[1] == "--command":
+    values = [sys.argv[2]]
+else:
+    try:
+        text = Path(sys.argv[1]).read_text(encoding="utf-8")
+    except OSError:
+        sys.exit()
+    section = re.search(r"^## Tests[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    for field in ("Test command", "Full suite command", "Smoke suite", "Linter/formatter", "Typecheck command"):
+        m = re.search(r"^- \*\*" + re.escape(field) + r"\*\*:[ \t]*(.*)$", section.group(1) if section else "", re.M)
+        values.append((m.group(1) if m else ""))
 seen = []
-for field in ("Test command", "Full suite command", "Smoke suite", "Linter/formatter", "Typecheck command"):
-    m = re.search(r"^- \*\*" + re.escape(field) + r"\*\*:[ \t]*(.*)$", section.group(1) if section else "", re.M)
-    value = (m.group(1) if m else "").strip().strip("`")
+for value in values:
+    value = value.strip().strip("`")
     if not value or value.startswith("[") or value.lower().startswith("none"):
         continue
     for part in re.split(r"&&|\|\||[;|]", value):
@@ -126,11 +135,15 @@ preflight_sac_blocks() {
 # interview or the wizard, so this runs before a session that builds, not before everything.
 # A missing tool: what to install on this system; with winget (Windows) or Homebrew (macOS) and a
 # terminal, an offer to install it now — run only after "yes". Returns 1 when one is still missing.
-#   preflight_stack <config> [verbose]
+#   preflight_stack <config> [verbose] [command]   with a command: only the tools that command calls
 preflight_stack() {
-    local config="$1" verbose="${2:-}" tool tools missing=0 offered="" src winget brew other cmd answer sac
+    local config="$1" verbose="${2:-}" only="${3:-}" tool tools missing=0 offered="" src winget brew other cmd answer sac
     local ok="${GREEN}✓${NC}" no="${RED}✗${NC}"
-    tools=$(preflight_stack_tools "$config")
+    if [[ -n "$only" ]]; then
+        tools=$(preflight_stack_tools --command "$only")
+    else
+        tools=$(preflight_stack_tools "$config")
+    fi
     sac=$(preflight_smart_app_control)
     if [[ "$sac" == on ]] && preflight_sac_blocks "$tools"; then
         echo -e "  $no $(msg pre.sac 'Smart App Control is on in this Windows: it refuses to run programs that are not signed — and what Telesma builds here is not, the tests included.')"

@@ -2828,7 +2828,9 @@ run_survey() {
         if [[ -z "$cmd" || "$cmd" == \[* ]]; then
             baseline="**Baseline at adoption ($today) — NOT RUN:** no test command in telesma/config.md (## Tests) — Telesma cannot tell a regression from an inherited failure until one exists."
             echo -e "${YELLOW}$(msg survey.notests 'No test command — no baseline. Set ## Tests (%s) and start again, or go on without one.' "$0 --setup $PROJECT_DIR")${NC}"
-        elif ! preflight_stack "$CONFIG_FILE"; then
+        elif ! preflight_stack "$CONFIG_FILE" "" "$cmd"; then
+            # only the suite's own tools: the wizard's default linter and typechecker (ruff, mypy …)
+            # are often not installed on an adopted project's machine, and the baseline does not run them
             baseline="**Baseline at adoption ($today) — NOT RUN:** \`$cmd\` — a tool it needs is not installed on this machine (telesma.sh --doctor)."
         else
             echo -e "${CYAN}$(msg survey.baseline 'Baseline: running the full suite once — %s' "$cmd")${NC}"
