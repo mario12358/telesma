@@ -2484,9 +2484,11 @@ resolve_contradictions() {
 
         [[ -z "$answer" ]] && answer="${sp:-(accepted)}"    # never empty: empty = never shown to the user
 
+        # Every heading ends the item (`/^#/`): the ones after S1 are `## Assumptions`, `### A1:` …,
+        # and a flag reset only at the next `### S` would mark every A and Q below as ✅ too.
         awk -v snum="$sn" -v ans="$answer" '
+            /^#/ { in_s = 0 }
             /^### S[0-9]+:/ {
-                in_s = 0
                 s = $0
                 sub(/^### S/, "", s)
                 sub(/:.*/, "", s)
@@ -2574,8 +2576,8 @@ review_assumptions() {
         if [[ -z "$answer" ]]; then
             new_status="✅"
             awk -v anum="$an" -v st="$new_status" '
+                /^#/ { in_a = 0 }
                 /^### A[0-9]+:/ {
-                    in_a = 0
                     s = $0
                     sub(/^### A/, "", s)
                     sub(/:.*/, "", s)
@@ -2588,8 +2590,8 @@ review_assumptions() {
         else
             new_status="❌"
             awk -v anum="$an" -v st="$new_status" -v cm="$answer" '
+                /^#/ { in_a = 0 }
                 /^### A[0-9]+:/ {
-                    in_a = 0
                     s = $0
                     sub(/^### A/, "", s)
                     sub(/:.*/, "", s)
@@ -2681,8 +2683,8 @@ ask_questions() {
 
         # Update the file: write the answer and change the status
         awk -v qnum="$qn" -v ans="$answer" '
+            /^#/ { in_q = 0 }
             /^### Q[0-9]+:/ {
-                in_q = 0
                 s = $0
                 sub(/^### Q/, "", s)
                 sub(/:.*/, "", s)

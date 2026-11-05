@@ -8,6 +8,14 @@ stored per project in `telesma/state/.telesma-version`) is independent and liste
 
 State format: 20 (unchanged — no migration, projects are not touched).
 
+- **The clarification asks every assumption and question.** When the spec had a contradiction,
+  ENTER on the last one marked every assumption and question below it ✅ in the same breath: the
+  launcher's rewrite of `telesma/state/QUESTIONS.md` reset its "inside this item" flag only at the
+  next `### S` heading, and there is none after the last contradiction. The plan was then written
+  from the proposals, never from the person's answers (the safety net that re-asks ✅ items without
+  an answer runs at the next start, so the questions came back — one start too late, and the
+  assumptions never did). The same rewrite in the assumptions and questions loops is fixed too, and
+  `test-setup.py` drives a contradiction, two assumptions and a question through the terminal.
 - **The `telesma` command works again.** `install.sh` puts a symlink in `~/.local/bin`; the
   launcher took its own directory from the link, not from the file it points to, and stopped on
   the first line that needs its templates (`msg.sh: No such file or directory`). Every install

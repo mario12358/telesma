@@ -717,8 +717,32 @@ def test_clarification_end():
         ok("Perform ONLY steps 1 and 2" in prompt and "TELESMA_SPEC_TEMPLATE" not in strip(r.stdout),
            "with a spec next to it the unfilled template does not block the clarification")
 
-        # Q1 answered by the person (not the proposal), Q2 marked ✅ by a model with nothing in Answer
+        # One contradiction, two assumptions, one question — each is asked in turn. (Until 1.3.1 the
+        # ENTER on S1 marked every A and Q below it ✅ in one go: the rewrite's "inside this item" flag
+        # was reset only at the next `### S` heading, and there is none after the last contradiction.)
         q = project / "telesma" / "state" / "QUESTIONS.md"
+        q.write_text("# Questions\n\n- **State**: in progress\n- **Total questions**: 1\n- **Answered**: 0\n\n"
+                     "## Contradictions in the documentation\n\n"
+                     "### S1: Board size 8x8 vs 10x10\n- **Proposed resolution**: 8x8 wins\n- **Resolution**:\n- **Status**: ⚠️\n\n"
+                     "## Assumptions\n\n"
+                     "### A1: Two players\n- **Rationale**: the rules say so\n- **Status**: 🔵\n\n"
+                     "### A2: No timer\n- **Rationale**: none mentioned\n- **Status**: 🔵\n\n"
+                     "## Questions\n\n"
+                     "### Q1: Colors?\n- **Proposed answer**: black and white\n- **Answer**:\n- **Status**: ❓\n", encoding="utf-8")
+        out = drive(["bash", str(LAUNCHER), str(project)], ["", "", "", "", "n"], dict(env, FAKE_PLAN="1"))
+        text = q.read_text(encoding="utf-8")
+        ok("Contradiction S1" in out and "Assumption A1" in out and "Assumption A2" in out and "Question 1/1" in out
+           and "marked resolved without an answer" not in out,
+           "after ENTER on the contradiction the assumptions and the question are still asked, one by one")
+        ok("- **Resolution**: 8x8 wins" in text and text.count("- **Status**: ✅") == 4
+           and "- **Answer**: black and white" in text and "- **Answered**: 1" in text,
+           "every item ends ✅ with the proposal written in as the answer")
+        ok("=== Clarification finished ===" in out, "and the plan session follows")
+        # back to the state before the plan, for the next pass
+        subprocess.run(["python3", str(CONFIGURE), "set", str(c), "Project", "Clarified", "no"], check=True, capture_output=True)
+        shutil.copy(ROOT / "templates" / "PLAN_TEMPLATE.md", project / "telesma" / "state" / "PLAN.md")
+
+        # Q1 answered by the person (not the proposal), Q2 marked ✅ by a model with nothing in Answer
         q.write_text("# Questions\n\n- **State**: in progress\n- **Total questions**: 2\n- **Answered**: 2\n\n## Questions\n\n"
                      "### Q1: Board size?\n- **Proposed answer**: 10x10\n- **Answer**: 8x8\n- **Status**: ✅\n\n"
                      "### Q2: Colors?\n- **Proposed answer**: black and white\n- **Answer**: \n- **Status**: ✅\n", encoding="utf-8")
