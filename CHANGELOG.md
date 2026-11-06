@@ -4,7 +4,7 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
-## 1.3.1 — 2026-11-05
+## 1.3.2 — 2026-11-06
 
 State format: 20 (unchanged — no migration, projects are not touched).
 
@@ -16,6 +16,13 @@ State format: 20 (unchanged — no migration, projects are not touched).
   an answer runs at the next start, so the questions came back — one start too late, and the
   assumptions never did). The same rewrite in the assumptions and questions loops is fixed too, and
   `test-setup.py` drives a contradiction, two assumptions and a question through the terminal.
+- README: a two-minute recording of Telesma from a written specification to the first
+  committed task (`docs/assets/demo.gif`).
+
+## 1.3.1 — 2026-11-05
+
+State format: 20 (unchanged — no migration, projects are not touched).
+
 - **The `telesma` command works again.** `install.sh` puts a symlink in `~/.local/bin`; the
   launcher took its own directory from the link, not from the file it points to, and stopped on
   the first line that needs its templates (`msg.sh: No such file or directory`). Every install

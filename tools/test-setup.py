@@ -717,7 +717,7 @@ def test_clarification_end():
         ok("Perform ONLY steps 1 and 2" in prompt and "TELESMA_SPEC_TEMPLATE" not in strip(r.stdout),
            "with a spec next to it the unfilled template does not block the clarification")
 
-        # One contradiction, two assumptions, one question — each is asked in turn. (Until 1.3.1 the
+        # One contradiction, two assumptions, one question — each is asked in turn. (Until 1.3.2 the
         # ENTER on S1 marked every A and Q below it ✅ in one go: the rewrite's "inside this item" flag
         # was reset only at the next `### S` heading, and there is none after the last contradiction.)
         q = project / "telesma" / "state" / "QUESTIONS.md"
