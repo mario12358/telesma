@@ -2,5 +2,6 @@
 # breaks Bash on the first line. Keep LF whatever core.autocrlf says.
 * text=auto eol=lf
 *.png binary
+*.gif binary
 *.jpg binary
 *.ico binary

@@ -26,6 +26,16 @@
   <a href="#documentation"><b>Docs</b></a>
 </p>
 
+<p align="center">
+  <a href="docs/assets/demo.gif"><img alt="Telesma in two minutes: a Flutter photo viewer from a written specification to the first committed task" src="docs/assets/demo.gif" width="960"></a>
+</p>
+<p align="center"><sub>
+  Two minutes, one take, four starts of the same command: the folder is made, the specification goes in, the wizard asks its questions,
+  Claude reads the spec and asks its own, the plan is generated, the loop builds and commits the first task.
+  Everything the model does in between is cut.
+  <a href="https://github.com/user-attachments/assets/435fbb66-5fc6-4e22-830b-affe86857179">Watch it as a video</a>.
+</sub></p>
+
 **Telesma is an autonomous development loop for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 Put a specification into `telesma/spec/`, answer the questions Telesma asks about it, and it turns
 the spec into a plan and works through that plan task by task — implement, test, commit, report,
