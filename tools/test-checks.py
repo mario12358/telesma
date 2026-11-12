@@ -454,9 +454,9 @@ shutil.rmtree(d)
 
 print("Check: dependency-audit")
 d = new_repo()
-commit_file(d, "backend/poetry.lock",
-            '[[package]]\nname = "PyJWT"\nversion = "2.13.0"\n\n[[package]]\nname = "httpx"\nversion = "0.27.0"\n\n'
-            '[[package]]\nname = "litellm"\nversion = "1.94.0"\n')
+# requirements.txt, not poetry.lock: a Python without tomllib (3.9, 3.10 — CI runs the checks on 3.9)
+# reports a TOML lockfile as not checked, which is right but is not what this block tests.
+commit_file(d, "backend/requirements.txt", "PyJWT==2.13.0\nhttpx==0.27.0\nlitellm==1.94.0\n")
 commit_file(d, "frontend/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
     "": {"name": "app"}, "node_modules/vitest": {"version": "1.6.1", "dev": True}}}))
 dec, txt, _ = bash(d, "git tag -f telesma/phase-1")
