@@ -10,7 +10,13 @@ confirmed once (telesma.sh, trust gate).
 
     path = ${XDG_CONFIG_HOME:-$HOME/.config}/telesma/trust/<key>.json
     key  = sha256(realpath(project_dir))[:32]
-    body = {"project": "<realpath>", "sections": {"<Section>": "<sha256>", ...}}
+    body = {"project": "<realpath>", "sections": {"<Section>": "<sha256>", ...},
+            "values": {"Tests": {"<command field>": "<value>", ...}}}
+
+`values` keeps the command fields of `## Tests` as they were when the person confirmed them, so
+the task tool can still run a command that did not change while the section waits for the next
+confirmation (a new linter does not stop the loop; the unchanged test command still runs). The
+hash stays the contract: the readers that only need "confirmed or not" ignore `values`.
 
 Section hash: the lines of `## <Section>` that start (after indentation) with "- ", right-stripped,
 joined with "\n", sha256. Comments and blank lines do not count; a missing section hashes "".
@@ -34,6 +40,9 @@ import re
 import sys
 import tempfile
 
+# The fields of `## Tests` that name a command, plus the switch that runs the linter at commit.
+TEST_FIELDS = ('Test command', 'Full suite command', 'Smoke suite', 'Linter/formatter', 'Typecheck command',
+               'Lint before commit')
 SECTIONS = ['Tests', 'Integrations', 'Working directories', 'Sandbox', 'Auto-approval', 'Telemetry', 'Permissions']
 KNOWN_MODES = ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions')
 FIELD_RE = re.compile(r'^- \*\*(.+?)\*\*:[ \t]*(.*?)[ \t]*$')
@@ -79,14 +88,41 @@ def record_path(project):
     return os.path.join(base, 'telesma', 'trust', key + '.json')
 
 
-def load_record(project):
+def load_full(project):
     try:
         with open(record_path(project), encoding='utf-8') as f:
             rec = json.load(f)
     except (OSError, ValueError):
         return {}
-    sections = rec.get('sections') if isinstance(rec, dict) else None
+    return rec if isinstance(rec, dict) else {}
+
+
+def load_record(project):
+    sections = load_full(project).get('sections')
     return sections if isinstance(sections, dict) else {}
+
+
+def test_values(text):
+    values = fields(section_lines(text, 'Tests'))[0]
+    return {k: values.get(k, '') for k in TEST_FIELDS}
+
+
+def confirmed_tests(project):
+    """The `## Tests` command fields as last confirmed on this machine, or None when the record
+    predates them (written by Telesma before 1.4.1)."""
+    v = (load_full(project).get('values') or {}).get('Tests')
+    return v if isinstance(v, dict) else None
+
+
+def save(project, sections, values):
+    path = record_path(project)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.trust-')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump({'project': os.path.realpath(project), 'sections': sections, 'values': values},
+                  f, indent=2, sort_keys=True)
+        f.write('\n')
+    os.replace(tmp, path)
 
 
 def untrusted(project):
@@ -104,17 +140,29 @@ def stamp(project, names):
     text = read_config(project)
     if text is None:
         return
+    rec = load_full(project)
     sections = load_record(project)
+    values = rec.get('values') if isinstance(rec.get('values'), dict) else {}
     for name in names or SECTIONS:
         if name in SECTIONS:
             sections[name] = section_hash(text, name)
-    path = record_path(project)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.trust-')
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        json.dump({'project': os.path.realpath(project), 'sections': sections}, f, indent=2, sort_keys=True)
-        f.write('\n')
-    os.replace(tmp, path)
+            if name == 'Tests':
+                values['Tests'] = test_values(text)
+    save(project, sections, values)
+
+
+def backfill(project):
+    """A record written before 1.4.1 has the hash of a confirmed `## Tests` but not its values:
+    while the hash still matches, the values are the confirmed ones — record them."""
+    text = read_config(project)
+    if text is None or confirmed_tests(project) is not None:
+        return
+    sections = load_record(project)
+    if 'Tests' in sections and sections['Tests'] == section_hash(text, 'Tests'):
+        values = load_full(project).get('values')
+        values = values if isinstance(values, dict) else {}
+        values['Tests'] = test_values(text)
+        save(project, sections, values)
 
 
 # --- what a person is shown ---------------------------------------------------------------------
@@ -229,6 +277,7 @@ def main(argv):
         return 2
     cmd, project, rest = argv[1], argv[2], argv[3:]
     if cmd == 'check':
+        backfill(project)
         names = untrusted(project)
         if names:
             print('\n'.join(names))

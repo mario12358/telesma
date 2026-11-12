@@ -216,15 +216,50 @@ def run_command(root, label, cmd):
     return out, secs
 
 
-def tests_trusted(root):
-    """`## Tests` names commands that run on this machine; they run only once the person has
-    confirmed the section here (templates/setup/trust.py — the launcher is the only writer)."""
+def trust_module():
     sys.path.insert(0, os.path.join(TELESMA, "templates", "setup"))
     try:
         import trust
+        return trust
     except ImportError:
-        return False
-    return "Tests" not in trust.untrusted(root)
+        return None
+
+
+NOT_CONFIRMED = ("the ## Tests section of telesma/config.md is not confirmed on this machine (it changed since "
+                 "the last start) — its commands are not run. This is not a test failure: report TELESMA BLOCKED; "
+                 "the person confirms the section at the next start of the launcher")
+
+
+def confirmed_tests(root):
+    """What may run from `## Tests` while the section waits for the person: None = everything as
+    written (confirmed); otherwise {field: value} of what the person last confirmed here. Raises
+    Refused when there is nothing to go by (a record from before 1.4.1, or no record)."""
+    trust = trust_module()
+    if trust is None:
+        raise Refused(NOT_CONFIRMED)
+    if "Tests" not in trust.untrusted(root):
+        return None
+    values = trust.confirmed_tests(root)
+    if values is None:
+        raise Refused(NOT_CONFIRMED)
+    return values
+
+
+def same(a, b):
+    return (a or "").strip() == (b or "").strip() or (ts.unset(a or "") and ts.unset(b or ""))
+
+
+def usable(field, current, confirmed, notes):
+    """While `## Tests` is unconfirmed: a command that did not change runs; one that is new (was
+    none) is skipped with a note; a confirmed command changed or removed refuses — dropping or
+    editing a check the person approved is theirs to confirm, not the agent's."""
+    if confirmed is None or same(current, confirmed.get(field, "")):
+        return current
+    if ts.unset(confirmed.get(field, "")):
+        notes.append(f"{field} `{current.strip()}` not run until the person confirms ## Tests at the next start")
+        return "none"
+    raise Refused(f"## Tests → {field} changed from a value confirmed on this machine (`{confirmed.get(field, '')}`) "
+                  f"— it is not run. " + NOT_CONFIRMED)
 
 
 def run_tests(root, cfg, files):
@@ -236,18 +271,33 @@ def run_tests(root, cfg, files):
     test_cmd = cfg.field("Tests", "Test command")
     smoke = cfg.field("Tests", "Smoke suite")
     lint = cfg.field("Tests", "Linter/formatter")
+    lint_on = cfg.field("Tests", "Lint before commit")
     wanted = [x for x in (test_cmd, smoke, lint) if not ts.unset(x)]
     if test_cmd.strip().startswith("["):
         raise Refused("## Tests → Test command is still the template placeholder — set the project's test "
                       "command in telesma/config.md (or `none` when the project has no tests)")
-    if wanted and not tests_trusted(root):
-        raise Refused("the ## Tests section of telesma/config.md is not confirmed on this machine (it changed "
-                      "since the last start) — its commands are not run. This is not a test failure: report "
-                      "TELESMA BLOCKED; the person confirms the section at the next start of the launcher")
-    if ts.is_yes(cfg.field("Tests", "Lint before commit")) and not ts.unset(lint):
+    notes = []
+    try:
+        confirmed = confirmed_tests(root)
+    except Refused:
+        if wanted:
+            raise
+        confirmed = None                  # nothing to run and nothing confirmed to compare with
+    if confirmed is not None:
+        test_cmd = usable("Test command", test_cmd, confirmed, notes)
+        smoke = usable("Smoke suite", smoke, confirmed, notes)
+        if ts.is_yes(confirmed.get("Lint before commit", "")) and not ts.is_yes(lint_on):
+            raise Refused("## Tests → Lint before commit was switched off after the person confirmed it — "
+                          + NOT_CONFIRMED)
+        if ts.is_yes(lint_on):
+            lint = usable("Linter/formatter", lint, confirmed, notes)
+    for n in notes:
+        print("Note: " + n, flush=True)
+    pending = "; not run until confirmed: " + ", ".join(n.split(" `")[0] for n in notes) if notes else ""
+    if ts.is_yes(lint_on) and not ts.unset(lint):
         run_command(root, "lint", lint)
     if ts.unset(test_cmd):
-        return "no tests (Test command: none)"
+        return "no tests (Test command: none)" + pending
     out, secs = run_command(root, "tests", test_cmd)
     if zero_tests(out):
         raise Refused(f"the test command reported 0 executed tests: `{test_cmd}` — a configuration error "
@@ -258,7 +308,7 @@ def run_tests(root, cfg, files):
         if zero_tests(sout):
             raise Refused(f"the smoke suite reported 0 executed tests: `{smoke}`\n{tail(sout, 20)}")
         result += f"; smoke {summary_of(sout)}"
-    return result
+    return result + pending
 
 
 # --- checks ---------------------------------------------------------------------------------
@@ -935,9 +985,13 @@ def cmd_suite(root, args):
         full = cfg.field("Tests", "Test command")
     if ts.unset(full) or full.strip().startswith("["):
         raise Refused("## Tests has no Full suite command and no Test command")
-    if not tests_trusted(root):
-        raise Refused("the ## Tests section of telesma/config.md is not confirmed on this machine — report "
-                      "TELESMA BLOCKED; the person confirms it at the next start of the launcher")
+    confirmed = confirmed_tests(root)
+    if confirmed is not None:
+        before = confirmed.get("Full suite command", "")
+        if ts.unset(before) or before.strip().startswith("["):
+            before = confirmed.get("Test command", "")
+        if not same(full, before) or ts.unset(before):
+            raise Refused(f"the full suite command `{full}` is not the one confirmed on this machine — " + NOT_CONFIRMED)
     print(f"Telesma suite ({due['reason']}): {full}", flush=True)
     argv = [BASH, "-c", full] if BASH else full
     start = now()

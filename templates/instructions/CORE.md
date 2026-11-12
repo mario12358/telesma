@@ -449,6 +449,9 @@ For each task:
       After `Max tries per task` refusals → escalation, section 5. A refusal saying the `## Tests`
       section is not confirmed on this machine, or that a check runner is outdated, is not your
       task's failure: TELESMA BLOCKED with the message.
+    - `Note: … not run until the person confirms ## Tests` → a command you added to `## Tests` waits
+      for the person; the confirmed ones ran and the task is committed. Go on, and name the waiting
+      command in your next summary. Do not change a confirmed command to get past a refusal.
     - A smoke-suite failure in a test you did not touch = a regression → the regression procedure from section 2 (priority)
 9. **Repeat** until `next` answers `TELESMA COMPLETE`
 

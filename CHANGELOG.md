@@ -4,6 +4,21 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.4.1 — 2026-11-12
+
+State format: 23 (unchanged).
+
+- **A new linter no longer stops the first task.** The first task of a new project usually adds the
+  linter and the typechecker to `## Tests`; until the person confirms the changed section at the
+  next start, `done` refused everything and the loop stopped with `TELESMA BLOCKED`. Now the trust
+  record keeps the confirmed values of `## Tests` as well as their hash: while the section waits,
+  `done` and `suite` run the commands that did not change, skip a new one with a note (also in the
+  `Task history` row), and the next start asks you to confirm it. A confirmed command that was
+  changed, removed or set to `none`, or a lint-at-commit switched off, still refuses — and now
+  also when every command was set to `none`, which earlier passed with nothing run. Nothing
+  unconfirmed runs. A record written by 1.4.0 learns the values at the next start whose
+  `## Tests` is unchanged; until then a change refuses as before.
+
 ## 1.4.0 — 2026-11-12
 
 State format: 23. 21 and 22 change no file of yours; 23 removes, once, the allow rules for

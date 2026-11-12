@@ -186,7 +186,9 @@ is written in the user's `Language`; the structure is always English.
   verifiable layer.
 - **A task is finished by the script, not by the model.** `tools/telesma-task.py done` chooses the
   files (everything `git status` shows minus `Ignore on commit` and this machine's files), runs the
-  `## Tests` commands only when that section is confirmed on the machine (a run with 0 tests is a
+  `## Tests` commands only as confirmed on the machine — while the section waits for the person, a
+  command that did not change runs, a new one is skipped with a note, and a confirmed one changed,
+  removed or switched off refuses (the trust record keeps the confirmed values) — (a run with 0 tests is a
   failure), runs the commit-point checks on exactly those files and records their evidence, and only
   then ticks the task, writes the `Task history` row and commits with the footer. A refusal leaves
   PLAN.md and REPORT.md byte-identical. `next` and the launcher's hint choose the task with the same

@@ -263,6 +263,77 @@ task(d3, "next")
 rc, out = task(d3, "done")
 ok(rc == 1 and "not confirmed on this machine" in out, "## Tests not confirmed here: its commands are not run")
 
+
+def set_field(d, label, value):
+    c = d / "telesma" / "config.md"
+    text, n = re.subn(r"(?m)^- \*\*" + re.escape(label) + r"\*\*:.*$", f"- **{label}**: {value}",
+                      c.read_text(encoding="utf-8"))
+    assert n == 1, label
+    c.write_text(text, encoding="utf-8")
+
+
+def record_file(d):
+    old = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = XDG
+    path = trust.record_path(str(d))
+    if old is None:
+        del os.environ["XDG_CONFIG_HOME"]
+    else:
+        os.environ["XDG_CONFIG_HOME"] = old
+    return Path(path)
+
+
+# 1.4.1: the first task of a new project sets the linter — the unchanged test command still runs
+d5 = project()
+task(d5, "next")
+(d5 / "greet.py").write_text("x = 1\n", encoding="utf-8")
+set_field(d5, "Linter/formatter", "false")
+set_field(d5, "Lint before commit", "yes")
+rc, out = task(d5, "done")
+ok(rc == 0 and "committed" in out and "Linter/formatter `false` not run until the person confirms" in out,
+   "## Tests waiting for the person: a new linter is not run, the confirmed test command is — done commits")
+ok("not run until confirmed: Linter/formatter" in (d5 / "telesma" / "state" / "REPORT.md").read_text(encoding="utf-8"),
+   "the Task history row says which command waits for the person")
+rc, out = task(d5, "suite", "--full")
+ok("not confirmed" not in out and "is not the one confirmed" not in out,
+   "suite runs the full suite command the person confirmed while ## Tests waits")
+
+d6 = project()
+task(d6, "next")
+(d6 / "greet.py").write_text("x = 1\n", encoding="utf-8")
+set_field(d6, "Test command", "true")
+rc, out = task(d6, "done")
+ok(rc == 1 and "changed from a value confirmed" in out, "a confirmed test command the agent changed refuses")
+set_field(d6, "Test command", "none")
+rc, out = task(d6, "done")
+ok(rc == 1 and "changed from a value confirmed" in out, "a confirmed test command set to none refuses")
+
+d7 = project(**{"Linter/formatter": "true", "Lint before commit": "yes"})
+task(d7, "next")
+(d7 / "greet.py").write_text("x = 1\n", encoding="utf-8")
+set_field(d7, "Lint before commit", "no")
+rc, out = task(d7, "done")
+ok(rc == 1 and "Lint before commit was switched off" in out, "switching off a confirmed lint-at-commit refuses")
+
+d8 = project()
+rec = record_file(d8)
+body = json.loads(rec.read_text(encoding="utf-8"))
+body.pop("values", None)
+rec.write_text(json.dumps(body), encoding="utf-8")
+task(d8, "next")
+(d8 / "greet.py").write_text("x = 1\n", encoding="utf-8")
+set_field(d8, "Linter/formatter", "false")
+rc, out = task(d8, "done")
+ok(rc == 1 and "not confirmed on this machine" in out,
+   "a record from before 1.4.1 (no values) with a changed ## Tests refuses as before")
+set_field(d8, "Linter/formatter", "none")
+os.environ["XDG_CONFIG_HOME"] = XDG
+trust.main(["trust.py", "check", str(d8)])
+del os.environ["XDG_CONFIG_HOME"]
+ok((json.loads(rec.read_text(encoding="utf-8")).get("values") or {}).get("Tests", {}).get("Test command")
+   == "python3 -m unittest discover -s tests -q",
+   "the launcher's check records the values of a ## Tests whose hash still matches (old record backfilled)")
+
 d4 = project(**{"Auto-commit": "no"})
 task(d4, "next")
 (d4 / "greet.py").write_text("x = 1\n", encoding="utf-8")

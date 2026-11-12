@@ -142,8 +142,11 @@ or cache your stack always needs and Telesma did not add is worth an issue.
 
 ## The task tool refused `done`
 
-The refusal says why and what to run: failing tests, 0 tests run, a quality-check finding, an
-unconfirmed `## Tests` section on this machine, a task that is not the reserved one. PLAN.md and
+The refusal says why and what to run: failing tests, 0 tests run, a quality-check finding, a
+`## Tests` command changed from the one you confirmed on this machine, a task that is not the
+reserved one. A command that is new in `## Tests` (the linter the first task sets up) does not
+refuse: `done` runs the confirmed ones, notes the new one as not run, and the next start asks you
+to confirm it. PLAN.md and
 REPORT.md are left as they were. After `Max refusals per task` refusals for one task the session
 stops with `TELESMA BLOCKED`; the next start shows the reason and asks whether to go on.
 
