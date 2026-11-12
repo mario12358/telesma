@@ -19,6 +19,11 @@ import tempfile
 from pathlib import Path
 
 TELESMA = Path(__file__).resolve().parent.parent
+# The overrides the tests use (fake registries, cache, gh, semgrep off) count only with this flag
+os.environ["TELESMA_CHECKS_TEST"] = "1"
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+# The launcher's per-machine trust record (which ## Tests commands may run) — a private one for the tests
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="telesma-xdg-")
 CHECKS = TELESMA / "templates" / "checks"
 LAUNCHER = (TELESMA / "telesma.sh").read_text(encoding="utf-8")
 TEMPLATE = (TELESMA / "templates" / "config.md").read_text(encoding="utf-8")
@@ -54,7 +59,54 @@ def new_repo(enabled="yes", extra=""):
     (d / "README.md").write_text("start\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(d), "add", "README.md"], check=True)
     subprocess.run(["git", "-C", str(d), "commit", "-qm", "start"], check=True)
+    approve(d)
     return d
+
+
+def approve(d):
+    """What the launcher (delivered modules) or the human (`--approve`) does: the current state of the
+    check files becomes the integrity baseline."""
+    import hashlib
+    state = {"modules": {}, "exceptions": "", "checks_section": ""}
+    base = d / "telesma" / "checks"
+    for p in sorted(base.rglob("*")):
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix not in (".pyc", ".pyo"):
+            state["modules"][p.relative_to(d).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    exc = d / "telesma" / "state" / "CHECK_EXCEPTIONS.md"
+    state["exceptions"] = hashlib.sha256(exc.read_bytes()).hexdigest() if exc.exists() else ""
+    text = (d / "telesma" / "config.md").read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"^## Checks[ \t]*\n.*?(?=^## |\Z)", text, re.M | re.S)
+    state["checks_section"] = hashlib.sha256((m.group(0) if m else "").encode("utf-8")).hexdigest()
+    ev = d / ".git" / "telesma-checks"
+    ev.mkdir(exist_ok=True)
+    (ev / "baseline.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def unexcept(d):
+    """The human removes the exceptions file (and that state is the approved one)."""
+    (d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+    approve(d)
+
+
+def trust_tests(d):
+    """The launcher's trust record for ## Tests, as templates/setup/trust.py writes it."""
+    import hashlib
+    text = (d / "telesma" / "config.md").read_text(encoding="utf-8")
+    out, inside = [], False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line.rstrip() == "## Tests"
+            continue
+        if inside:
+            out.append(line)
+    kept = [l.rstrip() for l in out if l.lstrip().startswith("- ")]
+    key = hashlib.sha256(os.path.realpath(d).encode()).hexdigest()[:32]
+    rec = Path(os.environ["XDG_CONFIG_HOME"]) / "telesma" / "trust"
+    rec.mkdir(parents=True, exist_ok=True)
+    (rec / (key + ".json")).write_text(json.dumps({"project": os.path.realpath(d), "sections": {
+        "Tests": hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()}}), encoding="utf-8")
 
 
 def hook(d, tool, tool_input):
@@ -70,10 +122,15 @@ def bash(d, cmd):
     return hook(d, "Bash", {"command": cmd})
 
 
+PROTECTED = ("telesma/state/CHECK_EXCEPTIONS.md", "telesma/config.md", "telesma/checks/")
+
+
 def write(d, rel, content):
     p = d / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
+    if str(rel).startswith(PROTECTED) and (d / ".git").is_dir():
+        approve(d)        # the tests write as the human; the agent's route is tested separately
 
 
 def log(d):
@@ -168,7 +225,7 @@ ok(dec is None and "secret-assignment" in txt, "a password starting with 'Test' 
 write(d, "app/settings.py", 'password = "changeme"\nsecret = "testing"\n')
 dec, txt, _ = bash(d, "git add app/settings.py && git commit -m x")
 ok("secret-assignment" not in txt, "placeholders changeme / testing do not warn")
-write(d, "tests/fixtures.py", 'password = "hunter2hunter2"\n')
+write(d, "tests/fixtures.py", 'import pytest\n\npassword = "hunter2hunter2"\n')
 dec, txt, _ = bash(d, "git add tests/fixtures.py && git commit -m x")
 ok(dec is None and "secret-assignment" not in txt, "a password in a test file does not warn")
 write(d, "notes.py", f'X = "{AWS}"\n')
@@ -229,14 +286,14 @@ fp_w = re.search(r"totp-preview.*?" + FP, txt, re.S).group(1)
 write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp_w}` weakenings totp-preview — deliberate demo release (owner)\n")
 dec, _, _ = bash(d, 'git tag -a v0.1.1 -m "x"')
 ok(dec is None, "one exception lets through a weakening marked in many files")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 write(d, "src/http.py", "import requests\nr = requests.get(url, verify=False)\n")
 dec, txt, _ = bash(d, "git add src/http.py && git commit -m x")
 ok(dec is None and "tls-disabled" in txt, "verify=False without a marker warns, does not block")
 write(d, "app/mcp_auth.py", "if settings.mcp_dev_bypass_token and token == settings.mcp_dev_bypass_token:\n    return first_user()\n")
 dec, txt, _ = bash(d, "git add app/mcp_auth.py && git commit -m x")
 ok(dec is None and "bypass-token" in txt, "a dev-bypass token without a marker warns (a case from Specky)")
-write(d, "tests/test_http.py", "r = requests.get(url, verify=False)\n")
+write(d, "tests/test_http.py", "def test_http():\n    r = requests.get(url, verify=False)\n    assert r.ok\n")
 dec, txt, _ = bash(d, "git add tests/test_http.py && git commit -m x")
 ok(dec is None and "tls-disabled" not in txt, "the pattern in a test file is skipped")
 shutil.rmtree(d)
@@ -441,7 +498,7 @@ fp_t = re.search(r"\[tests/only\].*?" + FP, txt).group(1)
 write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp_t}` tests api.test.ts — a fixture with test text (owner)\n")
 dec, txt, _ = bash(d, "git add tests/api.test.ts && git commit -m x")
 ok(dec is None, "an exception by fingerprint lets .only through")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 write(d, "tests/api.test.ts", "describe('api', () => {\n  it('x', () => {\n    expect(1).toBe(1 + 0);\n  });\n});\n")
 dec, txt, _ = bash(d, "git add tests/api.test.ts && git commit -m x")
 ok(dec is None and "[tests" not in txt, "a plain it() with an assertion passes without findings")
@@ -455,6 +512,13 @@ ok(dec == "deny" and "skip-without-reason" in txt, "@pytest.mark.skip without re
 write(d, "tests/test_api.py", "import pytest\n\n@pytest.mark.skipif(sys.platform == 'win32')\ndef test_a():\n    assert 1 == 1\n")
 dec, txt, _ = bash(d, "git add tests/test_api.py && git commit -m x")
 ok(dec == "deny" and "skip-without-reason" in txt, "skipif without reason= blocks (a condition is not a reason)")
+write(d, "tests/test_api.py", "import os\nimport pytest\n\npytestmark = pytest.mark.skipif(shutil.which('uv') is None, reason='needs uv')\n\n"
+      "@pytest.mark.skipif(os.geteuid() == 0, reason=\"root reads\")\ndef test_a():\n    assert 1 == 1\n")
+dec, txt, _ = bash(d, "git add tests/test_api.py && git commit -m x")
+ok(dec is None and "skip-with" not in txt, "a conditional skipif with a reason (module and test) is not a switched-off test")
+write(d, "tests/test_api.py", "import pytest\n\n@pytest.mark.skipif(True, reason='later')\ndef test_a():\n    assert 1 == 1\n")
+dec, txt, _ = bash(d, "git add tests/test_api.py && git commit -m x")
+ok(dec is None and "skip-with-reason" in txt, "skipif(True, reason=…) is a skip everywhere — it still warns")
 write(d, "tests/test_u.py", 'import unittest\n\nclass T(unittest.TestCase):\n    @unittest.skip("no sandbox")\n    def test_a(self):\n        self.assertEqual(1, 1)\n')
 dec, txt, _ = bash(d, "git add tests/test_u.py && git commit -m x")
 ok(dec is None and "skip-with-reason" in txt and "skip-without-reason" not in txt, "@unittest.skip(\"…\") with text warns")
@@ -484,11 +548,16 @@ ok(dec == "deny" and "skip-without-reason" in txt, "Java @Disabled without text 
 # test-without-assertion
 write(d, "tests/test_blank.py", "def test_a():\n    x = 1\n\ndef test_b():\n    assert True\n\ndef test_c():\n    assert 1 == 1\n")
 dec, txt, _ = bash(d, "git add tests/test_blank.py && git commit -m x")
-ok(dec is None and "test-without-assertion" in txt and "test_a" in txt and "(+1 more in the file)" in txt,
-   "a test without an assertion and a test with `assert True` warn as one finding with a counter")
-write(d, "tests/test_ok.py", "import pytest\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('x')\n\ndef test_b():\n    assert 1 == 1\n")
+ok(dec is None and "test-without-assertion" in txt and "test_a" in txt and "(+2 more in the file)" in txt,
+   "a test without an assertion, one with `assert True` and one with `assert 1 == 1` warn as one finding with a counter")
+write(d, "tests/test_ok.py", "import pytest\n\ndef test_a():\n    with pytest.raises(ValueError):\n        int('x')\n\ndef test_b():\n    assert int('1') == 1\n")
 dec, txt, _ = bash(d, "git add tests/test_ok.py && git commit -m x")
 ok(dec is None and "test-without-assertion" not in txt, "pytest.raises counts as an assertion")
+write(d, "tests/test_wrapped.py", "import pytest\n\n\n@pytest.mark.parametrize('n', [1, 2])\ndef test_wrapped(\n    n: int,\n) -> None:\n"
+      "    assert n > 0\n\n\ndef test_wrapped_empty(\n    n: int,\n) -> None:\n    x = n\n")
+dec, txt, _ = bash(d, "git add tests/test_wrapped.py && git commit -m x")
+ok(dec is None and "test_wrapped_empty" in txt and "`test_wrapped`" not in txt,
+   "a signature over several lines (`) -> None:` at the def's indent): the body after it is read")
 write(d, "tests/blank.test.ts", "test('nothing', () => {\n  render();\n});\ntest('trivial', () => {\n  expect(true).toBe(true);\n});\n")
 dec, txt, _ = bash(d, "git add tests/blank.test.ts && git commit -m x")
 ok(dec is None and "test-without-assertion" in txt and "empty assertion" not in txt.split("test-without-assertion")[1][:80],
@@ -571,7 +640,7 @@ write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp}` hygiene dist — this p
 write(d, "dist/other.js", "console.log(3);\n")
 dec, txt, _ = bash(d, "git add dist/app.js dist/vendor.js dist/other.js && git commit -m x")
 ok(dec is None and "build-dir" not in txt, "an exception by the directory's fingerprint also covers a new file in it")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 write(d, "src/__pycache__/m.cpython-313.pyc", "x")
 write(d, "src/m.py", "x = 1\n")
 dec, txt, _ = bash(d, "git add src && git commit -m x")
@@ -727,7 +796,7 @@ fp_m = re.search(r"render_toolbar.*?" + FP, txt, re.S).group(1)
 write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp_m}` dead-entry render_toolbar — task 3.4 will wire the entry (owner)\n")
 dec, txt, _ = bash(d, "git tag -f telesma/phase-2")
 ok(dec is None and "symbol-without-entry" not in txt, "an exception by fingerprint silences the symbol")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 commit_file(d, "src/app.py", "from toolbar import render_toolbar\n\nrender_toolbar()\n")
 dec, txt, _ = bash(d, "git tag -f telesma/phase-2")
 ok(dec is None and "symbol-without-entry" not in txt, "a call from another code file = there is an entry, silence")
@@ -848,7 +917,7 @@ dec, txt, _ = bash(d, "git add tests/test_calc.py && git commit -m x")
 ok(dec is None and "eval-exec" not in txt, "eval in a test file is skipped")
 write(d, "app/calc.py", "def calc(expr):\n    return eval(expr)  # nosec — expression from our own config\n")
 dec, txt, _ = bash(d, "git add app/calc.py && git commit -m x")
-ok(dec is None and "eval-exec" not in txt, "# nosec lets the line through")
+ok(dec is None and "[sast/eval-exec]" not in txt and "nosec-suppression" in txt, "# nosec lets the line through — and is reported")
 write(d, "app/patterns.py", "DANGEROUS = re.compile(r'--exec(=|$)|--upload-pack')\nTEXT = \"pickle.loads(x) is forbidden\"\n")
 dec, txt, _ = bash(d, "git add app/patterns.py && git commit -m x")
 ok(dec is None and "eval-exec" not in txt and "deserialization" not in txt,
@@ -883,7 +952,7 @@ ok(dec is None, "an exception by fingerprint lets a sast block through")
 write(d, "app/calc.py", "def calc(expr):\n    return eval(expr)\n\ndef calc2(code):\n    exec(code)\n")
 dec, txt, _ = bash(d, "git add app/calc.py && git commit -m x")
 ok(dec == "deny" and "eval-exec" in txt, "a new hit line in a file with an exception changes the fingerprint and blocks again")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 commit_file(d, "app/db.py", 'def fetch(cur, uid):\n    cur.execute(f"SELECT * FROM t WHERE id={uid}")\n')
 dec, txt, _ = bash(d, "git tag -f telesma/phase-1")
 ok(dec == "deny" and "sql-concatenation" in txt, "a phase without an earlier tag: sast scans tracked files and blocks the tag")
@@ -900,8 +969,8 @@ else:
 shutil.rmtree(d)
 
 print("Check: lint-types")
-# Fake tools: Python scripts in the test repo. The language heuristic works on the word
-# `ruff` / `mypy` in the command, not on the script name — hence `python3 tools/fake_ruff.py check`.
+# Fake tools: programs called exactly `ruff` / `mypy` in a directory on PATH — the check runs only
+# a known tool by its program name (a script `tools/fake_ruff.py` is, rightly, not ruff).
 FAKE_RUFF = (
     "import json\nimport sys\n"
     "if 'json' not in ' '.join(sys.argv):\n    print('no json flag'); sys.exit(2)\n"
@@ -918,6 +987,13 @@ FAKE_RUFF = (
     "                        'location': {'row': i, 'column': 101}})\n"
     "print(json.dumps(out))\nsys.exit(1 if out else 0)\n")
 FAKE_MYPY = "import sys\nprint('src/a.py:3: error: Incompatible types  [assignment]')\nsys.exit(1)\n"
+FAKEBIN = Path(tempfile.mkdtemp(prefix="telesma-fakebin-"))
+for _name, _src in (("ruff", FAKE_RUFF), ("mypy", FAKE_MYPY)):
+    (FAKEBIN / f"{_name}.py").write_text(_src, encoding="utf-8")
+    (FAKEBIN / _name).write_text(f'#!/bin/sh\nexec "{sys.executable}" -B "{FAKEBIN}/{_name}.py" "$@"\n', encoding="utf-8")
+    os.chmod(FAKEBIN / _name, 0o755)
+_PATH_BEFORE_FAKEBIN = os.environ["PATH"]
+os.environ["PATH"] = f"{FAKEBIN}{os.pathsep}{_PATH_BEFORE_FAKEBIN}"
 
 
 def tests_config(d, linter, types="none"):
@@ -927,12 +1003,11 @@ def tests_config(d, linter, types="none"):
     section = (f"## Tests\n\n- **Test command**: pytest\n- **Linter/formatter**: {linter}\n"
                f"- **Typecheck command**: {types}\n  <!-- a comment to ignore -->\n\n")
     write(d, "telesma/config.md", c.replace("## Checks", section + "## Checks", 1))
+    trust_tests(d)        # the launcher's part: the person confirmed these commands on this machine
 
 
 d = new_repo()
-write(d, "tools/fake_ruff.py", FAKE_RUFF)
-write(d, "tools/fake_mypy.py", FAKE_MYPY)
-tests_config(d, "python3 tools/fake_ruff.py check")
+tests_config(d, "ruff check")
 write(d, "src/a.py", "import os\nx = 1\n")
 dec, txt, _ = bash(d, "git add src/a.py && git commit -m x")
 ok(dec == "deny" and "linter/F401" in txt, "an unused import (F401) blocks the commit with the rule linter/F401")
@@ -946,7 +1021,7 @@ ok(dec is None and "linter" not in txt, "a commit of a .md alone does not run th
 write(d, "src/c.py", "x = 1\n")
 dec, txt, _ = bash(d, "git add src/c.py && git commit -m x")
 ok(dec is None and "lint-types" not in txt, "a clean .py file — silence")
-tests_config(d, "cd src && python3 ../tools/fake_ruff.py check")
+tests_config(d, "cd src && ruff check")
 dec, txt, _ = bash(d, "git add src/a.py && git commit -m x")
 ok(dec == "deny" and "linter/F401" in txt and "src/a.py:1" in txt,
    "prefix `cd X &&`: files given relative to X, the path in the finding comes back relative to the project")
@@ -967,10 +1042,9 @@ print("Hook PATH: a tool from ~/.cargo/bin")
 # Claude Code runs the hook without the shell profile — on a production project clippy/fmt/cargo
 # check passed as "tool missing", because the hook's PATH lacked ~/.cargo/bin.
 dp = new_repo()
-write(dp, "tools/fake_ruff.py", FAKE_RUFF)
 home = Path(tempfile.mkdtemp(prefix="telesma-home-"))
 (home / ".cargo" / "bin").mkdir(parents=True)
-(home / ".cargo" / "bin" / "ruff").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{dp}/tools/fake_ruff.py" "$@"\n')
+(home / ".cargo" / "bin" / "ruff").write_text(f'#!/bin/sh\nexec "{sys.executable}" -B "{FAKEBIN}/ruff.py" "$@"\n')
 os.chmod(home / ".cargo" / "bin" / "ruff", 0o755)
 tests_config(dp, "ruff check")
 write(dp, "src/a.py", "import os\nx = 1\n")
@@ -988,9 +1062,7 @@ shutil.rmtree(home)
 shutil.rmtree(dp)
 
 print("Typechecker only at phase")
-tests_config(d, "python3 tools/fake_ruff.py check", "python3 tools/fake_mypy.py src")
-commit_file(d, "tools/fake_ruff.py", FAKE_RUFF)
-commit_file(d, "tools/fake_mypy.py", FAKE_MYPY)
+tests_config(d, "ruff check", "mypy src")
 commit_file(d, "src/a.py", "x: int = 1\ny = 2\nz: int = 'a'\n")
 dec, txt, _ = bash(d, "git add src/c.py && git commit -m x")
 ok(dec is None and "types/" not in txt, "the typechecker is not run at commit")
@@ -1000,7 +1072,7 @@ fp = re.search(r"types/assignment\].*?" + FP, txt).group(1)
 write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp}` lint-types src/a.py — a known mypy false alarm (owner)\n")
 dec, txt, _ = bash(d, "git tag -f telesma/phase-1")
 ok(dec is None, "an exception by fingerprint lets the tag through")
-(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").unlink()
+unexcept(d)
 tests_config(d, "none", "/no/such/mypy src")
 dec, txt, _ = bash(d, "git tag -f telesma/phase-1")
 ok(dec is None and "types-unavailable" in txt, "a non-existent typechecker → types-unavailable warns")
@@ -1014,7 +1086,7 @@ ok(r.returncode == 0 and r.stdout.startswith("warning:") and "quote" in r.stdout
 r = subprocess.run([sys.executable, "run.py", "--check"], cwd=d / "telesma" / "checks" / "lint-types",
                    capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "TELESMA_ROOT"})
 ok(r.returncode == 0 and r.stdout.startswith("warning:"), "--check without TELESMA_ROOT finds the config via ../../config.md")
-tests_config(d, "python3 tools/fake_ruff.py check", "python3 tools/fake_mypy.py src")
+tests_config(d, "ruff check", "mypy src")
 r = subprocess.run([sys.executable, "run.py", "--check"], cwd=d / "telesma" / "checks" / "lint-types",
                    capture_output=True, text=True, env={**os.environ, "TELESMA_ROOT": str(d)})
 ok(r.returncode == 0 and r.stdout.startswith("ok:"), "--check with a linter and a typechecker → ok:")
@@ -1143,10 +1215,9 @@ shutil.rmtree(d)
 
 # lint-types: several commands, each with its own `cd` (the Specky config)
 d = new_repo()
-write(d, "tools/fake_ruff.py", FAKE_RUFF)
 commit_file(d, "backend/app/old.py", "import os\n")
-tests_config(d, "`cd backend && python3 ../tools/fake_ruff.py check app` · "
-                "`cd frontend && python3 ../tools/fake_ruff.py check src`")
+tests_config(d, "`cd backend && ruff check app` · "
+                "`cd frontend && ruff check src`")
 write(d, "backend/app/new.py", "import os\nx = 1\n")
 write(d, "frontend/src/view.py", "import os\n")
 dec, txt, _ = bash(d, "git add backend/app/new.py frontend/src/view.py && git commit -m x")
@@ -1154,7 +1225,7 @@ ok(dec == "deny" and "backend/app/new.py:1" in txt and "frontend/src/view.py:1" 
    "two commands with `cd` in backticks: each gets the files from its own directory")
 ok("old.py" not in txt, "a path written into the command (`check app`) is replaced with the commit's file list")
 ok("linter-unknown" not in txt, "a multi-part command is no longer an \"unknown tool\"")
-tests_config(d, "cd backend && python3 ../tools/fake_ruff.py check · cd frontend && python3 ../tools/fake_ruff.py check")
+tests_config(d, "cd backend && ruff check · cd frontend && ruff check")
 dec, txt, _ = bash(d, "git add backend/app/new.py frontend/src/view.py && git commit -m x")
 ok(dec == "deny" and "backend/app/new.py:1" in txt and "frontend/src/view.py:1" in txt,
    "two commands separated by ` · ` without backticks")
@@ -1293,14 +1364,15 @@ ok(json.loads((evd / f"{sha_after}.json").read_text()).get("rewritten_from") == 
 
 # a check that did not run is red too
 write(d, "src/c.py", "y = 2\n")
-(d / "telesma" / "checks" / "weakenings" / "run.py").write_text("import sys; sys.exit(7)\n", encoding="utf-8")
+write(d, "telesma/checks/weakenings/run.py", "import sys; sys.exit(3)\n")     # 3 = the tool is missing
 dec, txt, _ = bash(d, "git add src/c.py && git commit -m x")
-ok(dec is None and "weakenings" in txt, "a check with an error does not block the commit, but is reported")
+ok(dec is None and "weakenings" in txt, "a check whose tool is missing does not block the commit, but is reported")
 g(d, "add", "src/c.py"); g(d, "commit", "-qm", "x"); post(d, "git add src/c.py && git commit -m x")
 g(d, "push", "-q", "origin", "task-1-model"); post(d, "git push origin task-1-model")
 _, state, desc, _ = status_of(gh_calls()[0])
 ok(state == "failure" and "did not run" in desc and "weakenings" in desc, "a check that did not run → red")
 shutil.copy(CHECKS / "weakenings" / "run.py", d / "telesma" / "checks" / "weakenings" / "run.py")
+approve(d)
 
 # gh fails: log + context, exit 0
 os.environ["FAKE_GH_FAIL"] = "1"
@@ -1555,12 +1627,13 @@ commit_file(d, "tests/test_rt.py", "# telesma: red-team PATCH /api/projects/{id}
 dec, txt, _ = bash(d, "git tag telesma/phase-3")
 ok(dec == "deny" and "red team missing: foreign-role, foreign-owner" in txt,
    "a marker with an /api prefix and another parameter name matches; the missing cases remain")
-commit_file(d, "tests/test_rt2.py", "// telesma: red-team PATCH /projects/:project_id — foreign-role, other-organization\n")
+commit_file(d, "tests/test_rt2.py", "// telesma: red-team PATCH /projects/:project_id — foreign-role, other-organization\n"
+                                    "it('refuses', () => { expect(1).toBe(2); });\n")
 dec, txt, _ = bash(d, "git tag telesma/phase-3")
 ok(dec is None and "red-team-missing" not in txt, "markers in two files add up; the alias other-organization = foreign-owner")
 commit_file(d, "telesma/state/SECURITY_MAP.md", MAP_RT.replace("- **Session**: cookie", "- **Session**: header"))
 (d / "tests" / "test_rt.py").unlink()
-commit_file(d, "tests/test_rt3.py", "# telesma: red-team PATCH /projects/{p} — no-session\n")
+commit_file(d, "tests/test_rt3.py", "# telesma: red-team PATCH /projects/{p} — no-session\ndef test_refused():\n    assert 1\n")
 subprocess.run(["git", "-C", str(d), "rm", "-q", "tests/test_rt.py"], check=True)
 subprocess.run(["git", "-C", str(d), "commit", "-qm", "rm"], check=True)
 dec, txt, _ = bash(d, "git tag telesma/phase-3")
@@ -1642,10 +1715,26 @@ commit_file(d, "telesma/state/SECURITY_MAP.md", MAP_RT)
 subprocess.run(["git", "-C", str(d), "tag", "-f", "telesma/phase-1"], check=True)
 commit_file(d, "backend/api.py", API2.replace("return {}", "return {'ok': 3}"))
 commit_file(d, "tests/test_rt.py", "# telesma: red-team * /projects/* — no-session, foreign-role, csrf\n"
-                                   "# telesma: red-team * /other/* — foreign-owner\n")
+                                   "# telesma: red-team * /other/* — foreign-owner\n"
+                                   "def test_every_route_refuses():\n    assert 1\n")
 dec, txt, _ = bash(d, "git tag telesma/phase-2")
 ok(dec == "deny" and "red team missing: foreign-owner" in txt,
    "`* /projects/*` covers a route under the prefix; a marker under another prefix does not")
+# audit: one comment `* /*` used to satisfy every route and every case for good
+commit_file(d, "tests/test_rt.py", "# telesma: red-team * /* — no-session, foreign-role, foreign-owner, csrf\n"
+                                   "def test_nothing():\n    assert 1 + 1 == 2\n")
+dec, txt, _ = bash(d, "git tag telesma/phase-2")
+ok(dec == "deny" and "red-team-missing" in txt and "no-session" in txt and "red-team-marker-invalid" in txt,
+   "a wildcard without a path prefix covers nothing — and is reported as a marker that does not count")
+commit_file(d, "tests/test_rt.py", "# telesma: red-team * /projects/* — no-session, foreign-role, foreign-owner, csrf\n")
+dec, txt, _ = bash(d, "git tag telesma/phase-2")
+ok(dec == "deny" and "red-team-missing" in txt and "red-team-marker-invalid" in txt,
+   "a marker in a file without any test does not count")
+commit_file(d, "tests/test_rt.py", "def test_every_route_refuses():\n"
+                                   "    # telesma: red-team * /projects/* — no-session, foreign-role, foreign-owner, csrf\n"
+                                   "    assert 1\n")
+dec, txt, _ = bash(d, "git tag telesma/phase-2")
+ok(dec is None and "red-team-missing" not in txt, "a marker inside a test counts")
 shutil.rmtree(d)
 
 print("Protection of the check files")
@@ -1673,6 +1762,619 @@ ok(dec == "ask", "appending an exception from Bash asks the human")
 dec, _, _ = bash(d, "cat telesma/state/CHECK_EXCEPTIONS.md")
 ok(dec is None, "reading the exceptions file does not ask")
 shutil.rmtree(d)
+
+# --- Fixes after the audit of the checks (2026-11-10) ------------------------------------------
+# Every case below passed a planted key (or ran a planted command) before the fix.
+os.environ["TELESMA_SEMGREP"] = "none"       # this whole part: built-in patterns only, no network
+print("Audit fixes: commit scope never narrower than the commit")
+KEYFILE = f'KEY = "{AWS}"\n'
+
+
+def post_hook(d, tool, tool_input):
+    r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--posttooluse"],
+                       input=json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": str(d)}),
+                       capture_output=True, text=True, env={**os.environ, "CLAUDE_PROJECT_DIR": str(d)})
+    return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+def gitc(d, *args):
+    return subprocess.run(["git", "-C", str(d), *args], capture_output=True, text=True)
+
+
+def evidence_of(d, commit="HEAD"):
+    h = gitc(d, "rev-parse", commit).stdout.strip()
+    p = d / ".git" / "telesma-checks" / f"{h}.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+d = new_repo()
+commit_file(d, "a.py", "X = 1\n")
+write(d, "a.py", KEYFILE)
+for cmd, what in (("git add -u && git commit -m x", "git add -u"),
+                  ("git add --update && git commit -m x", "git add --update"),
+                  ("git commit -m x a.py", "a pathspec on the commit"),
+                  ("git commit -m x -- a.py", "a pathspec after --"),
+                  ("git commit --only a.py -m x", "commit --only")):
+    dec, txt, _ = bash(d, cmd)
+    ok(dec == "deny" and "aws-access-key" in txt, f"{what}: the modified tracked file is checked")
+gitc(d, "checkout", "--", "a.py")
+write(d, "src/b.py", KEYFILE)
+for cmd, what in (("git add src/*.py && git commit -m x", "a glob in git add"),
+                  ("git add '*.py' && git commit -m x", "a quoted glob"),
+                  ("git add :/src && git commit -m x", "pathspec magic"),
+                  ("cd src && git add b.py && git commit -m x", "a path relative to another directory (cd)"),
+                  ("git add src/later.py src/b.py && git commit -m x", "a path that does not exist at hook time")):
+    dec, txt, _ = bash(d, cmd)
+    ok(dec == "deny" and "aws-access-key" in txt, f"{what}: the scope widens instead of dropping the file")
+dec, txt, _ = bash(d, "git add src/b.py && git commit -m \"$(cat <<'EOF'\nMake it 5\" wide, it's fine\nEOF\n)\"")
+ok(dec == "deny" and "aws-access-key" in txt, "a quote in a heredoc message does not hide the files of git add")
+ok(rc.points_from_command("git add src/b.py && git commit -m \"$(cat <<'EOF'\nIt's 5\" wide\nEOF\n)\"")["commit"]["added"] == ["src/b.py"],
+   "the body of a quoted heredoc is cut out before parsing — the add plan survives")
+dec, txt, _ = bash(d, 'git add src/b.py && git commit -m "unclosed')
+ok(dec == "deny" and "aws-access-key" in txt, "a command that does not parse: everything modified and untracked is checked")
+(d / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+write(d, "ignored/c.py", KEYFILE)
+gitc(d, "checkout", "--", ".")
+(d / "src" / "b.py").unlink()
+dec, txt, _ = bash(d, "git add -f ignored/ && git commit -m x")
+ok(dec == "deny" and "aws-access-key" in txt and "ignored/c.py" in txt, "git add -f <dir>: ignored files in it are checked")
+dec, txt, _ = bash(d, "git add -f ignored/*.py && git commit -m x")
+ok(dec == "deny" and "git add -f" in txt and "aws-access-key" not in txt, "git add -f with a glob is refused (shape, not a finding)")
+shutil.rmtree(d)
+
+print("Audit fixes: what is checked is what is committed")
+d = new_repo()
+write(d, "a.py", KEYFILE)
+gitc(d, "add", "a.py")
+write(d, "a.py", "KEY = None\n")
+dec, txt, _ = bash(d, "git commit -m x")
+ok(dec == "deny" and "staged in one version" in txt and "a.py" in txt,
+   "staged with a key, clean in the working tree: the commit is refused (the checks read the working tree)")
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec is None, "the same file staged again by the command — the working tree version is what gets committed")
+gitc(d, "reset", "-q")
+(d / "a.py").unlink()
+for name, what in (("zażółć.py", "a non-ASCII name"), ('a"b.py', "a name with a quote"),
+                   ("my file.py", "a name with a space"), ("-x.py", "a name starting with a dash")):
+    write(d, name, KEYFILE)
+    gitc(d, "add", "--", name)
+    dec, txt, _ = bash(d, "git commit -m x")
+    ok(dec == "deny" and "aws-access-key" in txt, f"{what}, already staged: checked")
+    gitc(d, "rm", "-q", "--cached", "--", name)
+    (d / name).unlink()
+write(d, "tab\tname.py", "x = 1\n")
+gitc(d, "add", "--", "tab\tname.py")
+dec, txt, _ = bash(d, "git commit -m x")
+ok(dec == "deny" and "unsafe-path" in txt, "a name with a control character cannot be handed to the checks — it blocks")
+shutil.rmtree(d)
+
+print("Audit fixes: command shapes the hook cannot read")
+op = rc.order_problem
+for cmd in ("(git commit -am x)", "{ git commit -m x; }", "git add a.py; ! git commit -m x",
+            "G=git; $G add a.py; $G commit -m x", "if true; then git commit -m x; fi",
+            "python3 -c \"import subprocess; subprocess.run(['git', 'commit', '-m', 'x'])\"",
+            "(git merge --no-ff other)", "$GIT cherry-pick abc"):
+    ok(op(cmd) == "unseen", f"refused as unreadable: {cmd[:50]}")
+ok(op("git -c alias.z=commit z -am x") == "alias", "an alias defined in the command (-c alias.z=commit) is refused")
+ok(op("command git commit -m x") == "wrapper" and op("time git merge x") == "wrapper", "wrappers around commit / merge")
+for cmd in ("git merge --no-ff other", "git pull", "git push && gh pr merge 5 --squash", "git log --grep commit",
+            'grep -rn "git commit" docs/', "pytest tests/test_git_commit.py", "ls .git/rebase-merge"):
+    ok(op(cmd) is None, f"not refused: {cmd}")
+for cmd in ("echo $(cp stash/a.txt b.py) && git add b.py && git commit -m x",
+            "ls `cp stash/a.txt b.py` ; git add b.py && git commit -m x",
+            'git commit -am "$(sed -i s/a/b/ x.py; echo msg)"',
+            "git commit -m \"$(cat <<EOF\n$(touch x)\nEOF\n)\"",
+            "git add a.py && git commit -m x <(echo y)"):
+    ok(op(cmd) == "substitution", f"a substitution in a committing command is refused: {cmd[:48]!r}")
+ok(op("git commit -m \"$(cat <<'EOF'\nUse $(x) and `y` in the text\nEOF\n)\"") is None,
+   "a message from a heredoc with a quoted delimiter is inert — allowed")
+ok(op("git commit -m 'literal $(x) and `y`'") is None, "single quotes: nothing is expanded — allowed")
+ok(op("git diff --output=x.env HEAD~1 && git add x.env && git commit -m x") == "output",
+   "git diff --output before the commit writes a file — refused")
+d = new_repo()
+write(d, "a.py", KEYFILE)
+dec, txt, _ = bash(d, "(git add a.py; git commit -m x)")
+ok(dec == "deny" and "shape of the command" in txt, "the hook answers an unreadable commit with the shape message")
+shutil.rmtree(d)
+
+print("Audit fixes: evidence comes from what the commit contains")
+d = new_repo()
+write(d, "telesma/config.md", (d / "telesma" / "config.md").read_text(encoding="utf-8"))
+post_hook(d, "Bash", {"command": "true"})                       # the hook's first sight of HEAD
+write(d, "ok.py", "x = 1\n")
+cmd = "git add ok.py && git commit -m ok"
+bash(d, cmd)
+subprocess.run(cmd, shell=True, cwd=d, capture_output=True)
+post_hook(d, "Bash", {"command": cmd})
+e = evidence_of(d)
+ok(e is not None and e["checks"].get("secrets", {}).get("decision") == "clean" and "verified" not in e,
+   "an ordinary commit: the pre-commit result becomes its evidence (same blobs)")
+# a commit the hook never saw (a script) with a key
+write(d, "a.py", KEYFILE)
+gitc(d, "add", "a.py")
+gitc(d, "commit", "-qm", "by a script")
+out = post_hook(d, "Bash", {"command": "bash tools/commit.sh"})
+e = evidence_of(d)
+head7 = gitc(d, "rev-parse", "--short=7", "HEAD").stdout.strip()
+ok(out.get("decision") == "block" and head7 in out.get("reason", "") and "aws-access-key" in out.get("reason", ""),
+   "a commit made by a script is checked right after: blocking context names the commit and the finding")
+ok(e is not None and e["checks"]["secrets"]["decision"] == "block", "its evidence says so — it is not green")
+ok(AWS not in json.dumps(out) and AWS not in log(d), "the key appears neither in that context nor in the log")
+# the amend that used to launder: nothing staged, the whole commit carried over
+cmd = "git commit --amend --no-edit"
+dec, _, _ = bash(d, cmd)
+# another committer date: an amend within the same second would give the very same SHA
+subprocess.run(cmd, shell=True, cwd=d, capture_output=True, env={**os.environ, "GIT_COMMITTER_DATE": "2030-01-01T00:00:00"})
+out = post_hook(d, "Bash", {"command": cmd})
+e = evidence_of(d)
+ok(dec is None and out.get("decision") == "block" and e is not None and e["checks"]["secrets"]["decision"] == "block",
+   "git commit --amend --no-edit on it: the amended commit is checked as a whole and stays red")
+write(d, "a.py", "KEY = None\n")
+cmd = "git add a.py && git commit --amend --no-edit"
+bash(d, cmd)
+subprocess.run(cmd, shell=True, cwd=d, capture_output=True)
+out = post_hook(d, "Bash", {"command": cmd})
+e = evidence_of(d)
+ok(out.get("decision") != "block" and e is not None and e["checks"]["secrets"]["decision"] == "clean",
+   "after the fix the amended commit is verified clean")
+# a file changed between the check and the commit: the pending result is not given to that commit
+write(d, "late.py", "x = 1\n")
+cmd = "git add late.py && git commit -m late"
+bash(d, cmd)
+write(d, "late.py", KEYFILE)
+subprocess.run(cmd, shell=True, cwd=d, capture_output=True)
+out = post_hook(d, "Bash", {"command": cmd})
+e = evidence_of(d)
+ok(out.get("decision") == "block" and e["checks"]["secrets"]["decision"] == "block",
+   "content that differs from what the checks read gets no pre-commit evidence — it is checked from the commit")
+# a checkout moves HEAD without creating commits: nothing to verify
+bad = gitc(d, "rev-parse", "HEAD").stdout.strip()
+gitc(d, "checkout", "-q", "-b", "other", "HEAD~1")
+out = post_hook(d, "Bash", {"command": "git checkout -b other HEAD~1"})
+ok(out.get("decision") != "block", "a checkout is not a new commit — nothing is verified, nothing blocks")
+ok(not [p for p in gitc(d, "worktree", "list").stdout.splitlines() if "telesma-verify" in p],
+   "the verification worktree is removed afterwards")
+st, desc = rc.collect_status(str(d), str(d / ".git" / "telesma-checks"), [bad])
+ok(st == "failure" and "blocking findings" in desc, "a commit with blocking evidence makes the PR status red")
+shutil.rmtree(d)
+d = new_repo()
+subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d)], capture_output=True)
+write(d, "a.py", KEYFILE)
+gitc(d, "add", "a.py")
+gitc(d, "commit", "-qm", "the first command of the session commits behind the hook")
+out = post_hook(d, "Bash", {"command": "make commit"})
+ok(out.get("decision") == "block" and "aws-access-key" in out.get("reason", ""),
+   "the launcher's --baseline remembers HEAD, so even the first command of a session is accounted for")
+shutil.rmtree(d)
+
+print("Audit fixes: protection of the check files")
+tp = rc.bash_touches_protected
+for cmd in ("python3 -c \"open('telesma/state/CHECK_EXCEPTIONS.md','a').write('x')\"",
+            "cd telesma/checks && rm secrets/run.py", "cd telesma/state && echo x >> CHECK_EXCEPTIONS.md",
+            "cd telesma/checks && echo x >> secrets/run.py",
+            "git checkout HEAD~1 -- telesma/checks", "ln -sf /dev/null telesma/checks/secrets/CHECK.md",
+            "chmod 000 telesma/checks/secrets/run.py", "dd if=/dev/null of=telesma/checks/secrets/run.py",
+            "cat > telesma/state/check_exceptions.md <<EOF\nx\nEOF", "python3 telesma/checks/telesma-checks.py --approve",
+            "echo '{}' > .git/telesma-checks/baseline.json"):
+    ok(tp(cmd), f"asks: {cmd[:60]!r}")
+for cmd in ("grep -n x telesma/checks/secrets/run.py 2>/dev/null", "cat telesma/checks/secrets/CHECK.md",
+            "python3 telesma/checks/telesma-checks.py --point ci > /tmp/out.txt",
+            "ls telesma/checks/ | head -3", "git status && git diff telesma/checks"):
+    ok(not tp(cmd), f"a read does not ask: {cmd[:60]}")
+d = new_repo()
+write(d, "telesma/state/CHECK_EXCEPTIONS.md", "# exceptions\n")
+cfg_path = d / "telesma" / "config.md"
+dec, _, _ = hook(d, "Edit", {"file_path": str(d / "telesma" / "state" / "check_exceptions.md"),
+                             "old_string": "# exceptions", "new_string": "- `abcdefabcdef`"})
+ok(dec == "ask", "Edit of the exceptions file under another letter case asks (case-insensitive file systems)")
+dec, _, _ = hook(d, "Write", {"file_path": str(d / "Telesma" / "Checks" / "secrets" / "run.py"), "content": ""})
+ok(dec == "ask", "Write to Telesma/Checks/… asks")
+os.symlink(d / "telesma" / "state", d / "link")
+dec, _, _ = hook(d, "Write", {"file_path": str(d / "link" / "CHECK_EXCEPTIONS.md"), "content": "x"})
+ok(dec == "ask", "a path through a symlink asks")
+(d / "link").unlink()
+cfg_text = cfg_path.read_text(encoding="utf-8")
+cut = cfg_text.index("## Permissions")
+spanning = cfg_text[cut - 60:cut] + "## Permissions"          # the end of ## Checks and the next heading
+dec, _, _ = hook(d, "Edit", {"file_path": str(cfg_path), "old_string": spanning,
+                             "new_string": "\n- **On failure**: warn\n\n## Permissions"})
+ok(dec == "ask", "an Edit whose old text runs past the end of ## Checks asks (applied in memory, sections compared)")
+dec, _, _ = hook(d, "Edit", {"file_path": str(cfg_path), "old_string": "## Permissions", "new_string": "## Permissions\n\n- x"})
+ok(dec is None, "an Edit of another section of the config does not ask")
+dec, _, _ = hook(d, "Edit", {"file_path": str(cfg_path), "old_string": "# Config",
+                             "new_string": "# Config\n\n## Checks\n- **Enabled**: no\n"})
+ok(dec == "ask", "a second ## Checks section inserted above the real one asks")
+
+print("Audit fixes: integrity baseline")
+write(d, "a.py", "x = 1\n")
+dec, _, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec is None, "baseline in place, nothing changed — the commit goes through")
+with open(d / "telesma" / "state" / "CHECK_EXCEPTIONS.md", "a", encoding="utf-8") as f:
+    f.write("- `abcdefabcdef` written past the hook\n")
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny" and "CHECK_EXCEPTIONS.md" in txt and "--approve" in txt and "TELESMA BLOCKED" in txt,
+   "an exception written past the hook stops the next commit and names the file")
+dec, txt, _ = bash(d, "git tag telesma/phase-9")
+ok(dec == "deny" and "differ" in txt, "… and the next tag")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--approve", str(d)],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
+ok(r.returncode == 2 and "terminal" in r.stderr, "--approve refuses without a terminal (the agent cannot approve itself)")
+dec, _, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny", "… so the difference stays")
+approve(d)
+dec, _, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec is None, "after the human's approval the commit goes through")
+c = cfg_path.read_text(encoding="utf-8")
+cfg_path.write_text(c.replace("- **Enabled**: yes", "- **Enabled**: yes\n- **PR status**: no", 1), encoding="utf-8")
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny" and "## Checks" in txt, "the ## Checks section changed by a command (sed, python) stops the commit")
+approve(d)
+(d / "telesma" / "checks" / "secrets" / "run.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny" and "telesma/checks/secrets/run.py (changed)" in txt, "a neutered module stops the commit")
+shutil.copy(CHECKS / "secrets" / "run.py", d / "telesma" / "checks" / "secrets" / "run.py")
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "the module restored — no difference")
+# an edit the human was asked about and agreed to moves the baseline; one on top of a drift does not
+exc = d / "telesma" / "state" / "CHECK_EXCEPTIONS.md"
+ti = {"file_path": str(exc), "old_string": "# exceptions", "new_string": "# exceptions (reviewed)"}
+dec, _, _ = hook(d, "Edit", ti)
+exc.write_text(exc.read_text(encoding="utf-8").replace("# exceptions", "# exceptions (reviewed)", 1), encoding="utf-8")
+post_hook(d, "Edit", ti)
+ok(dec == "ask" and bash(d, "git add a.py && git commit -m x")[0] is None,
+   "an Edit the human agreed to (PostToolUse with exactly the announced content) moves the baseline")
+ti = {"file_path": str(exc), "old_string": "(reviewed)", "new_string": "(reviewed twice)"}
+hook(d, "Edit", ti)
+exc.write_text(exc.read_text(encoding="utf-8").replace("(reviewed)", "(reviewed twice)\n- `111111111111` extra", 1), encoding="utf-8")
+post_hook(d, "Edit", ti)
+ok(bash(d, "git add a.py && git commit -m x")[0] == "deny", "content other than the announced one does not move it")
+approve(d)
+(d / ".git" / "telesma-checks" / "baseline.json").unlink()
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny" and "no integrity baseline" in txt, "a deleted baseline is not a clean slate — the commit stops")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                    "--templates", str(CHECKS)], capture_output=True, text=True)
+ok(r.returncode == 0 and "created" in r.stdout and bash(d, "git add a.py && git commit -m x")[0] is None,
+   "--baseline (the launcher at start) creates the baseline when there is none")
+mod = d / "telesma" / "checks" / "hygiene" / "CHECK.md"
+mod.write_text(mod.read_text(encoding="utf-8") + "\nlocal note\n", encoding="utf-8")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                    "--templates", str(CHECKS)], capture_output=True, text=True)
+ok("differs: telesma/checks/hygiene/CHECK.md" in r.stdout and bash(d, "git add a.py && git commit -m x")[0] == "deny",
+   "--baseline does not record a module that differs from the delivered template")
+shutil.copy(CHECKS / "hygiene" / "CHECK.md", mod)
+base = json.loads((d / ".git" / "telesma-checks" / "baseline.json").read_text(encoding="utf-8"))
+base["modules"]["telesma/checks/hygiene/CHECK.md"] = "0" * 64                     # an older delivered version
+(d / ".git" / "telesma-checks" / "baseline.json").write_text(json.dumps(base), encoding="utf-8")
+subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                "--templates", str(CHECKS)], capture_output=True, text=True)
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "--baseline records a module identical to the delivered template (an update)")
+cfg_path.write_text(cfg_path.read_text(encoding="utf-8").replace("- **PR status**: no", "- **PR status**: yes", 1), encoding="utf-8")
+subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                "--templates", str(CHECKS)], capture_output=True, text=True)
+ok(bash(d, "git add a.py && git commit -m x")[0] == "deny", "--baseline alone does not record a changed ## Checks section")
+subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                "--templates", str(CHECKS), "--config-section"], capture_output=True, text=True)
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "--baseline --config-section (the launcher after its own wizard) records it")
+ok(any("differs from the approved state" in w for w in rc.validate(str(d))) is False, "the validator is silent without a difference")
+fresh = Path(tempfile.mkdtemp(prefix="telesma-checks-test-"))
+subprocess.run(["git", "init", "-q", str(fresh)], check=True)
+gitc(fresh, "config", "user.email", "t@example.com")
+gitc(fresh, "config", "user.name", "t")
+shutil.copytree(CHECKS, fresh / "telesma" / "checks", ignore=shutil.ignore_patterns("__pycache__"))
+(fresh / "telesma" / "config.md").write_text("# Config\n\n" + checks_section("yes") + "\n## Permissions\n", encoding="utf-8")
+(fresh / "a.py").write_text("x = 1\n", encoding="utf-8")
+ok(bash(fresh, "git add a.py && git commit -m first")[0] is None and (fresh / ".git" / "telesma-checks" / "baseline.json").exists(),
+   "a repository without a single commit (created in the session): the first commit creates the baseline")
+shutil.rmtree(fresh)
+exc.write_text("changed\n", encoding="utf-8")
+ok(any(w.startswith("W:") and "CHECK_EXCEPTIONS.md" in w and "--approve" in w for w in rc.validate(str(d))),
+   "the startup validator warns about a difference and names the command")
+shutil.rmtree(d)
+
+print("Audit fixes: lint-types is not a way to run a command")
+spec_l = importlib.util.spec_from_file_location("lt", CHECKS / "lint-types" / "run.py")
+lt = importlib.util.module_from_spec(spec_l)
+spec_l.loader.exec_module(lt)
+ok(lt.known_tool(["ruff", "check"]) == ("ruff", 0) and lt.known_tool(["npx", "eslint", "."]) == ("eslint", 1)
+   and lt.known_tool(["python3", "-m", "ruff", "check"]) == ("ruff", 2) and lt.known_tool(["cargo", "clippy"]) == ("cargo clippy", 1),
+   "a known tool by its program name, also through npx / python -m")
+ok(lt.linter_of(["python3", "tools/my_ruff.py", "check"]) is None and lt.linter_of(["./ruff-wrapper", "x"]) is None
+   and lt.linter_of(["npm", "run", "ruff"]) is None, "a script or wrapper with `ruff` in its name is not ruff")
+ok("-a" not in lt.prepare(["rubocop", "-a", "app"], None, "rubocop", "rubocop")
+   and "--apply" not in lt.prepare(["biome", "check", "--apply", "src"], None, "biome", "biome")
+   and "--fix" not in lt.prepare(["eslint", "--fix", "src"], None, "eslint", "eslint"),
+   "autofix flags are stripped (rubocop -a, biome --apply, eslint --fix)")
+d = new_repo()
+write(d, "tools/my_ruff.py", "open('PWNED_LINT', 'w').write('x')\nprint('[]')\n")
+tests_config(d, "python3 tools/my_ruff.py check", "touch PWNED_TYPES; echo mypy")
+write(d, "src/a.py", "x = 1\n")
+dec, txt, _ = bash(d, "git add src/a.py && git commit -m x")
+ok(dec is None and "linter-unknown" in txt and not (d / "PWNED_LINT").exists(),
+   "a script named like a tool in Linter/formatter is not run at commit")
+gitc(d, "add", "src/a.py")
+gitc(d, "commit", "-qm", "x")
+dec, txt, _ = bash(d, "git tag telesma/phase-1")
+ok("types-unknown" in txt and "linter-unknown" in txt and not (d / "PWNED_TYPES").exists() and not (d / "PWNED_LINT").exists(),
+   "a compound Typecheck command is not run at phase either — no shell")
+tests_config(d, "cd .. && ruff check")
+write(d, "src/b.py", "import os\n")
+dec, txt, _ = bash(d, "git add src/b.py && git commit -m x")
+ok(dec is None and "linter-unknown" in txt, "`cd` out of the project is not followed")
+tests_config(d, "ruff check")
+dec, txt, _ = bash(d, "git add src/b.py && git commit -m x")
+ok(dec == "deny" and "linter/F401" in txt, "the confirmed section with a known tool runs")
+c = cfg_path = (d / "telesma" / "config.md").read_text(encoding="utf-8")
+(d / "telesma" / "config.md").write_text(c.replace("- **Test command**: pytest", "- **Test command**: pytest -q"), encoding="utf-8")
+dec, txt, _ = bash(d, "git add src/b.py && git commit -m x")
+ok(dec is None and "config-unconfirmed" in txt and "linter/F401" not in txt,
+   "## Tests changed since the person confirmed it: the linter is not run, one warning says so")
+gitc(d, "add", "src/b.py")
+gitc(d, "commit", "-qm", "b")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--point", "ci"], cwd=d,
+                   capture_output=True, text=True, env={**os.environ, "XDG_CONFIG_HOME": tempfile.mkdtemp()})
+ok("linter/F401" in r.stdout and r.returncode == 1, "run by hand / in CI (--point) the runner vouches for the section — the linter runs")
+shutil.rmtree(d)
+
+print("Audit fixes: secrets")
+d = new_repo()
+SAMPLES = {
+    "django.py": ('SECRET_KEY = "k9#mQ2$vL8@pR5^wX1&zT4*nB7!cF3"\n', "secret-assignment"),
+    "db.py": ('DB_PASSWORD = "Tr0ub4dor&3horse"\n', "secret-assignment"),
+    "aws.py": ('aws_secret_access_key = "' + "wJalrXUtnFEMI/K7MDENG" + "/bPxRfiCYzQ9mK2pLtR" + '"\n', "secret-assignment"),
+    "envline.py": ('password = "Tr0ub4dor&3horse"  # environment: prod\n', "secret-assignment"),
+    "url.py": ('DATABASE_URL = "postgres://admin:S3cr3tPassw0rd@db.prod.corp.io:5432/app"\n', "url-credentials"),
+    "hf.py": ('T = "hf_' + "qRzTuVwXyZkLmNoPjHgFdSaPoIuYtReWqMn" + '"\n', "huggingface-token"),
+    "npm.py": ('T = "npm_' + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5" + '"\n', "npm-token"),
+    "sg.py": ('T = "SG.' + "aB3dE5gH7jK9mN1pQ3sT5v.X7zA9cE1gI3kM5oQ7sU9wY1aC3eG5iK7mO9qS1uW3yA5" + '"\n', "sendgrid-key"),
+    "pat.py": ('T = "github_pat_' + "11QRZTUVW0aB3dE5gH7jK9_mN1pQ3sT5vX7zA9cE1gI3kM5oQ7sU9wY1aC3eG5iK7mO9qS1uW3yA5bC" + '"\n', "github-token"),
+    "split.py": ('K = "AKIA" \\\n    "' + AWS[4:] + '"\n', "aws-access-key-split"),
+    "plus.py": ('K = "AKIA" + "' + AWS[4:] + '"\n', "aws-access-key-split"),
+    "b64.py": ('import base64\nK = base64.b64decode("' + __import__("base64").b64encode(AWS.encode()).decode() + '")\n',
+               "aws-access-key-base64"),
+    "pem.py": ('KEY = ("-----BEGIN RSA PRIVATE KEY-----\\n"\n       "MIIEowIBAAKCAQEAx7n3Yk2mQ9vL8pR5wX1zT4nB7cF3k9mQ2vL8pR5wX1zT4nB7\\n")\n', "private-key"),
+    "pgp.txt": ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: GnuPG v2\n\n"
+                "lQOYBFxyzABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123\n", "private-key"),
+    "lowdistinct.py": ('K = "AKIAAAAABBBBCCCCDDDD"\n', "aws-access-key"),
+    "conf.env.prod": ("PASSWORD=Tr0ub4dor3horse\n", "secret-file"),
+}
+for name, (content, _) in SAMPLES.items():
+    write(d, name, content)
+gitc(d, "add", ".")
+dec, txt, _ = bash(d, "git commit -m x")
+rows = [json.loads(l) for l in log(d).splitlines()]
+for name, (_, rule) in SAMPLES.items():
+    ok(any(w.get("file") == name and w.get("rule") == rule for w in rows), f"{name}: {rule}")
+ok(dec == "deny", "the commit is blocked")
+out_all = txt + log(d)
+ok(all(frag not in out_all for frag in ("Tr0u", "k9#m", "wJal", "S3cr", "MIIE", "lQOY", AWS))
+   and "characters, content hidden" in txt, "no part of any value is shown — only its length")
+shutil.rmtree(d)
+d = new_repo()
+write(d, "big.py", "# pad\n" * 200000 + KEYFILE)
+write(d, "cfg.json", '{"pad":"' + "a" * 50000 + f'","k":"{AWS}"' + "}\n")
+(d / "nul.py").write_bytes(b"# \x00\n" + KEYFILE.encode())
+write(d, "conf/yarn.lock", KEYFILE)
+write(d, "x.min.js", KEYFILE)
+write(d, ".claude/notes.py", KEYFILE)
+gitc(d, "add", ".")
+dec, txt, _ = bash(d, "git commit -m x")
+rows = [json.loads(l) for l in log(d).splitlines()]
+for name, what in (("big.py", "a file over 1 MB"), ("cfg.json", "a 50 000-character line"), ("nul.py", "a file with a NUL byte"),
+                   ("conf/yarn.lock", "a lockfile"), ("x.min.js", "a minified bundle"), (".claude/notes.py", "a file under .claude/")):
+    ok(any(w.get("file") == name and w.get("rule") == "aws-access-key" and w.get("decision") == "block" for w in rows),
+       f"secrets reads {what}")
+ok(not any(w.get("check") == "sast" and w.get("file") in ("big.py", "x.min.js", ".claude/notes.py") for w in rows),
+   "the other checks still skip those files")
+shutil.rmtree(d)
+d = new_repo()
+write(d, "tests/fixtures_data.py", 'PASSWORD = "Sup3rS3cretValue"\n')
+dec, txt, _ = bash(d, "git add tests/fixtures_data.py && git commit -m x")
+ok("secret-assignment" in txt, "a file under tests/ that holds no test gets no exemption")
+write(d, "compose.yml", 'url: "postgres://postgres:devpassw0rd@db:5432/app"\n')
+dec, txt, _ = bash(d, "git add compose.yml && git commit -m x")
+ok(dec is None and "url-credentials" in txt, "a login in an address to a service name only warns")
+write(d, "docs/redis.md", "- `REDIS_URL=rediss://user:pass@host:6379/0` from env\n")
+dec, txt, _ = bash(d, "git add docs/redis.md && git commit -m x")
+ok(dec is None and "url-credentials" not in txt, "`user:pass@host` in documentation is a placeholder (Telesma's own redis guideline)")
+write(d, "names.py", 'tokenizer = "bert-base-uncased"\npassword_field = "password_input"\ntoken_url = "https://x.example/t"\n')
+dec, txt, _ = bash(d, "git add names.py && git commit -m x")
+ok("secret-assignment" not in txt, "tokenizer / password_field / an address are not secrets")
+shutil.rmtree(d)
+spec_d = importlib.util.spec_from_file_location("deps", CHECKS / "dependencies" / "run.py")
+deps = importlib.util.module_from_spec(spec_d)
+spec_d.loader.exec_module(deps)
+ok(deps.without_credentials("https://user:t0ken@npm.corp.io/") == "https://***@npm.corp.io/", "a registry address is shown without its login")
+
+print("Audit fixes: fail closed on an internal error")
+d = new_repo()
+write(d, "a.py", KEYFILE)
+gitc(d, "add", "a.py")
+(d / "telesma" / "config.md").write_bytes((d / "telesma" / "config.md").read_bytes().replace(b"# Config", b"# Config \xff"))
+dec, txt, _ = bash(d, "git commit -m x")
+ok(dec == "deny" and "aws-access-key" in txt, "a byte that is not UTF-8 in config.md does not switch the checks off")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--pretooluse"],
+                   input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": str(d)}),
+                   capture_output=True, text=True, env={**os.environ, "CLAUDE_PROJECT_DIR": str(d), "PYTHONIOENCODING": "ascii"})
+ok(r.returncode == 0 and json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny",
+   "a console that cannot print the message still gets the deny (ASCII-safe JSON)")
+probe = ("import importlib.util, sys, io, json\n"
+         f"s = importlib.util.spec_from_file_location('rc', {str(CHECKS / 'telesma-checks.py')!r})\n"
+         "m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+         "def boom(data): raise RuntimeError('b\\u0142\\u0105d')\n"
+         "m.pretooluse = boom\n"
+         "sys.stdin = io.StringIO(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': sys.argv[1]}}))\n"
+         "m.mode_pretooluse()\n")
+r = subprocess.run([sys.executable, "-B", "-c", probe, "git add a.py && git commit -m x"], capture_output=True, text=True)
+ok('"deny"' in r.stdout and "internal error" in r.stdout and r.stdout.isascii(), "an exception inside the hook stops a commit")
+r = subprocess.run([sys.executable, "-B", "-c", probe, "npm test"], capture_output=True, text=True)
+ok(r.stdout.strip() == "" and r.returncode == 0, "… and does not touch a command that is not a commit or a tag")
+(d / "telesma" / "checks" / "boom").mkdir()
+write(d, "telesma/checks/boom/CHECK.md", "---\nkind: rule\nrun: python3 run.py\nwhen: commit\nscope: changed\non_failure: block\n---\n")
+write(d, "telesma/checks/boom/run.py", "import sys\nsys.stdin.read()\nraise SystemExit(1)\n")
+write(d, "telesma/config.md", "# Config\n\n" + checks_section("yes", "\n### boom\n- **When**: commit\n") + "\n## Permissions\n")
+write(d, "a.py", "x = 1\n")
+dec, txt, _ = bash(d, "git add a.py && git commit -m x")
+ok(dec == "deny" and "check-crashed" in txt, "a module that broke blocks (it checked nothing)")
+fp = re.search(r"check-crashed\].*?" + FP, txt).group(1)
+write(d, "telesma/state/CHECK_EXCEPTIONS.md", f"- `{fp}` boom — known, being fixed (owner)\n")
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "… and the human can let it through by fingerprint")
+shutil.rmtree(d)
+
+print("Audit fixes: dependencies")
+d = new_repo(extra="\n### dependencies\n- **When**: commit, ci\n")
+write(d, "package.json", json.dumps({"dependencies": {"bad name": "1.0.0", "../../etc": "1"}}))
+dec, txt, _ = bash(d, "git add package.json && git commit -m x")
+ok(dec == "deny" and "not-found" in txt and "did not run" not in txt and "check-crashed" not in txt,
+   "a name no registry can hold is reported, not sent — and does not break the check")
+write(d, "package.json", "{}")
+write(d, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["requests"]\n')
+r = subprocess.run([sys.executable, "-B", "-c",
+                    "import sys, runpy; sys.modules['tomllib'] = None; sys.argv = ['run.py']; "
+                    f"runpy.run_path({str(d / 'telesma' / 'checks' / 'dependencies' / 'run.py')!r}, run_name='__main__')"],
+                   input="pyproject.toml\n", capture_output=True, text=True, env={**os.environ, "TELESMA_ROOT": str(d)})
+ok('"not-checked"' in r.stdout and "TOML" in r.stdout, "a Python without a TOML reader says pyproject.toml was NOT checked")
+shutil.rmtree(d)
+probe = "import sys; sys.path.insert(0, sys.argv[1]); import _net; print(_net.address('npm')); print(_net.Cache('x').path)"
+r = subprocess.run([sys.executable, "-B", "-c", probe, str(CHECKS)], capture_output=True, text=True,
+                   env={**{k: v for k, v in os.environ.items() if k != "TELESMA_CHECKS_TEST"},
+                        "TELESMA_REGISTRY_NPM": "http://127.0.0.1:9/evil", "TELESMA_CACHE": "/tmp/evil-cache"})
+ok("registry.npmjs.org" in r.stdout and "evil" not in r.stdout,
+   "TELESMA_REGISTRY_* / TELESMA_CACHE without the test flag are ignored")
+sys.path.insert(0, str(CHECKS))
+import _net as net_mod  # noqa: E402
+sys.path.pop(0)
+ok(net_mod.quote("@scope/name") == "@scope%2Fname" and net_mod.quote("a b?c#d") == "a%20b%3Fc%23d",
+   "package names are URL-quoted into one path segment")
+try:
+    net_mod.fetch("http://127.0.0.1:9/bad name")
+    reached = "no exception"
+except net_mod.NoNetwork:
+    reached = "NoNetwork"
+except Exception as ex:      # noqa: BLE001
+    reached = type(ex).__name__
+ok(reached == "NoNetwork", "an invalid URL is 'not checked', never a crash (http.client.InvalidURL)")
+
+print("Audit fixes: tests check")
+d = new_repo()
+commit_file(d, "src/calc.py", "def add(a, b):\n    return a + b\n")
+T0 = "from src.calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_add_neg():\n    assert add(-1, -2) == -3\n"
+commit_file(d, "tests/test_calc.py", T0)
+commit_file(d, "tests/test_login_flow.py", "def test_login():\n    assert 1 + 1 == 2\n")
+
+
+def attempt(content=None, cmd="git add -A && git commit -m x", path="tests/test_calc.py", before=None):
+    if before:
+        before()
+    if content is not None:
+        write(d, path, content)
+    dec_, txt_, _ = bash(d, cmd)
+    gitc(d, "reset", "-q", "--hard")
+    gitc(d, "clean", "-qfd", "--", "tests", "src", "attic")      # not the whole tree: telesma/ is untracked here
+    return dec_, txt_
+
+
+dec, txt = attempt(T0.replace("    assert", "    # assert").replace(" == 3\n", " == 3\n    pass\n").replace(" == -3\n", " == -3\n    pass\n"))
+ok("test-without-assertion" in txt and "fewer-assertions" in txt, "assertions commented out: counted as gone")
+dec, txt = attempt(T0.replace("assert add(1, 2) == 3", "assert add(1, 2) == add(1, 2)").replace("assert add(-1, -2) == -3", "assert 3 == 3"))
+ok("test-without-assertion" in txt, "both sides identical / two literals: an empty assertion")
+dec, txt = attempt(T0.replace("def test_add()", "@pytest.mark.xfail\ndef test_add()"))
+ok(dec == "deny" and "skip-without-reason" in txt, "@pytest.mark.xfail without a reason blocks")
+dec, txt = attempt(T0.replace("def test_add()", '@pytest.mark.xfail(reason="flaky on CI, issue 12")\ndef test_add()'))
+ok(dec is None and "skip-with-reason" in txt, "xfail with reason= warns")
+dec, txt = attempt(T0.replace("\n\n\ndef test_add()", "\npytestmark = pytest.mark.skip\n\n\ndef test_add()", 1))
+ok(dec == "deny" and "skip-without-reason" in txt, "module-level pytestmark = pytest.mark.skip blocks")
+dec, txt = attempt(T0.replace("    assert add(1, 2) == 3", "    pytest.skip()\n    assert add(1, 2) == 3"))
+ok(dec == "deny" and "skip-without-reason" in txt, "pytest.skip() in the body without a text blocks")
+dec, txt = attempt(T0.replace("    assert add(1, 2) == 3", '    if sys.platform == "win32":\n        pytest.skip("no fork on Windows")\n    assert add(1, 2) == 3'))
+ok(dec is None and "skip-with-reason" in txt, "a conditional pytest.skip('…') with a text only warns")
+dec, txt = attempt(T0.replace("    assert add(-1, -2) == -3", "    return\n    assert add(-1, -2) == -3"))
+ok(dec == "deny" and "skip-without-reason" in txt, "return as the first statement of a test blocks")
+dec, txt = attempt(T0.replace("def test_add()", "def _test_add()").replace("def test_add_neg()", "def disabled_add_neg()"))
+ok(dec == "deny" and "tests-removed" in txt, "tests renamed so the runner no longer collects them: tests-removed blocks")
+dec, txt = attempt(cmd="git commit -m x", before=lambda: ((d / "attic").mkdir(exist_ok=True),
+                                                         gitc(d, "mv", "tests/test_calc.py", "attic/calc_old.txt")))
+ok(dec == "deny" and "test-deleted" in txt, "a test file renamed out of the test pattern counts as deleted")
+dec, txt = attempt(cmd="git commit -m x", before=lambda: gitc(d, "rm", "-q", "tests/test_login_flow.py"))
+ok(dec == "deny" and "tests-removed" in txt, "a deleted test file without a module of the same name: tests-removed blocks")
+dec, txt = attempt(cmd="git commit -m x", before=lambda: ((d / "tests" / "unit").mkdir(exist_ok=True),
+                                                         gitc(d, "mv", "tests/test_calc.py", "tests/unit/test_calc.py")))
+ok(dec is None and "tests-removed" not in txt and "test-deleted" not in txt, "a test file moved to another test path is not a removal")
+dec, txt = attempt(T0.replace("\n\ndef test_add_neg():\n    assert add(-1, -2) == -3\n", ""), before=lambda: write(
+    d, "tests/test_calc_neg.py", "from src.calc import add\n\n\ndef test_add_neg():\n    assert add(-1, -2) == -3\n"))
+ok("tests-removed" not in txt, "a test moved to another file in the same commit is not removed")
+dec, txt = attempt(cmd="git commit -m x", before=lambda: gitc(d, "rm", "-q", "tests/test_calc.py", "src/calc.py"))
+ok(dec is None, "a module deleted together with its tests is still cleanup")
+shutil.rmtree(d)
+
+print("Audit fixes: sast")
+d = new_repo()
+write(d, "src/db.py", "def q(cur, name):\n    cur.execute(\n        f\"SELECT * FROM u WHERE n = '{name}'\")\n")
+dec, txt, _ = bash(d, "git add src/db.py && git commit -m x")
+ok(dec == "deny" and "sql-concatenation" in txt and "src/db.py:2" in txt, "a call continued on the next line is read as one line")
+write(d, "src/db2.py", "def q(cur, name):\n    cur.execute(f\"SELECT * FROM u WHERE n = '{name}'\")  # nosec\n")
+dec, txt, _ = bash(d, "git add src/db2.py && git commit -m x")
+ok(dec is None and "nosec-suppression" in txt and "sql-concatenation]" not in txt, "nosec still suppresses — and is reported as a warning")
+write(d, "src/db3_spec.py", "def q(cur, name):\n    cur.execute(f\"SELECT * FROM u WHERE n = '{name}'\")\n")
+dec, txt, _ = bash(d, "git add src/db3_spec.py && git commit -m x")
+ok(dec == "deny" and "sql-concatenation" in txt, "a file named like a test that holds no test is checked like production code")
+write(d, "tests/test_db.py", "def test_q(cur):\n    cur.execute(f\"SELECT * FROM u WHERE n = '{1}'\")\n    assert cur.rowcount\n")
+dec, txt, _ = bash(d, "git add tests/test_db.py && git commit -m x")
+ok("sql-concatenation" not in txt, "a real test file stays exempt")
+write(d, "src/h_spec.py", "import requests\nr = requests.get(url, verify=False)\n")
+dec, txt, _ = bash(d, "git add src/h_spec.py && git commit -m x")
+ok("tls-disabled" in txt, "weakenings: the same rule — no test in the file, no exemption")
+shutil.rmtree(d)
+spec_s = importlib.util.spec_from_file_location("sast", CHECKS / "sast" / "run.py")
+sast = importlib.util.module_from_spec(spec_s)
+spec_s.loader.exec_module(sast)
+ok(sast.SECRET_RULE.search("python.jwt.security.jwt-hardcode.jwt-python-hardcoded-secret")
+   and not sast.SECRET_RULE.search("python.lang.security.audit.formatted-sql-query"),
+   "semgrep rules about secrets in code are recognised (their matched line is not shown)")
+probe = "import os, sys; sys.path.insert(0, sys.argv[1]); import run; print(run.semgrep_available() or not __import__('shutil').which('semgrep'))"
+r = subprocess.run([sys.executable, "-B", "-c", probe, str(CHECKS / "sast")], capture_output=True, text=True,
+                   env={**{k: v for k, v in os.environ.items() if k != "TELESMA_CHECKS_TEST"}, "TELESMA_SEMGREP": "none"})
+ok(r.stdout.strip() == "True", "TELESMA_SEMGREP=none without the test flag does not switch semgrep off")
+
+print("Audit fixes: intent — a guard named in a comment guards nothing")
+MAP_A = ("# Attack surface map\n\n- **Session**: cookie\n\n## Roles\n\n| Role | Who | Guard in code |\n|---|---|---|\n"
+         "| anonymous | anyone | — |\n| doctor | doctors | `Depends(require_doctor)` |\n| admin | admins | `Depends(require_admin)` |\n\n"
+         "## Routes\n\n| Route | Roles | Ownership | File |\n|---|---|---|---|\n"
+         "| GET /patients/{id} | doctor | patient | src/api.py |\n| POST /patients | doctor | patient | src/api.py |\n\n"
+         "## Outbound\n\n| Kind | Value | Purpose |\n|---|---|---|\n")
+API_A = ('from fastapi import APIRouter, Depends\nrouter = APIRouter()\n\n@router.get("/patients/{id}")\n'
+         'def get_patient(id: int, u=Depends(require_doctor)):\n    return {}\n')
+d = new_repo()
+commit_file(d, "telesma/state/SECURITY_MAP.md", MAP_A)
+commit_file(d, "src/api.py", API_A)
+write(d, "src/api.py", API_A + '\n@router.post("/patients")\ndef create_patient(body: dict):  # TODO Depends(require_doctor)\n    return {"ok": 1}\n')
+dec, txt, _ = bash(d, "git add src/api.py && git commit -m x")
+ok(dec == "deny" and "guard-mismatch" in txt, "the guard only in a comment: guard-mismatch blocks")
+write(d, "src/api.py", API_A + '\n@router.post("/patients")\ndef create_patient(body: dict, u=Depends(require_doctor)):  # doctors only\n    return {"ok": 1}\n')
+dec, txt, _ = bash(d, "git add src/api.py && git commit -m x")
+ok("guard-mismatch" not in txt, "the guard in the signature (with a comment after it) passes")
+shutil.rmtree(d)
+sys.path.insert(0, str(CHECKS))
+import _routes as routes_mod  # noqa: E402
+sys.path.pop(0)
+ok(routes_mod.without_comments('x = "a # b"  # Depends(g)\n', "a.py").strip() == 'x = "a # b"'
+   and "requireRole" not in routes_mod.without_comments('app.get("/x", h) // requireRole("a")\n/* requireRole("b") */', "a.ts"),
+   "comments are cut, string literals stay")
+
+print("Audit fixes: overrides only with the test flag, counters not constant")
+d = new_repo()
+(d / "big.bin").write_bytes(b"\x01" * 6_000_000)
+gitc(d, "add", "big.bin")
+r = subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--pretooluse"],
+                   input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}, "cwd": str(d)}),
+                   capture_output=True, text=True,
+                   env={**{k: v for k, v in os.environ.items() if k != "TELESMA_CHECKS_TEST"},
+                        "CLAUDE_PROJECT_DIR": str(d), "TELESMA_HYGIENE_MAX_MB": "10"})
+ok("file-too-large" in r.stdout and '"deny"' in r.stdout, "TELESMA_HYGIENE_MAX_MB without the test flag does not raise the limit")
+shutil.rmtree(d)
+for mod in ("intent", "red-team", "dead-entry"):
+    src = (CHECKS / mod / "run.py").read_text(encoding="utf-8")
+    ok("content_fingerprint='counter'" not in src, f"{mod}: the '+N more' finding has no constant fingerprint")
+del os.environ["TELESMA_SEMGREP"]
 
 # --- Validation -------------------------------------------------------------------------------
 print("Config validation")

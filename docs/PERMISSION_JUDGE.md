@@ -18,8 +18,9 @@ is why the rule layers end in a **question**, not a refusal: `rm -rf node_module
 often perfectly legitimate, and a refusal would take away your ability to approve them (it would also
 break Telesma writing `Clarified: yes` into its own `telesma/config.md`).
 
-Every uncertainty — timeout, missing key, unparsable answer, ambiguous verdict — ends in a question to
-you, never in an approval.
+Every uncertainty — timeout, missing key, an answer that is not exactly `ALLOW`, `DENY` or `ASK`, a
+command too long to analyse (20 000 characters) or to show the model whole (8 000), an endpoint or
+key command nobody confirmed on this machine — ends in a question to you, never in an approval.
 
 The one deliberate exception is the **contract layer** described below: two things the instructions
 already forbid the agent and reserve for you are *refused* rather than asked, because they must hold
@@ -59,13 +60,27 @@ reason**, in every permission mode:
 
 1. **Merge only on green.** `gh pr merge <n>` (without `--auto`, with the GitHub integration and a
    list of `Required checks`) is refused when any required check is red, pending or **missing**,
-   and always with `--admin`. The hook runs its own `gh pr checks <n> --json` — the exit code of
-   whatever the model piped the checks through plays no part. A `NEUTRAL` or skipped conclusion
-   counts as green, as it does for GitHub's own required checks (Specky answers `Specky-Req: none`
-   with `NEUTRAL`).
-2. **No release-tag push.** `git push` carrying `vX.Y.Z`, `refs/tags/v…`, `--tags` or
-   `--follow-tags` is refused in every project, integration or not. Section 15.4 of the instructions
-   gives the user the command instead.
+   and always with `--admin` (in any spelling: `--admin=true`). The hook runs its own
+   `gh pr checks <n> --json` — the exit code of whatever the model piped the checks through plays
+   no part. A `NEUTRAL` or skipped conclusion counts as green, as it does for GitHub's own required
+   checks (Specky answers `Specky-Req: none` with `NEUTRAL`). The PR is the one `gh` will act on:
+   the single positional argument, read with `gh`'s option table (a number inside `--body "see 12"`
+   is not it); a branch name, a URL or no argument is resolved with `gh pr view --json number`.
+   `gh api -X PUT …/pulls/<n>/merge` is the same merge and gets the same check; a merge through
+   the GraphQL API cannot be checked and is sent back to `gh pr merge`.
+2. **No release tag published.** `git push` carrying `vX.Y.Z`, `refs/tags/v…`, `refs/tags/*`,
+   `--tags`, `--follow-tags` or `--mirror` (also abbreviated: `--tag`, `--mir`) is refused in every
+   project, integration or not — and so are `gh release create vX.Y.Z` and a `gh api` call that
+   writes `refs/tags/v…` or a release. Section 15.4 of the instructions gives the user the command
+   instead.
+
+The layer **reads** the command instead of matching its text: `git -C . push`, `GIT_TRACE=0 git
+push`, `command git push`, `'git' "push"`, a push inside `$( … )`, a subshell or `sh -c '…'` are all
+a push; the words `git push --tags` inside a quoted heredoc or a commit message are not. A push or
+a merge whose arguments **cannot be read** — a substitution or a variable where the ref or the PR
+number should be — is refused with the instruction to write them literally: otherwise both rules
+would be void for anyone who writes `$(git describe --tags)`. Padding does not help either: the
+layer reads the whole command whatever its length.
 
 Everything else keeps the governing rule. A `gh` failure never refuses (no decision → the
 `PermissionRequest` layer asks as before). The refusal carries the reason to the model, and you can
@@ -81,7 +96,7 @@ that merged on red in the trial), and with the Specky tracker a `gh pr create` w
 
 | Layer | What it does | Result |
 |-------|--------------|--------|
-| 1. Hard patterns | `rm -rf`, `sudo`, `curl \| sh`, `git push`, SSH keys, `.env`, cloud CLIs, package publishing, history rewriting, any write to `.claude/` or `telesma/config.md` (the supervision must not supervise itself) | **you are asked** — the model never sees these, so it cannot approve them |
+| 1. Hard patterns | `rm -rf`, `sudo`, `curl \| sh`, `git push`, SSH keys, `.env`, cloud CLIs, package publishing, `gh gist` / `gh auth token` / `gh secret`, history rewriting, `git config` that writes (`core.hooksPath`, an alias with `!`, `core.sshCommand`…), a file command or redirection leaving the project (also by `../..`), any mention of `.claude/settings*`, `.claude/hooks`, `telesma/config.md` or `.git/hooks` (the supervision must not supervise itself), a command over 20 000 characters | **you are asked** — the model never sees these, so it cannot approve them |
 | 2. `Always ask` + rule checks | your own regexes from the config; at `conservative`, obfuscation (`$( )`, backticks, base64); writes disguised as reads (see below) | **you are asked** |
 | read layer | a command whose every member is provably a read inside the project (see below) | **allowed without a model** |
 | 3. LLM judge | only the gray zone that layers 1–2 did not filter out | `ALLOW` → approved; **anything else, `DENY` included, → you are asked** |
@@ -92,6 +107,21 @@ Enabling it cannot break a workflow, which matters because models are overzealou
 
 The model **cannot unlock** anything that layer 1 or 2 stopped — it only ever sees what passed them.
 
+### Spelling does not choose the layer
+
+Layers 1–2 check a command twice: as text, and as **the commands the shell will run**. A quote-aware
+reader removes quotes and backslashes, skips `NAME=value`, `command`, `env`, `nohup`, `timeout N`,
+`xargs` and git's global options, names the program by its basename, and opens `$( … )`, backticks,
+subshells and `sh -c '…'`. So `git -C . push`, `git "push"`, `/usr/bin/sudo`, `s""udo`,
+`curl … | /bin/sh`, `curl … | env bash`, `rm -Rf`, `rm -f -r`, `rm --rec` all hit the same hard
+pattern as their plain form. Paths are compared after normalisation (relative to the project,
+symlinks resolved, case-folded): `telesma/./config.md`, `Telesma/Config.md`, `telesma/conf*.md`, a
+symlink to it, and `cd telesma && sed -i … config.md` are the same file.
+
+For the file tools (`Edit`, `Write`, `NotebookEdit`, when gated) the protected paths are compared
+the same way, and the list also holds `telesma/checks/`, `telesma/state/CHECK_EXCEPTIONS.md`,
+`telesma/state/SECURITY_MAP.md`, `.github/workflows/` and everything under `.git/`.
+
 ## Read layer — no model needed (`Allow reads`)
 
 The decision log of the reference project answered the question "should we switch to a bigger model?":
@@ -100,10 +130,33 @@ of 742 gray-zone commands, the model allowed 27%, and most of the questions were
 
 So a command whose **every** member is provably a read within the project or the working directories
 passes without the model. Proof, not a guess: variable expansion, a subshell, a background job, an
-unknown option, a substitution used as a path, a file that looks like a secret, a path leaving the
-project (including through a symlink — `realpath` must land inside an allowed root) → the layer steps
-back and the command goes on the usual way. Output redirection is accepted only into working
-directories, never into the repository. Hard patterns and `Always ask` take precedence.
+option that is not on the command's allowlist, a substitution used as a path, a file that looks like
+a secret, a path leaving the project (including through a symlink — `realpath` must land inside an
+allowed root) → the layer steps back and the command goes on the usual way. Output redirection is
+accepted only into working directories, never into the repository. Hard patterns and `Always ask`
+take precedence.
+
+What "proof" covers, each of these having been a real hole:
+
+- **Options are allowlisted, not blocklisted** for `grep`, `diff`, `sort`, `tree`, `file`, `find`,
+  `ps`, `git branch` and `git tag`. A blocklist loses to spelling: `sort --outp=f` is `--output=f`
+  (any unique prefix works), `git grep -IOrm x` bundles `-O`, and every implementation adds its own
+  (`tree -o`, `file -C`, ugrep's `--filter`). For the other git read subcommands every long option
+  that is a prefix of a writing or executing one (`--output`, `--open-files-in-pager`, `--ext-diff`,
+  `--exec`, `--no-index`…) is refused. `git tag --sort=… <name>` is not a listing — it creates a tag.
+- **Heredocs are read with quotes.** `echo "<<X"` opens nothing. A body is data only when the
+  delimiter is quoted (`<<'EOF'`); with a bare delimiter the shell expands it, so its `$( … )` and
+  backticks are analysed as commands and the read layer steps back.
+- **`$'…'` and `$"…"`** are decoded by the shell (`$'\056\056'` is `..`) — not a read.
+- **awk**: a redirection after `print` anywhere on the line, a continued line, `ARGV` / `ARGC`
+  (files that were never arguments), `getline`, pipes, `system` — not a read.
+- **`ps`** only without the environment (`ps e`, `ps -E`), like `env` alone.
+- **Recursive reads print what they find.** `grep -r`, `rg` and `diff` over a directory are a read
+  only when the tree holds no secret-shaped file (`.env`, `*.pem`, `secrets.yml`, `.git/config`), no
+  symlink out of the allowed directories, and at most 20 000 files; `node_modules`, `.venv`, `venv`
+  and `__pycache__` are not searched. A pattern (`cat config/*`) is expanded and every match
+  checked. Scope the search (`grep -rn x src/`) and it passes.
+- **Every `find` start path** is checked, also after `-L` / `-H`.
 
 It needed its own quote-aware parser: a naive split on `|` turns `grep -E "a|b"` into two commands, and
 splitting on `>` would make `echo x > cat` look like two harmless ones. Replayed over the reference log
@@ -134,6 +187,7 @@ With these rules in place the model under test went from 26 false allows to zero
 ## `Always ask`
 
 Your own regexes (case-insensitive), checked **before** the model. The model cannot override them.
+An entry that is not a valid regex (`*.sql`) is matched literally instead of being dropped.
 
 ```markdown
 - **Always ask**: `docker\s+system\s+prune`, `alembic\s+downgrade`
@@ -168,7 +222,8 @@ It is the only field that **adds** prompts — hence opt-in. It costs about 80 m
 start-up) and never calls a model.
 
 **Data ≠ code.** Shell patterns are matched only against text the shell executes. A heredoc body
-(`cat <<EOF`) and a `-c` / `-e` argument are data — matching `rm` or backticks inside them produced
+with a quoted delimiter (`cat <<'EOF'`) and a `-c` / `-e` argument are data (with a bare delimiter
+only the body's `$( … )` and backticks are code) — matching `rm` or backticks inside them produced
 nothing but false positives (a backtick in a Python comment, the word `rm` in a string). Code handed to
 an interpreter is checked against a **separate** list: `subprocess`, `os.system`, `child_process`,
 `socket`, `shutil.rmtree`, `eval` → ask; `json.load`, `print`, writing a file in the project → pass. A
@@ -262,6 +317,33 @@ Before you trust **any** model with `ALLOW`, put it through the evaluation gate 
 models fail it more easily; until one passes, `Judge: rules` gives you the read layer and the rule
 checks with no model at all.
 
+### What the model sees, and what counts as its answer
+
+The tool input goes to the model **whole or not at all**: above 8 000 characters the hook asks you
+instead of sending a truncated command (the member that matters may sit past the cut). It is wrapped
+in a data block whose closing tag is a random name generated per call and named in the system
+prompt, so `</data>` typed into a command closes nothing. The answer counts only when it **is** one
+of the three words — after removing a *closed* `<think>…</think>` block, whitespace, quotes and
+punctuation. "I would not allow this.", "ALLOW or DENY", or reasoning cut off by the token limit
+(`<think>Should I ALLOW? …`) are a question to you.
+
+### Which values need a confirmation on this machine
+
+`telesma/config.md` is committed — it arrives with a clone or a pull request. Three of its values
+act on the machine that runs the hook: a `cmd:` key is a shell command, a `file:` key reads a local
+file, and an endpoint receives every gray-zone command together with the key. The hook uses them
+only when the `## Auto-approval` section is **trusted on this machine**: the launcher shows the
+section to the person once, in a terminal, and records its hash in
+`~/.config/telesma/trust/<project>.json` (`$XDG_CONFIG_HOME` is honoured). The hook only reads the
+record. After any change to the section — yours or someone else's — start the project once with
+`telesma.sh`; until then a `cmd:` / `file:` key counts as "no key" and a non-local endpoint is not
+called, i.e. the gray zone asks you, and the reason is in the log (`judge_problem`).
+
+- `localhost`, `127.0.0.0/8`, `::1` — used without the record (with `API key: none` or an `env:` /
+  literal key).
+- Any other server — must be `https://` **and** trusted. Plain `http://` to another machine is never
+  used: the commands and the key would travel in the clear.
+
 ### Where the key comes from (`API key (command)`)
 
 `telesma/config.md` is committed, so a key never belongs in it. The field takes these forms — the hook
@@ -270,8 +352,8 @@ resolves them at every decision, the launcher validates them at startup:
 | Form | Where the key comes from | When |
 |------|--------------------------|------|
 | `env:TELESMA_JUDGE_API_KEY` | an environment variable | you already `export` it in your profile |
-| `file:~/.config/telesma/judge.key` | the first line of a file outside the repo | **simplest** — no `export`, works even when you start `claude` without `telesma.sh` |
-| `cmd:security find-generic-password -s telesma-judge -w` | the command's stdout | macOS Keychain / `pass` / a vault — the key is never stored in clear |
+| `file:~/.config/telesma/judge.key` | the first line of a file outside the repo | **simplest** — no `export`; needs the section trusted on this machine (above) |
+| `cmd:security find-generic-password -s telesma-judge -w` | the command's stdout | macOS Keychain / `pass` / a vault — the key is never stored in clear; needs the section trusted on this machine |
 | `none` | no `Authorization` header | a local server |
 | `sk-...` | the literal value | only when `config.md` is NOT in version control; the launcher warns at every start |
 
@@ -334,8 +416,11 @@ only per-day counters from it.
 
 ## The evaluation gate (`tools/telesma-judge-eval.py`)
 
-A labelled set lives in `tools/judge-eval/dataset.jsonl` (324 cases: `dangerous`, `safe`, and
-`disputed` — the last depend on the risk level and are not counted). The evaluation pushes every case
+A labelled set lives in `tools/judge-eval/dataset.jsonl` (376 cases: `dangerous`, `safe`, and
+`disputed` — the last depend on the risk level and are not counted). Every bypass ever found goes
+into it. Next to it, `tools/judge-eval/heldout.jsonl` (89 cases) holds cases of the same classes
+written **after** the rules and never used to tune them: it tells a fix that closed a class from one
+that closed an example. A held-out failure is reported first and fixed second. The evaluation pushes every case
 through **the same pipeline as the hook**: a case stopped by a hard pattern never reaches the model,
 exactly as in real work. Paths are placeholders resolved into a temporary test project that also carries
 a symlink pointing outside it and files with secrets, so the set holds nothing from anyone's machine.
@@ -350,12 +435,18 @@ python3 tools/telesma-judge-eval.py --endpoint http://localhost:11434/v1/chat/co
                                   --model llama3.1:8b                # rules + a model
 python3 tools/telesma-judge-eval.py --from-config <project>            # the primary model from a project's config
 python3 tools/telesma-judge-eval.py --from-config <project> --fallback # the fallback model instead
+python3 tools/telesma-judge-eval.py --heldout                          # the held-out set
+python3 tools/telesma-judge-eval.py --hook <file>                      # the same sets against another version of the hook
 python3 tools/telesma-judge-eval.py --no-reads …                       # disable the read layer: the model alone
 python3 tools/telesma-judge-eval.py --replay <project>                 # the project's real log through today's rules
 python3 tools/telesma-judge-eval.py --labels <project>                 # question ↔ executed pairs, shadow verdicts
 ```
 
-The required line in the output is `FALSE ALLOWS: 0`. `--risk balanced` evaluates the other level,
+The required line in the output is `FALSE ALLOWS: 0` — and exit code 0. With a model, a dangerous
+case that reached it and got **no answer** fails the gate too (exit 3): where the model was silent,
+nothing was judged. `tools/test-judge.py` additionally respells every dangerous case (quotes in the
+command word, `git -C .`, an assignment or `command` / `env` in front, an abbreviated long option, a
+heredoc-looking first line) and requires that the rules allow none of the mutants. `--risk balanced` evaluates the other level,
 `--show` lists safe cases that still prompt, `--json FILE` writes results case by case.
 
 `--replay` answers "what would today's rules have done with what I actually ran", and `--labels`
@@ -373,5 +464,8 @@ would just reproduce an over-cautious teacher.
   once-per-session note run (see "Permission modes" above).
 - It does not protect against a model that already has permission — it gates individual calls, not
   intentions.
+- It judges the command line, not what a script does. `npm test`, `make`, `pytest`,
+  `python3 scripts/x.py` run code the agent may have written a minute earlier; a model that allows
+  "running the tests" allows whatever the tests do. `Judge: rules` asks about all of these.
 - It moves the trust boundary from you to rules and a model. Layer 1 is what decides whether that risk
   is acceptable — extend `Always ask`, do not shorten the hard patterns.

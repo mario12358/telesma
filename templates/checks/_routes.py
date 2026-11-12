@@ -53,7 +53,8 @@ LITERAL = re.compile(r'''("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.
 
 def git(root, *args, limit=60):
     try:
-        r = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True, timeout=limit)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', *args], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=limit)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -497,6 +498,19 @@ def guard_candidates(route):
         if pair not in out:
             out.append(pair)
     return out
+
+
+def without_comments(text, p=''):
+    """The text without comments (string literals stay): a guard named in a comment guards nothing."""
+    hash_comment = p.endswith(('.py', '.rb', '.php'))
+    slash_comment = not p.endswith(('.py', '.rb'))
+    out = []
+    for line in text.split('\n'):
+        masked = LITERAL.sub(lambda m: 'x' * len(m.group(0)), line)
+        cuts = [k for k in ((masked.find('#') if hash_comment else -1), (masked.find('//') if slash_comment else -1)) if k >= 0]
+        out.append(line[:min(cuts)] if cuts else line)
+    text = '\n'.join(out)
+    return re.sub(r'/\*.*?\*/', '', text, flags=re.S) if slash_comment else text
 
 
 def contains_guard(window, token):

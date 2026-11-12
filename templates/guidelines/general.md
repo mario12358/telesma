@@ -26,6 +26,7 @@ keywords: clean code, naming, comments, testing, git, refactoring, errors, shell
 - Fix a failing test by changing the code, not the test — weaken an assertion or skip only when the test is wrong with respect to the requirements (with a justification and an entry in the problem log)
 - "0 tests executed" is a configuration error, not a success — even with exit code 0
 - Verify a test of a RULE (validation, permission, limit, threshold, barrier) by mutation before you consider it done: disable the rule in production code and run the test — it must fail. Green under mutation = the test guards nothing (most often: the test data never enters the branch, the assertion counts elements instead of pointing at a specific one, the scenario does not tell two rules apart)
+- A test never touches the person's own setup: a test that runs an installer, a CLI's `install`/`update-shell`/`login`, or anything that writes shell startup files, `~/.config`, a keychain or a crontab gets an environment built from an allow-list (never `os.environ` copied whole) with `HOME`, `ZDOTDIR` and `XDG_CONFIG_HOME` in a temporary directory — an inherited `ZDOTDIR` sends the write to the real `~/.zshenv`. The allow-list keeps `PATH`, `TMPDIR`, `LANG` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, lower-case too): in a sandbox the network goes only through that proxy, and a test without them fails on DNS
 - Mutation procedure, no exceptions: (1) mutate ONE line and mark it with a `MUTANT` comment on a separate line ABOVE the change, not inside the expression under test; (2) revert with the reverse edit, NEVER `git checkout`/`git restore` — on a file with uncommitted work that is deletion, not reverting; (3) a test run under mutation must not write to repository files — send its output to a temporary directory; (4) after reverting, run the test once more — green is the proof that the mutant is gone
 
 ## Errors
@@ -36,10 +37,13 @@ keywords: clean code, naming, comments, testing, git, refactoring, errors, shell
 
 ## Git
 
-- Specific `git add <file>`, never `git add -A` / `git add .`
-- One commit = one logical change
-- Message in the imperative mood ("add X", not "added X")
+- Commits are made by the task tool (`done`, `commit --kind`), never by `git add` / `git commit` — it commits everything `git status` shows, so a file that must not land in the repository goes into `.gitignore` before `done`
+- One task = one logical change; a `-m` message in the imperative mood ("add X", not "added X")
 - Do not commit secrets (.env, API keys, credentials)
+
+## Tooling
+
+- `telesma/` and `.claude/` hold Telesma's files, not the project's code: the skeleton's linter, formatter and typechecker configs exclude them (`extend-exclude = [".claude", "telesma"]` under `[tool.ruff]`, `exclude` for mypy / pyright, `ignores` in `eslint.config.js`, `exclude` in `tsconfig.json`) — otherwise the first lint run reports findings in files you must not edit
 
 ## Shell commands
 

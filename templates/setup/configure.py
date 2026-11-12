@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import socket
 import shutil
 import sys
@@ -56,9 +57,14 @@ PROFILES = {
              'checks': 'standard'},
 }
 
-# Permission rules every project gets (the loop's own git operations and directory listing).
-BASE_ALLOWED = ['Bash(mkdir:*)', 'Bash(ls:*)', 'Bash(git add:*)', 'Bash(git commit:*)', 'Bash(git status)',
-                'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git tag:*)', 'Bash(git describe:*)']
+# Permission rules every project gets: reading git and listing directories. Commits, phase tags,
+# pushes and PRs are the task tool's (format 21+) and the guard refuses them from the agent, so no
+# rule allows them (format 23 removed the old ones, templates/setup/retired_rules.py).
+BASE_ALLOWED = ['Bash(mkdir:*)', 'Bash(ls:*)', 'Bash(git status)', 'Bash(git diff:*)', 'Bash(git log:*)',
+                'Bash(git tag -l:*)', 'Bash(git tag --list:*)', 'Bash(git describe:*)']
+# Rules earlier versions wrote by default; dropped whenever the wizard rewrites the list
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from retired_rules import RETIRED as RETIRED_ALLOWED  # noqa: E402
 
 # Per stack: how to recognise it, the commands for ## Tests and the permission rules.
 # `greenfield` = the commands proposed when the project has no code yet (the spec only).
@@ -303,7 +309,8 @@ def set_allowed(text, rules):
     j = head + 1
     while j < end and lines[j].startswith('  - '):
         j += 1
-    kept = [l for l in lines[head + 1:j] if l[4:].strip() not in STACK_ALLOWED and l[4:].strip() not in BASE_ALLOWED]
+    kept = [l for l in lines[head + 1:j] if l[4:].strip() not in STACK_ALLOWED and l[4:].strip() not in BASE_ALLOWED
+            and l[4:].strip() not in RETIRED_ALLOWED]
     new = [f'  - {r}' for r in BASE_ALLOWED + list(rules)] + kept
     if lines[head + 1:j] == new:
         return text, False
@@ -362,7 +369,10 @@ def part_commands(root, parts):
         real = lambda v: v not in ('none', '') and not v.startswith('[')
         # tests of several parts run in one shell line: a subshell per part, or the second
         # `cd` would be relative to the first part's directory
-        per.append({k: ((f'(cd {sub} && {v})' if k in ('test', 'full') else f'cd {sub} && {v}') if sub and real(v) else v)
+        # the directory name comes from the project: quoted, so a space does not break the
+        # command and `;` or `$(…)` in a name is a name, not a command
+        q = shlex.quote(sub)
+        per.append({k: ((f'(cd {q} && {v})' if k in ('test', 'full') else f'cd {q} && {v}') if sub and real(v) else v)
                     for k, v in cmd.items()})
     if len(per) == 1:
         return per[0]

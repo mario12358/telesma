@@ -23,6 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # 3.9 is the oldest Python Telesma promises to run on (preflight refuses anything older);
+        # 3.12 is a current one.
+        python: ["3.9", "3.12"]
     steps:
       # Actions pinned to a full commit SHA (the tag stays as a comment); Dependabot bumps them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,15 +35,22 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Configure git identity for fixture repositories
         run: |
           git config --global user.email "ci@example.com"
           git config --global user.name "CI"
           git config --global init.defaultBranch main
-      - name: Shell syntax
+      - name: Shell syntax (every tracked .sh)
         run: |
-          bash -n telesma.sh
-          for f in templates/integrations/*.sh templates/integrations/*/*/setup.sh tools/*.sh; do bash -n "$f"; done
+          git ls-files -z '*.sh' | while IFS= read -r -d '' f; do bash -n "$f" || exit 1; done
+      - name: Python syntax (every tracked .py compiles on this Python)
+        run: |
+          git ls-files -z '*.py' | xargs -0 python3 -m py_compile
+      - name: shellcheck (warnings and errors)
+        # ubuntu-latest ships shellcheck; one run is enough, the scripts are the same on every runner
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: |
+          git ls-files -z '*.sh' | xargs -0 shellcheck -S warning
       - name: Self-tests
         run: tools/test-all.sh

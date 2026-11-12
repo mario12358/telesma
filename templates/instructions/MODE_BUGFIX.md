@@ -43,11 +43,13 @@ You recognise the mode by the `MODE: bugfix` directive at the end of the startup
    - Red → diagnose iteratively (max tries per config), then TELESMA BLOCKED
    - No test → run the nearest logical suite (module/file) or note `no test — verified manually` in the BUGFIXES.md entry
 
-6. **Commit** (if `Auto-commit: yes` in the config):
+6. **Commit** (if `Auto-commit: yes` in the config) — write the `BUGFIXES.md` entry of step 7 first,
+   so it goes into the same commit, then:
    ```bash
-   git add <specific files>
-   git commit -m "Telesma: fix [short description]"
+   <TASK_TOOL> commit --kind bugfix -m "fix [short description]"
    ```
+   It runs the tests and the checks on everything changed and commits it with the footer; a refusal
+   names what to fix. Leave nothing in the tree that is not part of the fix.
 
 7. **Entry in `telesma/state/BUGFIXES.md`** with the Edit tool (append at the end of the file):
    ```markdown

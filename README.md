@@ -115,6 +115,10 @@ usage limits.
 - **Plan with contracts** — every task carries dependencies, spec references, technology
   guidelines, UI mockup references and acceptance criteria, including "what triggers this in the
   running product". → [Workflow](docs/WORKFLOW.md)
+- **The model writes code, a script runs the loop** — `next` hands out the task with its spec
+  fragment and guidelines; `done` runs the tests and the checks on exactly the files it then
+  commits, ticks the task and writes the history. A hook refuses `git commit`, `git push` and
+  ticking the plan by hand, so the record of what passed is not written by the one being measured.
 - **Selective retrieval** — the spec is never loaded whole; an anchored index points each task at
   the exact line range it needs.
 - **48 technology guidelines** — clean-code rules plus one convention file per language,
@@ -222,8 +226,10 @@ on its own. On Windows Telesma runs in Git Bash, which Claude Code needs there t
 
 **1. Install.** The same one line as above (macOS, Linux, or PowerShell on Windows). It gets what
 is missing, puts Telesma in `~/.telesma` and the `telesma` command in `~/.local/bin` (next to
-`claude`), and adds a desktop shortcut you can ignore. Every start checks for a newer release and
-offers to update (`TELESMA_NO_UPDATE_CHECK=1` turns the check off).
+`claude`), and adds a desktop shortcut you can ignore. The installer puts you on the latest
+release, not on the tip of the branch; every start checks for a newer release and offers to move
+to it (`TELESMA_NO_UPDATE_CHECK=1` turns the check off, `TELESMA_FOLLOW_BRANCH=1` follows the
+branch instead).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mario12358/telesma/main/install.sh | bash
@@ -348,8 +354,10 @@ side in full: [docs/WORKFLOW.md §19](docs/WORKFLOW.md#19-adopting-an-existing-p
    with dependencies, acceptance criteria, and a coverage table mapping every spec section to tasks.
 3. **Startup checks** (every run, no tokens): the launcher validates the plan and the config,
    rotates and repairs state files, applies framework updates and assembles a trimmed prompt.
-4. **The loop**: for each task, load its spec fragment and guidelines → implement → test → verify
-   the acceptance criteria → mark done → update the report → commit specific files.
+4. **The loop**: `next` gives the task with its spec fragment and guidelines → the model implements
+   and verifies the acceptance criteria → `done` runs the tests and checks, ticks the task, writes
+   the history row and commits. A session budget (refusals, attempts, tasks, hours) stops a loop
+   that goes in circles; going on is your answer at the next start.
 5. **End of phase and finish**: the full suite (a regression beats new work), a progress tag and a
    release proposal; at the end `docs/RUNBOOK.md` and `TELESMA COMPLETE`. Stuck → `TELESMA BLOCKED`
    with a concrete question, saved for the next start. The session stays open; everything you say
@@ -397,11 +405,19 @@ Full reference: [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md).
 
 ## Safety
 
+- **A sandbox under every command** — Claude Code's built-in sandbox (macOS, Linux, WSL2): Bash
+  writes only inside the project, reaches only the package registries of your stack and the hosts
+  you list, and cannot read `~/.ssh` or `~/.aws`, whatever the command claims to be. A refused
+  command is never retried outside it. On by default for new projects (`## Sandbox` in the config).
 - **Permission judge** — a Claude Code hook that answers permission prompts on your behalf. Its
   governing rule: **it only removes prompts, it never adds blocks.** Hard patterns (`rm -rf`,
   `sudo`, `git push`, writes to `.claude/` or `telesma/config.md`) and your own "always ask" list
   always reach you; only the gray zone goes to an optional model, and anything but a clear ALLOW
   still asks. → [docs/PERMISSION_JUDGE.md](docs/PERMISSION_JUDGE.md)
+- **A project's config is confirmed per machine** — `telesma/config.md` is committed, and it names
+  commands Telesma runs (tests, linters), the permission mode and the servers it talks to. The
+  first start on a machine — and any start after those values changed — shows them and asks once;
+  a cloned project cannot run a command or pick a permission mode you have not seen.
 - **Quality checks** — triggered by git operations (before a commit, a phase tag, a release tag,
   and in CI), not by the model remembering to run them; a false positive is waived by a human
   only, in `telesma/state/CHECK_EXCEPTIONS.md`. → [docs/CHECKS.md](docs/CHECKS.md)

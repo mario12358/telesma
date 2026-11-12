@@ -79,11 +79,10 @@ Generating a single artifact **does not block** the others. Per target:
 
 1. **Commit** everything that was created (new tests + telesma/artifacts/ if `Commit artifacts: yes` + REPORT.md) **in one commit**:
    ```bash
-   git add tests/screenshots/ e2e/specs/flows/ telesma/state/REPORT.md
-   # when Commit artifacts: yes → git add telesma/artifacts/
-   git commit -m "Telesma: regenerate visual artifacts ([N flows], [M screens])"
+   <TASK_TOOL> commit --kind artifacts -m "regenerate visual artifacts ([N flows], [M screens])"
    ```
-   Section 4 (Git safety) applies — no `git add -A`, no `--no-verify`.
+   It commits what `git status` shows minus `Ignore on commit` (`telesma/artifacts/` stays out unless
+   `Commit artifacts: yes`) — section 4.
 
 2. **Final report** — the signal that the mode has finished:
    ```
@@ -105,7 +104,7 @@ Generating a single artifact **does not block** the others. Per target:
 
 | Mode | What it does | Modifies PLAN.md? | Records? |
 |------|---------|--------------------|---------:|
-| 1 (autonomous) | Works on new tasks in the loop; capture as a side effect (step 11 of the cycle) | ✅ (marks ✅) | Only for the tasks currently being worked on that carry tags |
+| 1 (autonomous) | Works on new tasks in the loop; capture as a side effect (step 6 of the cycle) | ✅ (marks ✅) | Only for the tasks currently being worked on that carry tags |
 | 4 (artifacts) | Backfills artifacts for the existing state; does not choose new tasks | ❌ (read-only) | YES — that is the point of the mode |
 
 **When to use mode 4 instead of 1:**

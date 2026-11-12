@@ -69,7 +69,8 @@ def emit(**z):
 
 def git(root, *args):
     try:
-        r = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True, timeout=20)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', *args], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -173,7 +174,10 @@ def build_dirs(root, files):
 
 
 def sizes(root, files, artifacts_dir, commit_artifacts):
-    limit_mb = float(os.environ.get('TELESMA_HYGIENE_MAX_MB') or 5)
+    # the override is a switch of the self-tests (honoured only with TELESMA_CHECKS_TEST=1); a file the
+    # project really needs goes through an exception by fingerprint, written by the human
+    override = os.environ.get('TELESMA_HYGIENE_MAX_MB') if os.environ.get('TELESMA_CHECKS_TEST') == '1' else None
+    limit_mb = float(override or 5)
     for p in files:
         try:
             mb = os.path.getsize(os.path.join(root, p)) / 1_000_000
@@ -190,7 +194,7 @@ def sizes(root, files, artifacts_dir, commit_artifacts):
             continue
         emit(file=p, line=None, rule='file-too-large', severity='block',
              message=f'file {mb:.1f} MB (limit {limit_mb:g} MB) — do not commit it: keep the data outside the repo or in Git LFS, '
-                     f'add it to .gitignore (limit: TELESMA_HYGIENE_MAX_MB)', content_fingerprint=p)
+                     f'add it to .gitignore', content_fingerprint=p)
 
 
 # --- lockfile-stale ------------------------------------------------------------
@@ -483,7 +487,7 @@ def missing_gitignore(root, files):
 def main():
     point = os.environ.get('TELESMA_POINT', 'commit')
     root = os.environ.get('TELESMA_ROOT') or os.getcwd()
-    from_stdin = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    from_stdin = [l for l in sys.stdin.read().split('\n') if l.strip()]
     scope = Scope(root, point)
     files = sorted(p for p in set(from_stdin) | scope.extra()
                    if not p.startswith('telesma/checks/') and os.path.isfile(os.path.join(root, p)))

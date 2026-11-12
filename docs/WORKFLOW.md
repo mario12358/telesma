@@ -8,6 +8,26 @@ how to feed changes in, and what each mode does. Configuration keys are listed i
 Section numbers such as "section 0.3" refer to the instruction modules in
 `templates/instructions/`, which the launcher assembles into the startup prompt.
 
+**Who does what.** The model writes code; a script runs the loop (state format 21 and later). The
+session calls `tools/telesma-task.py` from your Telesma clone (never copied into the project):
+
+| Command | What the script does |
+|---|---|
+| `next` | Picks the next task (dependencies, active phases), prints it with its spec fragment, guidelines and UI references, and reserves it. With the GitHub integration it first reconciles the PRs, merges the green ones and rebases chains. |
+| `done <id>` | Takes everything `git status` shows (minus `Ignore on commit`), runs the `## Tests` commands and the commit-point quality checks on exactly those files, and only then ticks the task, writes the `Task history` row and commits. A refusal leaves PLAN.md and REPORT.md as they were. With GitHub: branch, push, PR. |
+| `commit --kind …` | A commit that is not a task (a bugfix, a review fix, state files, release scenarios) — same tests and checks. |
+| `suite` | The full suite at the end of a phase, `Test status`, the phase tag and the regression gate. |
+| `changes` / `changes-done` | Processing of `telesma/changes/` (section 8). |
+| `release vX.Y.Z` | The release tag after your answer (section 16). |
+
+A hook (`tools/telesma-guard.py`) refuses the agent's own `git commit`, `git push`, other history
+writes, GitHub writes through `gh`, ticking PLAN.md and editing REPORT.md's history sections — each
+time naming the command to use instead. Under it, Claude Code's sandbox (`## Sandbox`,
+[CONFIGURATION.md](CONFIGURATION.md#-sandbox)) limits what any Bash command may write and reach. A
+session budget (`## Telesma loop` → `Max refusals per task`, `Max attempts per task`, `Max tasks per
+session`, `Max hours per session`) stops the loop with `TELESMA BLOCKED`; whether to go on is your
+answer at the next start.
+
 - [1. Clarification](#1-clarification)
 - [2. The plan](#2-the-plan)
 - [3. Writing a good plan](#3-writing-a-good-plan)
@@ -651,11 +671,13 @@ After "yes", in this order:
    e2e test is exactly what does *not* belong here; the regression section points at steps by name,
    with the matching recording as "this is how it should look". The file is committed **before** the
    tag, so it is part of the tagged state. You mark results afterwards: `[x]` works, `[-]` broken.
-2. **The tag** — `git tag -a vX.Y.Z -m "<2–4 sentences from git log, in product language>"`. Git says
-   what actually landed; the plan only says what was planned. Blockers: a red suite, a dirty working
-   tree (a tag on a dirty tree points at a state nobody can reproduce), an existing tag of that name.
-   `-f` is forbidden here, unlike phase tags. With quality checks enabled, an open weakening
-   (`telesma: weakening …`) also blocks the release tag.
+2. **The tag** — `telesma-task.py release vX.Y.Z -m "<2–4 sentences from git log, in product
+   language>"`. Git says what actually landed; the plan only says what was planned. The command
+   always turns into a question to you (in `auto` mode too) and is refused where a question reaches
+   nobody (`bypassPermissions`, `dontAsk`); a plain `git tag` from the agent is refused. Blockers: no
+   green full suite on this state, a dirty working tree (a tag on a dirty tree points at a state
+   nobody can reproduce), the scenarios file not committed, an existing tag of that name. Never
+   `-f`. With quality checks enabled, an open weakening (`telesma: weakening …`) also blocks it.
 3. **A closing block**: the version created (SHA), the scenarios path, and `git push origin vX.Y.Z`
    — with the reminder that tags do **not** travel with a plain `git push`.
 4. A one-line entry in `telesma/state/DECISIONS.md`.

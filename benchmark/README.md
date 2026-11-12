@@ -85,7 +85,28 @@ judge catches what it was built for). Run it after every change in `hidden/`.
   not separate quality — only the cost comparison is left. Then: a weaker model (on it the framework's
   rules weigh more) or harder change requests, i.e. a new fingerprint.
 - **One run is an anecdote.** The model is not deterministic — a series of `-n 3` is the minimum,
-  and a difference smaller than the spread within a series proves nothing.
+  and a difference smaller than the spread within a series proves nothing. `compare` prints the
+  mean with the minimum and maximum of every series, and marks a series with fewer than three
+  complete runs; `run` says so at the start when `-n` is below three (the default is one run,
+  because every run costs real tokens — add runs with the same `--label` to complete a series).
+
+## What the benchmark does not guarantee
+
+- **The judge is hidden by convention, not by isolation.** The workspace gets only `project/` (or
+  `start_b/`) and `changes/`, and nothing in the prompt names the judge. But the session under test
+  runs as your user, unsandboxed, with `python3`, `cat`, `grep`, `lsof` and `curl` pre-allowed; the
+  hidden tests sit in the same checkout `telesma.sh` is started from, and in the public repository.
+  A session that went looking could read them, and the harness would not notice. Treat a result as
+  "the judge was not consulted" only as far as you trust that; for a measurement that has to hold
+  against it, run the series as a separate OS user (or in a container) that cannot read
+  `benchmark/hidden/` and has no network.
+- **A published judge ages.** `hidden/` and `start_b/` are public, so a future model may have seen
+  them in training. Scores across model generations are not comparable for that reason alone.
+- **It does not separate quality at the ceiling** (see above), and three runs give a spread, not a
+  significance test: read "A is better than B" only when the ranges do not overlap.
+- **`start_b/` is one run's code.** Stage B results are conditional on that starting codebase.
+- The fingerprint covers `project/`, `start_b/`, `changes/` and `hidden/` — not `bench.py`, the
+  pre-allowed commands or the model. Compare series produced by the same harness and model.
 
 **History.** The first series (stage B, internal framework versions 7 and 8 interleaved, three runs
 each) hit the ceiling: every run scored 43/43, so the benchmark is too easy to separate quality. What it

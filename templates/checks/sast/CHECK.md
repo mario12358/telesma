@@ -22,7 +22,7 @@ block — the check falls back to the built-in patterns and adds a `not-checked`
 visible that the run was shallower. Without semgrep only the built-in mode runs (the validator at startup says
 which mode is active). The built-in patterns also run **alongside** semgrep — they add lines it
 did not report (the same line reported by semgrep is not counted twice).
-`TELESMA_SEMGREP=none` in the environment disables semgrep (harness tests).
+`TELESMA_SEMGREP=none` together with `TELESMA_CHECKS_TEST=1` disables semgrep (harness tests only).
 
 ## What blocks and what warns
 

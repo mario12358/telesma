@@ -36,7 +36,8 @@ home_status() {
 # The program's name from the interview (the first heading of IDEA.md), else the folder's
 home_name() {
     local n
-    n=$(sed -n 's/^# //p' "$1/telesma/spec/IDEA.md" 2>/dev/null | head -1 | tr -d '\r')
+    # written by the interview session: no control characters, and no backslash for `echo -e`
+    n=$(sed -n 's/^# //p' "$1/telesma/spec/IDEA.md" 2>/dev/null | head -1 | LC_ALL=C tr -d '\000-\037\177\\')
     printf '%s' "${n:-$(basename "$1")}"
 }
 

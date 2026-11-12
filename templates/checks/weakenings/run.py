@@ -33,6 +33,11 @@ PATTERNS = [
 ]
 COMPILED = [(r, re.compile(w), o) for r, w, o in PATTERNS]
 TEST_FILE = re.compile(r'(^|/)(tests?|__tests__|spec|e2e)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/]+$|_test\.[^/]+$')
+# A test-file NAME is a claim; this is the evidence. Without it a file called `handler_spec.py`
+# or one put into `src/e2e/` is production code.
+TEST_EVIDENCE = re.compile(r'\bimport\s+(?:pytest|unittest)\b|\bfrom\s+(?:pytest|unittest)\b|@pytest\.|\bdef\s+test_\w*\s*\(|'
+                           r'\b(?:describe|it|test)\s*\(\s*[\'"`]|\bexpect\s*\(|\bfunc\s+Test\w+\s*\(|#\[(?:test|cfg\(test\))\]|'
+                           r'@Test\b|\bRSpec\.|\bassert_\w+\s*\(')
 CODE = re.compile(r'\.(py|js|jsx|ts|tsx|mjs|cjs|java|kt|go|rb|php|rs|cs|swift|scala|sh|sql|ya?ml|toml|json|ini|cfg|conf|env|html|vue|svelte)$|(^|/)(Dockerfile|Caddyfile|Makefile)$')
 
 
@@ -48,7 +53,7 @@ def main():
     point = os.environ.get('TELESMA_POINT', 'commit')
     open_ = {}     # weakening id → [(file, line, reason)] — one weakening, many places
     root = os.environ.get('TELESMA_ROOT') or os.getcwd()
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     for p in files:
         if not CODE.search(p):
             continue
@@ -57,7 +62,7 @@ def main():
                 lines = f.read().splitlines()
         except OSError:
             continue
-        test = bool(TEST_FILE.search(p))
+        test = bool(TEST_FILE.search(p)) and bool(TEST_EVIDENCE.search('\n'.join(lines[:400])))
         hits = {}
         for nr, line in enumerate(lines, 1):
             if len(line) > 4000:

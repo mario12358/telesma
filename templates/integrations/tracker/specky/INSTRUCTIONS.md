@@ -73,7 +73,7 @@ Queue items concerning a PR (`failing_pull_requests`, `to_fix`) have **precedenc
 the plan — section 0.3 turns them into a task/rework phase, and with the GitHub integration (section 17.4)
 the fix goes onto that PR's branch.
 
-### 18.2 Before a task — anchors (after step 3 of section 1)
+### 18.2 Before a task — anchors (after `next`, step 1 of section 1)
 
 A task has lines `- Specky: (req: <id> v<n>.<r> @<hash7>)` (one per requirement; `n` = text version, `r` =
 criteria revision) and optionally `- Specky criteria: (crit: <id>) …`. Before coding:
@@ -97,6 +97,8 @@ criteria revision) and optionally `- Specky criteria: (crit: <id>) …`. Before 
 
 ### 18.3 Commit — trailer and code ready (supplement to section 4)
 
+The trailer goes to `done` / `commit` as `--trailer "Specky-Req: <id>@<hash>"` (repeat it per requirement).
+
 Every commit implementing a requirement ends with a trailer (after an empty line, above the footer
 `🤖 Generated with Telesma`):
 
@@ -108,7 +110,7 @@ One trailer per requirement; the hash from `get_requirement` **from this session
 (the anchor may have been `stale`). A commit with no requirement behind it (tooling, docs, a scenarios file)
 carries `Specky-Req: none` — a repository connected to Specky **requires** a trailer (`require_trailer`): a PR
 without one gets the status `failure`, `none` gives `neutral`. With the GitHub integration the trailer also
-goes into the PR body (17.3 step 4); the PR is merged only with the Specky status `success`.
+goes into the PR body (`done` puts it there, 17.3); the PR is merged only with the Specky status `success`.
 
 After the PR merge / after the commit that completes the requirement:
 
@@ -147,7 +149,7 @@ file and test name, `commit_sha` = the commit with the test. An item without the
 criterion changed after the test — run the test against the new text and mark again.
 
 `- AC:` on a task and Specky criteria are the same thing seen from two sides — every criterion from an anchor has a test
-with the comment, and a test that does not touch the criterion does not finish the task (section 1 step 10).
+with the comment, and a test that does not touch the criterion does not finish the task (section 1 step 5).
 
 ### 18.5 Task 1.1 (skeleton) with the GitHub integration
 

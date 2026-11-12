@@ -37,9 +37,18 @@ EMPTY = re.compile(r'\bassert\s+(True|1)\s*(,|$|#)|expect\((true|1)\)\.(toBe|toE
                    r'expect\(true\)\.toBeTruthy\(\)|assertTrue\(True\)|assert!\(true\)')
 # `.only` switches off the rest of the suite — a green result speaks about one test. Deliberately
 # without `fit:` (an object key `{ fit: 'cover' }` in a fixture is not a test focus).
+# The same thing spelled so that no pattern above sees it: both sides identical, or two literals
+TAUTOLOGY = re.compile(r'\bassert\s+(\S.*?)\s*(?:==|is)\s*\1\s*(?:,|$)|\bassert\s+[\d.]+\s*==\s*[\d.]+\s*(?:,|$)|'
+                       r'expect\(\s*([^()]+?)\s*\)\.(?:toBe|toEqual|toStrictEqual)\(\s*\2\s*\)')
 ONLY = re.compile(r'\.only\s*\(|\b(fit|fdescribe)\s*\(')
-SKIP_DECORATOR = re.compile(r'^\s*@((?:pytest\.)?mark\.skip(?:if)?|(?:unittest\.)?skip(?:If|Unless)?)\b(.*)$')
-SKIP_JS = re.compile(r'\b(it|test|describe)\.skip\s*\(|\b(xit|xtest|xdescribe)\s*\(')
+# xfail is a skip with a green result: the test runs, fails, and the suite stays green
+SKIP_DECORATOR = re.compile(r'^\s*@((?:pytest\.)?mark\.(?:skip(?:if)?|xfail)|(?:unittest\.)?skip(?:If|Unless)?|'
+                            r'(?:unittest\.)?expectedFailure)\b(.*)$')
+# `pytestmark = pytest.mark.skip` switches off the whole module without touching a single test
+SKIP_MODULE = re.compile(r'^pytestmark\s*=\s*(.*\bmark\.(?:skip(?:if)?|xfail)\b.*)$')
+# A skip from inside the body: pytest.skip() / pytest.xfail() / self.skipTest() / raise SkipTest
+SKIP_CALL = re.compile(r'^\s*(?:pytest\.(?:skip|xfail)|self\.skipTest)\s*\((.*)$|^\s*raise\s+(?:unittest\.)?SkipTest\b\(?(.*)$')
+SKIP_JS = re.compile(r'\b(it|test|describe)(?:\.\w+)*\.(skip|fixme|failing)\s*\(|\b(xit|xtest|xdescribe)\s*\(')
 SKIP_GO_EMPTY = re.compile(r'\bt\.Skip\(\s*\)|\bt\.SkipNow\(\)')
 SKIP_GO_WITH_REASON = re.compile(r'\bt\.Skipf?\(\s*\S')
 IGNORE_RS = re.compile(r'^\s*#\[ignore(\s*=\s*"[^"]+")?\s*\]')
@@ -58,7 +67,8 @@ def emit(**z):
 
 def git(root, *args, timeout=15):
     try:
-        r = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', *args], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -138,19 +148,45 @@ def full_decorator(rows, i):
     return text
 
 
+def conditional_skip(full):
+    """`skipif(<condition>, reason=…)` / `skipIf` / `skipUnless` with a real condition: the test runs
+    wherever the condition does not hold (root, Windows, a missing tool) — that is not a switched-off
+    test, and a warning on every commit would only teach the reader to skip the warnings. A constant
+    condition (`True`, `1`, `not False`) switches it off everywhere and still counts."""
+    m = re.search(r'\b(?:skipif|skipIf|skipUnless)\s*\(\s*(.*)', full, re.S)
+    if not m:
+        return False
+    cond = re.split(r',\s*(?:reason\s*=|["\'])', m.group(1), maxsplit=1)[0].strip()
+    return bool(cond) and not re.fullmatch(r'(?:not\s+)?(?:True|False|None|\d+|["\'].*["\'])', cond)
+
+
 def skip_has_reason(p, rows, nr, line):
-    """None = not a skip; True = skip with a reason; False = skip without a reason."""
+    """None = not a skip (or a conditional one with a reason); True = skip with a reason; False = skip
+    without a reason."""
     previous = rows[nr - 2] if nr > 1 else ''
     if p.endswith('.py'):
         m = SKIP_DECORATOR.match(line)
         if not m:
+            mm = SKIP_MODULE.match(line)
+            if mm:
+                full = full_decorator(rows, nr - 1)
+                if not re.search(r'\breason\s*=', full):
+                    return False
+                return None if conditional_skip(full) else True
+            mc = SKIP_CALL.match(line)
+            if mc:
+                literal = re.search(r'''["'][^"']{2,}["']''', mc.group(1) or mc.group(2) or '')
+                return bool(literal or REASON_IN_COMMENT.search(line) or REASON_IN_COMMENT.search(previous))
             return None
+        if m.group(1).endswith('expectedFailure'):
+            return bool(REASON_IN_COMMENT.search(line) or REASON_IN_COMMENT.search(previous))
         full = full_decorator(rows, nr - 1)
-        if re.search(r'\breason\s*=', full):
-            return True
+        if re.search(r'\breason\s*=', full) or (m.group(1).endswith(('skipIf', 'skipUnless'))
+                                                 and re.findall(r'''["'][^"']{2,}["']''', m.group(2))):
+            return None if conditional_skip(full) else True
         # pytest.mark.skip("…") and unittest.skip("…") take the reason positionally; skipif / skipIf —
         # the first argument is the condition, the reason only via reason= (skipIf: second literal)
-        if m.group(1).endswith('skipif'):
+        if m.group(1).endswith(('skipif', 'xfail')):
             return False        # pytest: reason only as a keyword — and there was none
         literals = re.findall(r'''["'][^"']{2,}["']''', m.group(2))
         return bool(literals)   # skipIf(cond, "…") — second literal; skip("…") — first
@@ -193,13 +229,16 @@ def test_functions(p, rows):
             m = re.match(r'^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(', l)
             if not m:
                 continue
-            indent, j = len(m.group(1)), i + 1
+            indent, j = len(m.group(1)), i
+            while j < len(rows) - 1 and not code_part(rows[j]).rstrip().endswith(':'):
+                j += 1                   # a signature spread over several lines: `) -> None:` sits at the def's indent
+            j += 1
             while j < len(rows) and (not rows[j].strip() or len(rows[j]) - len(rows[j].lstrip()) > indent):
                 j += 1
             out.append((i + 1, m.group(2), rows[i:j]))
         elif JS.search(p):
             m = re.match(r'''^\s*(it|test)((?:\.\w+)*)\s*[(`]\s*(?:['"`]([^'"`]*))?''', l)
-            if not m or '.skip' in m.group(2) or '.todo' in m.group(2):
+            if not m or any(k in m.group(2) for k in ('.skip', '.todo', '.fixme', '.failing')):
                 continue
             if '{' not in l and '=>' not in l and 'function' not in l:
                 continue        # it('x', checkFoo) — body out of reach, we do not guess
@@ -209,6 +248,33 @@ def test_functions(p, rows):
             if m:
                 out.append((i + 1, m.group(1), brace_body(rows, i)))
     return out
+
+
+def code_part(line):
+    """The line without its comment: an assertion that was commented out is not an assertion."""
+    s = line.lstrip()
+    if s.startswith(('#', '//', '/*', '*')) and not s.startswith('#['):
+        return ''
+    return re.split(r'\s(?:#|//)\s', line, maxsplit=1)[0]
+
+
+def empty_assertion(l):
+    return bool(EMPTY.search(l) or TAUTOLOGY.search(l))
+
+
+def first_statement(body):
+    """The first statement of a Python test body (after the signature and a docstring)."""
+    k = 1
+    while k < len(body) and not body[k - 1].rstrip().endswith(':'):
+        k += 1                                   # a signature spread over several lines
+    rest = [l.strip() for l in body[k:] if l.strip() and not l.strip().startswith('#')]
+    if rest and rest[0][:3] in ('"""', "'''"):
+        quote, closed = rest[0][:3], rest[0].count(rest[0][:3]) >= 2
+        rest = rest[1:]
+        while rest and not closed:
+            closed = quote in rest[0]
+            rest = rest[1:]
+    return rest[0] if rest else ''
 
 
 def check_test_file(p, rows, hits):
@@ -223,15 +289,19 @@ def check_test_file(p, rows, hits):
         elif reason is False:
             hits.setdefault('skip-without-reason', []).append((nr, line.strip(), None))
     for nr, name, body in test_functions(p, rows):
-        real = [l for l in body if ASSERTION.search(l) and not EMPTY.search(l)]
+        if p.endswith('.py') and re.match(r'^return(\s+None)?\s*$', first_statement(body)):
+            hits.setdefault('skip-without-reason', []).append((nr, f'{name}: return as the first statement', None))
+        code = [code_part(l) for l in body]
+        real = [l for l in code if ASSERTION.search(l) and not empty_assertion(l)]
         if real:
             continue
-        if any(EMPTY.search(l) for l in body):
-            hits.setdefault('test-without-assertion', []).append((nr, name, 'has an empty assertion (assert True / expect(true).toBe(true))'))
+        if any(empty_assertion(l) for l in code):
+            hits.setdefault('test-without-assertion', []).append((nr, name, 'has an empty assertion (assert True / expect(true).toBe(true) / both sides identical)'))
         else:
             hits.setdefault('test-without-assertion', []).append((nr, name, 'has no assertion at all'))
 
 
+# (the rule `tests-removed` is emitted directly in main — it speaks about the whole change)
 MESSAGES = {
     'only': ('block', '`.only` / `fit` switches off the rest of the suite — a green result speaks about one test; remove it before committing'),
     'skip-without-reason': ('block', 'test disabled without a reason — add a reason (reason="…" / a `// skip: …` comment on the line above) '
@@ -270,12 +340,40 @@ def comparison_base(root, point):
     return None
 
 
+def name_status(root, *args):
+    """[(status letter, old path, new path)] from `git diff --name-status -z -M`."""
+    raw = (git(root, 'diff', '--name-status', '-z', '-M', *args) or '').split('\0')
+    out, i = [], 0
+    while i < len(raw) - 1:
+        st = raw[i][:1]
+        if st in ('R', 'C') and i + 2 < len(raw):
+            out.append((st, raw[i + 1], raw[i + 2]))
+            i += 3
+        else:
+            out.append((st, raw[i + 1], raw[i + 1]))
+            i += 2
+    return out
+
+
 def deleted(root, point, base):
+    """({paths that stop being tests}, {new test path: old test path}). A test file renamed to a
+    name outside the test pattern (`tests/test_calc.py` → `attic/calc_old.txt`) is not run any
+    more — for the suite that is a deletion."""
     if point == 'ci':
-        return set(lines(git(root, 'diff', '--name-only', '--diff-filter=D', base, 'HEAD')))
-    # `git rm` → in the index; `rm` + `git add -A` in the command → still only in the working tree
-    return (set(lines(git(root, 'diff', '--cached', '--name-only', '--diff-filter=D')))
-            | set(lines(git(root, 'diff', '--name-only', '--diff-filter=D', 'HEAD'))))
+        changes = name_status(root, base, 'HEAD')
+    else:
+        # `git rm` → in the index; `rm` + `git add -A` in the command → still only in the working tree
+        changes = name_status(root, '--cached') + name_status(root, 'HEAD')
+    gone, moved = set(), {}
+    for st, old, new in changes:
+        if st == 'D':
+            gone.add(old)
+        elif st == 'R':
+            if TEST_FILE.search(old) and not TEST_FILE.search(new):
+                gone.add(old)
+            elif TEST_FILE.search(old):
+                moved[new] = old
+    return gone, moved
 
 
 # A removed line that is not test content: an import extended by another name
@@ -295,7 +393,15 @@ def removed_test_lines(root, point, base, p):
 
 
 def count_assertions(rows):
-    return sum(len(ASSERTION.findall(l)) for l in rows if len(l) <= 4000)
+    return sum(len(ASSERTION.findall(code_part(l))) for l in rows if len(l) <= 4000)
+
+
+def count_tests(p, text):
+    """Number of test functions the runner would collect from the file (py / js / go), or None
+    for a language this module does not parse."""
+    if not (p.endswith('.py') or JS.search(p) or p.endswith('_test.go')):
+        return None
+    return len(test_functions(p, (text or '').splitlines()))
 
 
 # --- Main loop ------------------------------------------------------------------------
@@ -303,13 +409,14 @@ def count_assertions(rows):
 def main():
     point = os.environ.get('TELESMA_POINT', 'commit')
     root = os.environ.get('TELESMA_ROOT') or os.getcwd()
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     dirs = code_dirs(root)
     base = comparison_base(root, point)
     in_base = set(lines(git(root, 'ls-tree', '-r', '--name-only', base))) if base else set()
     status = {p: ('M' if p in in_base else 'A') for p in files}
 
     tests, code = {}, {}     # stem → path
+    now_tests = {}           # test file in scope → number of test functions now
     for p in files:
         rows = load(root, p)
         if rows is None:
@@ -323,6 +430,9 @@ def main():
                 code[stem(p)] = p
             continue
         tests[stem(p)] = p
+        n = count_tests(p, '\n'.join(rows))
+        if n is not None:
+            now_tests[p] = n
         if status[p] == 'M' and base:
             before = git(root, 'show', f'{base}:{p}')
             if before is not None:
@@ -356,21 +466,46 @@ def main():
 
     # test-deleted: deleted files do not come on stdin — we ask git
     if base:
-        removed = deleted(root, point, base)
+        removed, moved = deleted(root, point, base)
         existing = {}
         for p in in_base - removed:
             if CODE.search(p) and not TEST_FILE.search(p):
                 existing.setdefault(stem(p), p)
+        paired = False
         for t in sorted(removed):
             if not TEST_FILE.search(t) or not CODE.search(t):
                 continue
             k = existing.get(stem(t))
             if not k:
                 continue        # the tested module goes too (or cannot be identified) — cleanup
+            paired = True
             emit(file=t, line=None, rule='test-deleted', severity='block',
-                 message=f'test file deleted while the tested module {k} stays — restore the test '
-                         f'or move its cases; deleting a test does not fix the code',
+                 message=f'test file deleted (or renamed out of the test pattern) while the tested module {k} '
+                         f'stays — restore the test or move its cases; deleting a test does not fix the code',
                  content_fingerprint=fingerprint(f'{t}|{k}'))
+
+        # tests-removed: fewer test functions than before, counted over the whole commit — tests
+        # moved between files do not count as removed, tests that disappeared do, however it was
+        # done (deleted, renamed so the runner no longer collects them, a file without a pair)
+        gone_modules = {stem(p) for p in removed if CODE.search(p) and not TEST_FILE.search(p)}
+        before, sources = 0, []
+        for p in sorted(set(now_tests) | {t for t in removed if TEST_FILE.search(t)}):
+            old_path = moved.get(p, p)
+            if old_path not in in_base:
+                continue
+            if p in removed and stem(p) in gone_modules:
+                continue        # the tested module goes in the same change — cleanup, not a weakened suite
+            n = count_tests(old_path, git(root, 'show', f'{base}:{old_path}'))
+            if n:
+                before += n
+                sources.append(old_path)
+        after = sum(now_tests.values())
+        if after < before and not paired:
+            emit(file=sources[0], line=None, rule='tests-removed', severity='block', file_fingerprint=False,
+                 message=f'{before - after} test function(s) disappeared in this change ({before} → {after} in '
+                         f'{", ".join(sources[:4])}{" …" if len(sources) > 4 else ""}) — a test that fails says '
+                         f'something about the code; restore it, or have the human accept the removal',
+                 content_fingerprint=fingerprint(f'{before}>{after}|' + '|'.join(sources)))
     return 0
 
 

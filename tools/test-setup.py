@@ -214,7 +214,12 @@ def env_for(tmp, **extra):
     # that answers "yes" must touch neither this machine's opt-in nor the real hub.
     env = dict(os.environ, PATH=f"{fake_bin(tmp)}{os.pathsep}{os.environ.get('PATH', '')}", TELESMA_NO_UPDATE_CHECK="1",
                FAKE_LOG=str(tmp / "claude.log"), CONFIGURE_PY=str(CONFIGURE),
-               XDG_CONFIG_HOME=str(tmp / "xdg"), TELESMA_SHARED_HUB="http://127.0.0.1:9")
+               XDG_CONFIG_HOME=str(tmp / "xdg"), TELESMA_SHARED_HUB="http://127.0.0.1:9",
+               # these tests edit config.md behind the launcher's back (cfg("set", …)) to stage a
+               # state: the trust gate would ask about every such edit. test-launcher.py tests the gate.
+               TELESMA_TRUST_CONFIG="yes",
+               # the installer and the update check follow the branch under test, not its last release tag
+               TELESMA_FOLLOW_BRANCH="1")
     # LC_ALL and LC_MESSAGES win over LANG (POSIX): the macOS CI runner sets LC_ALL=en_US.UTF-8, and
     # every test that gives LANG=pl_PL to see the Polish lines got English
     env.pop("LC_ALL", None)
@@ -561,8 +566,8 @@ def test_adopt():
         ok(report.index("Baseline at adoption") < report.index("| Metric |"), "the baseline paragraph stands above the metrics table")
         ok("Adoption: checks dry run (ci point, whole repository): 0 blocking" in report, "REPORT.md: the checks' dry run in the Problem log")
         log = (tmp / "claude.log").read_text()
-        ok("--allowedTools Edit(telesma/**) --permission-mode default" in log,
-           "the survey session: permission mode default, an Edit rule for telesma/** only")
+        ok(re.search(r"--allowedTools Edit\(telesma/\*\*\) Bash\(python3 \S+/tools/telesma-task\.py:\*\) --permission-mode default", log)
+           is not None, "the survey session: permission mode default, an Edit rule for telesma/** and the task tool only")
         ok("-3. Survey phase" in log and "MODE: survey" in log and "SURVEY: git digest" in log and "1 commits by 1 author" in log
            and "### Phase 0: Existing system" in log and "Baseline at adoption" in log,
            "the prompt carries SURVEY.md, the plan, the report with the baseline and the git digest")
@@ -843,12 +848,13 @@ def test_update_offer():
         tmp = Path(d)
         up, c = tmp / "upstream", tmp / "clone"
         genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
-        subprocess.run(["git", "clone", "-q", str(ROOT), str(up)], check=True)
+        subprocess.run(["git", "clone", "-q", "--no-local", str(ROOT), str(up)], check=True)
         # a clone carries commits only: the launcher and the catalog as they are in the working tree
-        for rel in ("telesma.sh", "templates/messages/pl.txt", "templates/setup/preflight.sh"):
+        for rel in ("telesma.sh", "install.sh", "templates/messages/pl.txt", "templates/setup/preflight.sh", "templates/setup/trust.py"):
             shutil.copy(ROOT / rel, up / rel)
-        subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "working tree"], env=genv)
-        subprocess.run(["git", "clone", "-q", str(up), str(c)], check=True)
+        subprocess.run(["git", "-C", str(up), "add", "-A"], env=genv)
+        subprocess.run(["git", "-C", str(up), "commit", "-q", "-m", "working tree"], env=genv)
+        subprocess.run(["git", "clone", "-q", "--no-local", str(up), str(c)], check=True)
         (up / "CHANGELOG.md").write_text((up / "CHANGELOG.md").read_text() + "\n## 99.0.0\n")
         subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "99.0.0"], check=True, env=genv)
         subprocess.run(["git", "-C", str(up), "tag", "-a", "v99.0.0", "-m", "99"], check=True, env=genv)
@@ -877,6 +883,39 @@ def test_update_offer():
         r = subprocess.run(["bash", str(launcher), str(p3)], env=env_for(tmp, TELESMA_NO_UPDATE_CHECK=""),
                            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
         ok("new Telesma version" not in strip(r.stdout) and "behind" not in strip(r.stdout), "up to date: no update line")
+
+        # The default (no TELESMA_FOLLOW_BRANCH): a release is its tag. Upstream gets 100.0.0 and
+        # then unreleased work on top; the update stops at the tag, and says nothing about the rest.
+        def sha_of(repo, ref):
+            return subprocess.run(["git", "-C", str(repo), "rev-parse", ref], capture_output=True, text=True).stdout.strip()
+        (up / "CHANGELOG.md").write_text((up / "CHANGELOG.md").read_text() + "\n## 100.0.0\n")
+        subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "100.0.0"], check=True, env=genv)
+        subprocess.run(["git", "-C", str(up), "tag", "-a", "v100.0.0", "-m", "100"], check=True, env=genv)
+        (up / "CHANGELOG.md").write_text((up / "CHANGELOG.md").read_text() + "\nunreleased\n")
+        subprocess.run(["git", "-C", str(up), "commit", "-q", "-am", "unreleased work"], check=True, env=genv)
+        release = env_for(tmp, TELESMA_NO_UPDATE_CHECK="", TELESMA_FOLLOW_BRANCH="", LANG="pl_PL.UTF-8")
+        r = subprocess.run(["bash", str(launcher), str(tmp / "p4")], env=release, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        ok("merge --ff-only v100.0.0" in strip(r.stdout) and "pull --ff-only" not in strip(r.stdout), "no terminal: the command given moves to the release tag")
+        out = drive(["bash", str(launcher), str(tmp / "p4")], [""], release)
+        ok("zaktualizowana do 100.0.0" in out and sha_of(c, "HEAD") == sha_of(up, "v100.0.0^{commit}") and sha_of(c, "HEAD") != sha_of(up, "HEAD"),
+           "ENTER: the clone is on the commit of the announced release, not on the unreleased work after it")
+        r = subprocess.run(["bash", str(launcher), str(tmp / "p4")], env=release, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120)
+        ok("Telesmy" not in strip(r.stdout) and "behind" not in strip(r.stdout), "on a release tag: silence about commits that are not a release yet")
+
+        # install.sh installs the latest release the same way (TELESMA_FOLLOW_BRANCH=1 = the branch tip)
+        home, dest = tmp / "ihome", tmp / "ihome" / ".telesma"
+        home.mkdir()
+        ienv = env_for(tmp, HOME=str(home), TELESMA_REPO=str(up), TELESMA_BRANCH=branch, TELESMA_INSTALL_DIR=str(dest),
+                       TELESMA_PROJECTS=str(tmp / "iprojects"), TELESMA_DESKTOP=str(tmp / "idesktop"), TELESMA_FOLLOW_BRANCH="")
+        drive(["bash", "-c", f'bash < "{up / "install.sh"}"'], ["n"], ienv)
+        ok(sha_of(dest, "HEAD") == sha_of(up, "v100.0.0^{commit}")
+           and subprocess.run(["git", "-C", str(dest), "branch", "--show-current"], capture_output=True, text=True).stdout.strip() == branch,
+           "install.sh: a fresh install sits on the latest release tag, on its branch")
+        subprocess.run(["git", "-C", str(up), "tag", "-a", "v101.0.0", "-m", "101"], check=True, env=genv)
+        drive(["bash", "-c", f'bash < "{up / "install.sh"}"'], ["n"], ienv)
+        ok(sha_of(dest, "HEAD") == sha_of(up, "v101.0.0^{commit}"), "install.sh run again: moved to the newer release")
+        drive(["bash", "-c", f'bash < "{up / "install.sh"}"'], ["n"], dict(ienv, TELESMA_FOLLOW_BRANCH="1", TELESMA_INSTALL_DIR=str(tmp / "ihome" / "dev")))
+        ok(sha_of(tmp / "ihome" / "dev", "HEAD") == sha_of(up, "HEAD"), "TELESMA_FOLLOW_BRANCH=1: the branch tip, as before")
 
 
 def test_home_menu():
@@ -1068,8 +1107,9 @@ def test_integrations_wizard_tty():
            and (project / ".github" / "workflows" / "specky-ci.yml").is_file(),
            "both integrations: CI template copied, contract status added to the required checks")
         ok("do not cover main)" in out, "empty repository: the default branch falls back to main")
-        ok("Bash(gh pr create:*)" in text and "mcp__plugin_specky_specky-record" in text,
-           "permissions of both integrations added to Allowed commands")
+        ok("Bash(gh pr view:*)" in text and "mcp__plugin_specky_specky-record" in text
+           and "Bash(gh pr create:*)" not in text and "origin task-" not in text,
+           "permissions of both integrations added to Allowed commands (reading only: the task tool opens PRs and pushes)")
         ok((project / "telesma" / "state" / "SPECKY.md").is_file(), "SPECKY.md cursor file created")
 
 

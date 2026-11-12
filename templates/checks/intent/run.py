@@ -134,7 +134,8 @@ def satisfies(route, alt, smap):
         tokens = smap['roles'].get(role)
         if not tokens:
             return None                           # role without a guard — cannot be judged
-        if not any(R.contains_guard(route['window'], tok) for tok in tokens):
+        window = R.without_comments(route['window'], route.get('file', ''))
+        if not any(R.contains_guard(window, tok) for tok in tokens):
             return False
     return True
 
@@ -156,7 +157,7 @@ def main():
                   f'(python3 telesma/checks/intent/run.py --skeleton)')
         return 0
     point = os.environ.get('TELESMA_POINT', 'commit')
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     files = [p for p in files if R.is_code_file(p) or (R.MIGRATION.search(p) and not R.SKIPPED_DIRS.search(p))]
     if not files:
         return 0
@@ -305,7 +306,9 @@ def main():
     if rest:
         blocking = [z for z in rest if z['severity'] == 'block']
         emit(file=rest[0]['file'], line=None, rule=blocking[0]['rule'] if blocking else 'counter',
-             severity='block' if blocking else 'warn', file_fingerprint=False, content_fingerprint='counter',
+             severity='block' if blocking else 'warn', file_fingerprint=False,
+             # the findings behind the counter, not a constant: an exception covers exactly these
+             content_fingerprint=fingerprint('more|' + '|'.join(z['content_fingerprint'] for z in rest)),
              message=f'+{len(rest)} more findings ({len(blocking)} blocking) — full list: '
                      f'python3 telesma/checks/telesma-checks.py --point {point}')
     return 0

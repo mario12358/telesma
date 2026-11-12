@@ -22,12 +22,18 @@ Usage:
 The Specky address and project_id come from `telesma/config.md` → `## Integrations` (`Tracker MCP`
 without the `/mcp` path, `Tracker project`); `--url` / `--project-id` override them. 409
 `snapshot_tag_exists` = the snapshot already exists, tag skipped; that is not an error.
+
+Where the password goes: only to an `https://` address (http to this machine alone). An address
+read from `telesma/config.md` — a committed file anyone with write access can change — is shown
+and has to be confirmed in the terminal before the login; without a terminal pass it yourself
+with `--url`. What the server answers is printed without control characters.
 """
 from __future__ import annotations
 
 import argparse
 import getpass
 import http.cookiejar
+import ipaddress
 import json
 import os
 import re
@@ -63,11 +69,43 @@ def base_from_mcp(mcp_url: str) -> str:
     return f"{u.scheme}://{u.netloc}"
 
 
+def address_allowed(base: str) -> bool:
+    """https, or http to this machine only — the login sends an e-mail and a password."""
+    try:
+        u = urllib.parse.urlparse(base)
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return bool(host)
+    if u.scheme != "http":
+        return False
+    try:
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def confirmed(base: str) -> bool:
+    """The address came from telesma/config.md, not from the person running the tool: ask
+    before the credentials go there. No terminal = no way to ask = no."""
+    if not sys.stdin.isatty():
+        print(f"the Specky address {clean(base)} comes from telesma/config.md (a committed file) — "
+              f"confirm it by passing it yourself: --url {clean(base)}", file=sys.stderr)
+        return False
+    answer = input(f"Log in to Specky at {clean(base)} (address from telesma/config.md)? [y/N]: ")
+    return answer.strip().lower() in ("y", "yes")
+
+
 # --- git --------------------------------------------------------------------------------------
 
 def git(project: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(project), *args], check=True,
-                          capture_output=True, text=True).stdout
+    try:
+        return subprocess.run(["git", "-C", str(project), *args], check=True,
+                              capture_output=True, text=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        reason = (getattr(e, "stderr", "") or str(e)).strip().split("\n")[0]
+        fail(f"git {args[0]} failed in {project}: {clean(reason)}")
 
 
 def release_tags(project: Path) -> list[str]:
@@ -155,13 +193,17 @@ class Specky:
         status, body = self._send(urllib.request.Request(f"{self.base}/api/auth/csrf"))
         if status != 200:
             fail(f"CSRF: HTTP {status} — {_short(body)}")
-        self.csrf = json.loads(body).get("csrf_token")
-        if not self.csrf:
+        try:
+            reply = json.loads(body)
+        except ValueError:
+            reply = None
+        self.csrf = reply.get("csrf_token") if isinstance(reply, dict) else None
+        if not self.csrf or not isinstance(self.csrf, str):
             fail("CSRF: response without csrf_token")
 
     def snapshot(self, project_id: str, payload: dict) -> tuple[int, dict]:
         req = urllib.request.Request(
-            f"{self.base}/api/projects/{urllib.parse.quote(project_id)}/snapshots",
+            f"{self.base}/api/projects/{urllib.parse.quote(project_id, safe='')}/snapshots",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json", "X-CSRF-Token": self.csrf or ""})
         status, body = self._send(req)
@@ -169,11 +211,18 @@ class Specky:
             data = json.loads(body) if body else {}
         except ValueError:
             data = {"raw": _short(body)}
-        return status, data
+        # The reply is somebody else's data: anything but an object is reported, not indexed.
+        return status, data if isinstance(data, dict) else {"raw": _short(body)}
+
+
+def clean(text: object, n: int = 300) -> str:
+    """Text from a server or from a file, safe to print: no control characters (an escape
+    sequence in a reply would otherwise be executed by the terminal)."""
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(text))[:n]
 
 
 def _short(b: bytes, n: int = 300) -> str:
-    return b.decode("utf-8", "replace")[:n]
+    return clean(b.decode("utf-8", "replace"), n)
 
 
 def fail(message: str) -> None:
@@ -214,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
         print("missing project_id (field `Tracker project` or --project-id)", file=sys.stderr)
         return 1
     base = a.url or base_from_mcp(config_field(text, "Integrations", "Tracker MCP") or "")
+    if not address_allowed(base):
+        print(f"the Specky address {clean(base)} is not https — the e-mail and the password are not "
+              f"sent in clear text (http only to this machine)", file=sys.stderr)
+        return 1
 
     # Tag list — always oldest first, regardless of the order of the arguments.
     available = release_tags(project)
@@ -250,12 +303,14 @@ def main(argv: list[str] | None = None) -> int:
             "test_scenarios_md": body,
         }))
 
-    print(f"Specky {base}, project {project_id}: {len(items)} snapshots (oldest first)")
+    print(f"Specky {clean(base)}, project {clean(project_id)}: {len(items)} snapshots (oldest first)")
     for tag, p in items:
         print(f"  {tag}  commit {p['git_commit_sha'][:7]}  scenarios {len(p['test_scenarios_md'])} chars"
               f"{'' if p['description'] else '  (tag without a message)'}")
     if a.dry_run or not items:
         return 0
+    if not a.url and not confirmed(base):
+        return 1
 
     email = a.email or input("Specky e-mail: ").strip()
     password = os.environ.get("SPECKY_PASSWORD") or getpass.getpass("Specky password: ")
@@ -270,13 +325,14 @@ def main(argv: list[str] | None = None) -> int:
     code = 0
     for tag, payload in items:
         status, data = client.snapshot(project_id, payload)
+        detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
         if status == 201:
-            print(f"  ✓ {tag}: snapshot {data.get('id', '?')}")
-        elif status == 409 and (data.get("detail") or {}).get("code") == "snapshot_tag_exists":
-            print(f"  = {tag}: snapshot already exists ({(data['detail']).get('snapshot_id', '?')}) — skipped")
+            print(f"  ✓ {tag}: snapshot {clean(data.get('id', '?'), 80)}")
+        elif status == 409 and detail.get("code") == "snapshot_tag_exists":
+            print(f"  = {tag}: snapshot already exists ({clean(detail.get('snapshot_id', '?'), 80)}) — skipped")
         else:
             code = 1
-            print(f"  ✗ {tag}: HTTP {status} — {json.dumps(data, ensure_ascii=False)[:300]}",
+            print(f"  ✗ {tag}: HTTP {status} — {clean(json.dumps(data, ensure_ascii=False))}",
                   file=sys.stderr)
     return code
 

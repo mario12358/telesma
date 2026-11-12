@@ -68,12 +68,14 @@ contract instead of something the session improvises.
    the tag `(pr: #n)` and the checkbox `[ ]` until the merge; after the merge it becomes `[x]` and the
    tag stays (audit + telemetry). Because the checkbox is what phase completeness reads, a phase is
    not complete until its code is on main.
-3. Merge follows the `Merge` field. In `agent` mode GitHub enforces nothing, so the rule "merge only on
-   green required checks" is enforced by the **permission judge** (`## Auto-approval`, see
-   [PERMISSION_JUDGE.md](PERMISSION_JUDGE.md)), not promised by an instruction: before every
-   `gh pr merge` it runs `gh pr checks` itself and lets the merge through only when every required
-   check is **present** and green — a missing check is not a green one. Otherwise you are asked. With
-   the judge off, every merge asks you.
+3. Merge follows the `Merge` field. Since state format 21 the whole GitHub side — reconciling,
+   merging, re-pointing and rebasing chains, the branch, the push, the PR — is done by the task tool
+   (`tools/telesma-task.py` with `tools/telesma_github.py`), not by the agent: a hook refuses the
+   agent's own `git push` and GitHub writes through `gh`. In `agent` mode GitHub enforces nothing, so
+   "merge only on green required checks" is a property of that code: it merges (squash, never
+   `--admin`) only when every required check is **present** and green — a missing check is not a
+   green one. The permission judge's contract layer ([PERMISSION_JUDGE.md](PERMISSION_JUDGE.md))
+   still refuses a merge on red from any other source.
 4. A red required check = a fix on **the same branch**, never a second PR. The entry in the
    `## Problem log` starts with `[check]` (telemetry counts regressions caught by CI by that prefix).
 5. Every iteration starts by reconciling PRs (`gh pr list`): MERGED → checked off; red → priority;
@@ -94,7 +96,7 @@ contract instead of something the session improvises.
 
 | Mode | What happens | When to use it |
 |------|--------------|----------------|
-| `agent` (default) | Telesma waits on `gh pr checks --watch`, then runs `gh pr merge --squash`; the judge verifies the required checks once more before letting the merge through | a private repository on GitHub Free, which has neither auto-merge nor branch protection |
+| `agent` (default) | At every `next` the task tool reads the PRs' checks and merges with `gh pr merge --squash` those whose required checks are all present and green; with nothing else to start it waits up to `Wait for merge` for a pending one | a private repository on GitHub Free, which has neither auto-merge nor branch protection |
 | `auto` | `gh pr merge --auto --squash`; GitHub merges once the protected branch's required checks pass | a public repository, or a paid plan with branch protection and required status checks |
 | `manual` | nothing — the PR waits for a human; it still counts toward the open-PR limit | you want to review every PR yourself |
 
@@ -112,7 +114,8 @@ foreign trailers.
 
 The order matters. A PR whose base branch is deleted is **closed** by GitHub, not re-pointed — that is
 how a successor PR got closed in the reference project after `gh pr merge <predecessor> --delete-branch`.
-So Telesma goes from the bottom of the chain, one PR at a time:
+So the task tool goes from the bottom of the chain, one PR at a time (a rebase conflict is the one
+step left to the agent: it edits the conflicted files and runs `next` again):
 
 ```bash
 gh pr edit <successor> --base main                              # 1. first the successor's new base
@@ -128,10 +131,13 @@ chain is on main.
 
 ### Permissions
 
-The wizard adds to `Allowed commands`: `gh pr create/list/view/checks/diff/status`,
-`git fetch/pull/checkout -b/switch/rebase` and push **only** to `task-*` branches. `gh pr merge` and
-pushes anywhere else are **deliberately** absent from the allowlist — they go through the judge or ask
-you. Without the integration, `git push` remains a hard pattern in the judge and always asks.
+The wizard adds to `Allowed commands` reading commands only: `gh auth status`, `gh repo view`,
+`gh pr list/view/checks/diff/status`, `git fetch`, `git checkout -b`, `git switch`, branch listing.
+Pushes, `gh pr create` and `gh pr merge` are not on the list because the agent does not run them —
+the task tool does (format 23 removed the old push, pull, rebase and `gh pr create` rules from
+existing projects). With the sandbox on, GitHub's hosts are reachable and `~/.config/gh` stays
+readable, so `gh` keeps its sign-in. Without the integration, `git push` remains a hard pattern in
+the judge and always asks.
 
 ### PR status "Telesma: checks (local)"
 
@@ -149,9 +155,12 @@ With quality checks enabled (`## Checks` → `Enabled: yes`, field `PR status: y
    Telesma: checks (local)  ✓  clean: dependencies, secrets, weakenings · 3 commits · 2026-10-07 14:03 · OSV audit 2026-10-05 clean
    ```
 
-   It is red when some commit **has no evidence** (made outside the hook: by hand, with `--no-verify`,
-   before the checks were enabled) or when a check **did not run** at some commit (tool missing, time
-   limit). Missing evidence is not green — the same rule the judge applies to a missing check.
+   It is red when some commit **has no evidence** (made before the checks were enabled, or outside
+   the hook and never followed by a command the hook saw), when a check **did not run** at some
+   commit (tool missing, time limit), or when a commit made in a form the hook could not check
+   beforehand — by hand, through a script, by a merge or a cherry-pick — was checked after the fact
+   and has a blocking finding. Missing evidence is not green — the same rule the judge applies to
+   a missing check.
 
 The wizard adds this name to `Required checks`, so the judge will not merge a PR without evidence.
 Rebase and squash change the SHA; the evidence is found again by `git patch-id` (the content of the

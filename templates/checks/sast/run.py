@@ -17,6 +17,13 @@ import subprocess
 import sys
 
 TEST_FILE = re.compile(r'(^|/)(tests?|__tests__|spec|e2e)/|(^|/)test_[^/]*$|[._-](test|spec)\.[^/]+$|_test\.[^/]+$')
+# A test-file NAME is a claim; this is the evidence. A file called `db_spec.py` or put into
+# `src/e2e/` that holds no test is production code and is checked like production code.
+TEST_EVIDENCE = re.compile(r'\bimport\s+(?:pytest|unittest)\b|\bfrom\s+(?:pytest|unittest)\b|@pytest\.|\bdef\s+test_\w*\s*\(|'
+                           r'\b(?:describe|it|test)\s*\(\s*[\'"`]|\bexpect\s*\(|\bfunc\s+Test\w+\s*\(|#\[(?:test|cfg\(test\))\]|'
+                           r'@Test\b|\bRSpec\.|\bassert_\w+\s*\(')
+# Rule ids of semgrep that are about a secret standing in the code: the matched line IS the secret
+SECRET_RULE = re.compile(r'secret|password|passwd|credential|token|api[-_]?key|private[-_]?key|hardcoded', re.I)
 # Migrations and seeds build SQL from constants (table names in f-strings) — the SQL rule would only be noise there
 MIGRATION = re.compile(r'(^|/)(migrations?|migrate|seeds?|alembic)/|\.sql$')
 # A deliberate decision by the author — should be rare; the preferred marker is `telesma: weakening <id> — <reason>`,
@@ -326,6 +333,31 @@ def load(root, p):
     return data.decode('utf-8', 'replace').splitlines()
 
 
+def is_test(root, p):
+    """A test file by name AND by content."""
+    if not TEST_FILE.search(p):
+        return False
+    rows = load(root, p)
+    return rows is not None and bool(TEST_EVIDENCE.search('\n'.join(rows[:400])))
+
+
+def logical_line(rows, i):
+    """The line with its continuation: a call whose bracket closes on a later line is read as
+    one line (`cur.execute(` / `    f"… {name}")`), up to 12 lines."""
+    text = rows[i]
+    depth = LITERALS.sub('""', text).count('(') - LITERALS.sub('""', text).count(')')
+    j = i
+    while depth > 0 and j + 1 < len(rows) and j - i < 12 and len(text) < 4000:
+        j += 1
+        nxt = rows[j].strip()
+        if COMMENT.match(nxt):
+            continue
+        text += ' ' + nxt
+        bare = LITERALS.sub('""', nxt)
+        depth += bare.count('(') - bare.count(')')
+    return text
+
+
 def built_in(root, files, skipped_lines):
     """Per-line patterns. `skipped_lines` = {(file, nr)} already reported by semgrep."""
     for p in files:
@@ -340,10 +372,12 @@ def built_in(root, files, skipped_lines):
         no_xxe = 'defusedxml' in content     # the file already uses a safe parser — the rest is noise
         hits = {}      # rule → [(nr, line, message)]
         for nr, line in enumerate(rows, 1):
-            if len(line) > 4000 or COMMENT.match(line) or IMPORT.match(line) or NOSEC.search(line):
+            if len(line) > 4000 or COMMENT.match(line) or IMPORT.match(line):
                 continue
             if (p, nr) in skipped_lines:
                 continue
+            suppressed = bool(NOSEC.search(line))
+            line = logical_line(rows, nr - 1)
             for rule, severity, fn in RULES:
                 if lang == 'template' and rule in CODE_ONLY:
                     continue
@@ -355,8 +389,14 @@ def built_in(root, files, skipped_lines):
                 if message and rule == 'jwt-without-verification' and message.startswith('jwt.decode without') \
                         and any('algorithms' in w for w in rows[nr:nr + 5]):
                     message = None
+                if message and suppressed:
+                    # the suppression holds — and is counted: `nosec` used to vanish into the code
+                    hits.setdefault('nosec-suppression', []).append(
+                        (nr, rows[nr - 1], f'`nosec` / `nosemgrep` switches off the rule {rule} on this line — '
+                                           f'a deliberate decision belongs in a marker `telesma: weakening <id> — <reason>`'))
+                    break
                 if message:
-                    hits.setdefault(rule, []).append((nr, line, message))
+                    hits.setdefault(rule, []).append((nr, rows[nr - 1], message))
             # The only rule with context: origin and credentials usually stand on neighbouring lines
             if find(CORS_CREDENTIALS, line):
                 window = rows[max(0, nr - 4):nr + 3]
@@ -383,7 +423,9 @@ BLOCKING_IDS = ('injection', 'sqli', 'sql-injection', 'command', 'subprocess', '
 
 
 def semgrep_available():
-    return bool(shutil.which('semgrep')) and os.environ.get('TELESMA_SEMGREP', '').lower() != 'none'
+    # TELESMA_SEMGREP=none is a switch of the self-tests: honoured only with TELESMA_CHECKS_TEST=1
+    off = os.environ.get('TELESMA_CHECKS_TEST') == '1' and os.environ.get('TELESMA_SEMGREP', '').lower() == 'none'
+    return bool(shutil.which('semgrep')) and not off
 
 
 def from_semgrep(root, files, point):
@@ -398,7 +440,8 @@ def from_semgrep(root, files, point):
     cmd = ['semgrep', 'scan']
     for pk in packs:
         cmd += ['--config', pk]
-    cmd += ['--json', '--quiet', '--metrics=off', '--timeout', '10', *files]
+    cmd += ['--json', '--quiet', '--metrics=off', '--timeout', '10', '--',
+            *[p if not p.startswith('-') else './' + p for p in files]]
     limit = 15 if point == 'commit' else 240
     try:
         r = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=limit)
@@ -430,7 +473,8 @@ def from_semgrep(root, files, point):
         blocks = severity == 'ERROR' and any(k in check_id.lower() for k in BLOCKING_IDS)
         code = ((extra.get('lines') or '').strip().splitlines() or [''])[0].strip()
         msg = ' '.join((extra.get('message') or rule).split())[:200]
-        fragment = f' — `{code[:80]}`' if code else ''
+        # a rule about a secret in the code: the line it matched is the secret — never shown
+        fragment = f' — `{code[:80]}`' if code and not SECRET_RULE.search(check_id) else ''
         emit(file=file, line=nr, rule=rule, severity='block' if blocks else 'warn',
              message=f'{msg}{fragment}', content_fingerprint=fingerprint(code))
         reported.add((file, nr))
@@ -449,9 +493,9 @@ def main():
         return 0
     root = os.environ.get('TELESMA_ROOT') or os.getcwd()
     point = os.environ.get('TELESMA_POINT', 'commit')
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     # Test files entirely outside the check: a test legitimately does eval, assembled SQL and pickle
-    files = [p for p in files if not TEST_FILE.search(p) and language(p)]
+    files = [p for p in files if language(p) and not is_test(root, p)]
     if not files:
         return 0
     reported = set()

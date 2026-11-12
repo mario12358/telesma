@@ -1,12 +1,16 @@
 """Shared by checks that query network services: HTTP with a timeout, a cache in
-~/.cache/telesma/, service addresses overridable by environment variables (tests point
-them at a local server). A module imports it via `sys.path.insert(0, '..')`.
+~/.cache/telesma/, service addresses overridable by environment variables for the self-tests
+(they point them at a local server). The overrides are honoured only together with
+TELESMA_CHECKS_TEST=1: a variable alone must not send a check to another server or cache.
+A module imports it via `sys.path.insert(0, '..')`.
 """
+import http.client
 import json
 import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ADDRESSES = {
@@ -18,9 +22,19 @@ ADDRESSES = {
 }
 
 
+def test_mode():
+    return os.environ.get('TELESMA_CHECKS_TEST') == '1'
+
+
 def address(name):
     variable, default = ADDRESSES[name]
-    return os.environ.get(variable, default).rstrip('/')
+    return (os.environ.get(variable, default) if test_mode() else default).rstrip('/')
+
+
+def quote(name):
+    """A package name as one URL path segment — whatever a manifest holds, it cannot leave the
+    path, add a query or break the request line."""
+    return urllib.parse.quote(name, safe='@')
 
 
 def _ssl_contexts():
@@ -63,8 +77,8 @@ def fetch(url, data=None, timeout=6):
             last = e
             if not isinstance(getattr(e, 'reason', None), ssl.SSLError):
                 break
-        except (OSError, ValueError) as e:
-            last = e
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            last = e                 # InvalidURL and friends: no answer is "not checked", never a crash
             break
     raise NoNetwork(str(last))
 
@@ -73,7 +87,8 @@ class Cache:
     """A dict saved in ~/.cache/telesma/<name>.json; an entry expires after `ttl` s."""
 
     def __init__(self, name):
-        directory = os.environ.get('TELESMA_CACHE') or os.path.expanduser('~/.cache/telesma')
+        directory = (os.environ.get('TELESMA_CACHE') if test_mode() else None) \
+            or os.path.expanduser('~/.cache/telesma')
         self.path = os.path.join(directory, name + '.json')
         try:
             with open(self.path, encoding='utf-8') as f:

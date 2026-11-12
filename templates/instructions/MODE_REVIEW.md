@@ -88,11 +88,11 @@ Suggestion: use bcrypt.checkpw(password.encode(), user.password_hash).
    - **yes** → apply ALL 🟢 changes + ONE commit `Telesma: review-fix (cosmetic) [scope]`
    - **no** → mark them all as "accepted (skipped batch)"
    - **choose** → go per finding as for 🟡 below
-3. After the batch run the tests from `telesma/config.md` — if there is a regression, revert the commit (`git revert`) and report to the user
+3. After the batch run the tests from `telesma/config.md` — if there is a regression, undo the change in the files, commit that with `<TASK_TOOL> commit --kind review -m "undo …"` and report to the user
 
 **Gated policy for 🔴🟡 (per finding):**
 For each 🔴 and 🟡 ask the user for a decision:
-- **fix** → apply the change, run the tests of the area, commit as `Telesma: review-fix [short description]` (if `Auto-commit: yes`)
+- **fix** → apply the change, run the tests of the area, commit with `<TASK_TOOL> commit --kind review -m "review-fix [short description]"` (if `Auto-commit: yes`)
 - **skip / accept** → record as "accepted as-is" + a short comment from the user (why)
 - **task** → propose the task content for PLAN.md (phase, tags, description), record as "TODO" — the user adds it themselves in mode 1
 - **question** → answer, go back to the decision

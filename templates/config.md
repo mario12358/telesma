@@ -37,6 +37,9 @@
   <!-- Typechecker, e.g. `mypy src`, `pyright`, `npx tsc --noEmit`. The lint-types check (## Checks) -->
   <!-- runs the linter on changed files at commit, and the typechecker at phase end.               -->
   <!-- "none" = no typechecker.                                                                   -->
+  <!-- The check runs a known tool called directly (`ruff check`, `npx eslint .`,                  -->
+  <!-- `cd backend && mypy app`); a script, `npm run …` or a compound command is not run by it.    -->
+  <!-- A changed command is used by the check after you confirm it at the next start.             -->
 - **Lint before commit**: no
 
 ## Git
@@ -245,6 +248,18 @@
   <!-- Context compression (auto-compact) happens automatically when the window fills up —  -->
   <!-- Claude cannot call /compact by itself. The protection is the state files updated     -->
   <!-- after every task (section 6 of the instructions).                                     -->
+- **Max refusals per task**: 5
+  <!-- A hard stop counted by the task tool: this many refused `done` for one task end the       -->
+  <!-- session with TELESMA BLOCKED. "Max tries per task" is when Claude asks you; this is when   -->
+  <!-- the script stops it if it does not. none = no limit.                                       -->
+- **Max attempts per task**: 3
+  <!-- How many times `next` may hand out the same task without a finished `done` (a restart,     -->
+  <!-- a compaction, a lost session) before the script stops with TELESMA BLOCKED. none = no limit -->
+- **Max tasks per session**: none
+- **Max hours per session**: none
+  <!-- Session budget: after this many finished tasks / hours since the launcher started the     -->
+  <!-- session, `next` hands out nothing and writes telesma/state/BLOCKED.md. The next start      -->
+  <!-- shows the reason and asks you whether to go on. The values are read once, at the start.   -->
 - **Report progress**: yes
 - **Rotate state files**: yes
   <!-- REPORT.md, PROJECT_CONTEXT.md and PLAN.md go IN FULL into the startup prompt         -->
@@ -299,6 +314,28 @@
 - **Auto-sync directories**: yes
   <!-- yes = directories added in .claude/settings.local.json come back here at startup -->
   <!-- no  = this file is the only source of truth                                       -->
+
+## Sandbox
+
+<!-- Claude Code's built-in sandbox under every Bash command (macOS, Linux, WSL2): a command     -->
+<!-- writes only inside the project, the extra directories above and the temporary directory,  -->
+<!-- reaches only the hosts listed for it, and cannot read ~/.ssh, ~/.aws and similar keys —   -->
+<!-- whatever the command claims to be. Questions and the judge stay as they are; a command is  -->
+<!-- never retried outside the sandbox. Telesma writes the settings into                        -->
+<!-- .claude/settings.local.json on every start; native Windows runs without it.               -->
+<!-- Hosts and caches of the project's stack (PyPI, npm, crates.io …, ~/.cache/uv, ~/.npm …),  -->
+<!-- of the checks and of the GitHub integration are added by Telesma — list only the extra.   -->
+
+- **Enabled**: no
+  <!-- no | yes | required (required = Claude Code does not start when the sandbox cannot run) -->
+- **Allowed hosts**:
+  <!-- One per line, e.g. `- api.example.com` or `- *.internal.example.com`. In the autonomous -->
+  <!-- modes (1, 4) any other host is refused; in a chat Claude Code asks you.                  -->
+- **Writable paths**:
+  <!-- Directories outside the project a command may write to, e.g. `- ~/.cache/my-tool`.     -->
+- **Excluded commands**:
+  <!-- Commands that run outside the sandbox, e.g. `- docker compose *` (Docker does not work  -->
+  <!-- inside it). Each one is a hole: it runs with all your rights.                            -->
 
 ## Auto-approval
 
@@ -456,11 +493,13 @@
 
 - **Endpoint**: none
   <!-- shared = the shared Telesma hub run by the project's author (opt-in per machine, see above)  -->
-  <!-- https://… = a server you run yourself (then `API key` below is that machine's opt-in)      -->
+  <!-- https://… = a server you run yourself (http:// only for localhost). Used only after this     -->
+  <!-- section was confirmed on the machine: Telesma shows it once at a start in a terminal.       -->
 
 - **API key**: env:TELESMA_HUB_TOKEN
-  <!-- Own server only: env:NAME · file:<path outside the repo> · cmd:<command> · auto (token from -->
-  <!-- the opt-in file) — never literal, this file goes into git. The shared hub ignores this field. -->
+  <!-- Own server only: env:NAME · file:<path outside the repo> · cmd:<command> — never literal,    -->
+  <!-- this file goes into git. Read only after this section was confirmed on the machine (a start -->
+  <!-- in a terminal shows it once). The shared hub ignores this field.                            -->
 
 - **Scope**: full
   <!-- Shared hub only. metrics = this project sends numbers only (no titles or text), for everyone; -->
@@ -503,12 +542,11 @@
   - Bash(pytest:*)
   - Bash(mkdir:*)
   - Bash(ls:*)
-  - Bash(git add:*)
-  - Bash(git commit:*)
   - Bash(git status)
   - Bash(git diff:*)
   - Bash(git log:*)
-  - Bash(git tag:*)
+  - Bash(git tag -l:*)
+  - Bash(git tag --list:*)
   - Bash(git describe:*)
   - WebFetch(domain:claude.ai)
 

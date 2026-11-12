@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2154  # DET_* and STATUS_* are set by load_kv (printf -v) from configure.py's KEY=value lines
 # Configuration wizard — the interactive half (the edits live in configure.py).
 # Sourced by telesma.sh: on the first start of a project (right after config.md is created) and
 # with the --setup flag. Needs a terminal (/dev/tty); without one it applies the "recommended"
@@ -45,6 +46,7 @@ step_git() {
     echo "$(msg wiz.git.1 'Telesma commits after every task and tags every finished phase — it needs a git repository.')"
     if ask_yes_no "$(msg wiz.git.ask "Run 'git init' in %s?" "$PROJECT_DIR")" y; then
         git -C "$PROJECT_DIR" init -q && echo -e "  ${GREEN}✓${NC} git init" && DET_git=yes
+        declare -F git_exclude_local > /dev/null 2>&1 && git_exclude_local    # the repository exists only now
     else
         echo -e "  ${YELLOW}$(msg wiz.git.no "Without git Telesma cannot commit; run 'git init' before the first task.")${NC}"
     fi
@@ -219,7 +221,7 @@ beginner() { [[ "$(config_field Project Experience | tr '[:upper:]' '[:lower:]')
 # lists everything that goes out — consent to something unnamed is not consent.
 step_telemetry() {
     step_header "$(msg tel.header 'Telemetry')"
-    local tool="$SCRIPT_DIR/tools/telesma-telemetry.py" hub answer scope out
+    local tool="$SCRIPT_DIR/tools/telesma-telemetry.py" hub answer scope
     hub=$(python3 "$tool" --shared-hub)
     if beginner; then
         step_telemetry_beginner "$tool" "$hub"
@@ -227,10 +229,10 @@ step_telemetry() {
     fi
     echo "  $(msg tel.1 'Telesma can send events about the quality of ITS OWN work to the shared Telesma hub')"
     echo "  $(msg tel.2 "(run by the project's author) so the framework can be improved from real projects.")"
-    echo "  $(msg tel.3 'Sent: task outcomes and timings, test results, problem/pitfall/decision entries from')"
-    echo "  $(msg tel.4 'telesma/state (titles and text, secrets removed), check findings, permission counters,')"
-    echo "  $(msg tel.5 "framework version, technology tags, a hash of the project's origin URL and of your")"
-    echo "  $(msg tel.6 'git e-mail. Never sent: your spec, code, telesma/changes/, commands, prompts.')"
+    echo "  $(msg tel.3 'Sent: task outcomes and timings, test results, the entries of telesma/state — problems,')"
+    echo "  $(msg tel.4 "pitfalls, decisions, bugfixes, reviews, blockers, change history, testers' scenario notes")"
+    echo "  $(msg tel.5 '(titles and text, secrets removed) — check findings, permission counters, framework version,')"
+    echo "  $(msg tel.6 'technology tags, a hash of the origin URL, a salted hash of your git e-mail. Never sent: your spec, code, telesma/changes/, commands, prompts.')"
     echo "  $(msg tel.7 'Privacy and deletion: %s — delete any time: %s' "$hub/privacy" "telesma.sh --telemetry-forget")"
     read -r -p "$(msg tel.ask 'Send telemetry? [y/N/own server]'): " answer < /dev/tty || answer=""
     case "$answer" in
@@ -271,9 +273,9 @@ step_telemetry() {
 step_telemetry_beginner() {
     local tool="$1" hub="$2" answer
     echo "  $(msg tel.b1 'Telesma can send notes on how well IT did its work (not on your program) to the')"
-    echo "  $(msg tel.b2 'people who make Telesma, so that it gets better. What goes out: how each step went,')"
-    echo "  $(msg tel.b3 'test results and the notes Telesma writes about problems (passwords and keys removed);')"
-    echo "  $(msg tel.b4 'your e-mail and the project address only as a hash, never as they are.')"
+    echo "  $(msg tel.b2 'people who make Telesma, so that it gets better. What goes out: how each step went, test results,')"
+    echo "  $(msg tel.b3 "the notes Telesma writes about problems, fixes, reviews and changes, and testers' notes (passwords and keys removed);")"
+    echo "  $(msg tel.b4 'the project address only as a hash and your e-mail only as a salted hash, never as they are.')"
     echo "  $(msg tel.b5 'Never: your description, your program, what you type.')"
     echo "  $(msg tel.b6 'You can delete it all at any time. Details: %s' "$hub/privacy")"
     read -r -p "$(msg tel.b.ask 'Send these notes? [y/N]'): " answer < /dev/tty || answer=""
@@ -313,6 +315,7 @@ next_steps() {
         echo -e "  $(msg wiz.next.survey1 'Survey the code: %s — Telesma runs the tests once (the baseline), then reads' "${CYAN}$0 $PROJECT_DIR${NC}")"
         echo    "     $(msg wiz.next.survey2 'the code module by module and writes what it found into telesma/spec/AS_BUILT.md. It changes no code.')"
         echo    "     $(msg wiz.next.survey3 'Afterwards you correct that file, add what should happen next to telesma/spec/, and start again.')"
+        # shellcheck disable=SC2034  # read by telesma.sh after the wizard returns
         WIZARD_NEXT=survey
     else
         echo -e "  $(msg next.1 'Put the specification into %s (any format) — if you have not yet.' "${CYAN}telesma/spec/${NC}")"
@@ -320,6 +323,7 @@ next_steps() {
         echo    "     $(msg next.tg2 'fill in only what is imposed on the project (a stack, hosting, compliance).')"
         echo -e "  $(msg next.go 'Go on: %s — the same command continues after a break.' "${CYAN}$0 $PROJECT_DIR${NC}")"
         echo    "     $(msg next.go2 'Telesma reads the spec, asks about contradictions and gaps, writes the plan and asks whether to build.')"
+        # shellcheck disable=SC2034
         WIZARD_NEXT=clarify
     fi
 }
@@ -365,6 +369,7 @@ setup_wizard_first_run() {
         echo "$(msg set.usual2 'own work after every step.')"
         if [[ "$DET_git" != "yes" ]]; then
             git -C "$PROJECT_DIR" init -q && echo -e "  ${GREEN}✓${NC} $(msg set.git 'a history of every change is kept in the project')" && DET_git=yes
+            declare -F git_exclude_local > /dev/null 2>&1 && git_exclude_local
         fi
         load_kv STATUS "$(cfg status "$CONFIG_FILE")"
         if [[ "$STATUS_tests" == "set" ]]; then
@@ -375,6 +380,7 @@ setup_wizard_first_run() {
         step_telemetry
         echo ""
         echo "$(msg set.later 'All settings can be changed later with: %s' "$0 --setup $PROJECT_DIR")"
+        # shellcheck disable=SC2034
         WIZARD_NEXT=clarify
         return 0
     fi

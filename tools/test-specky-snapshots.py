@@ -7,6 +7,12 @@ order of the arguments; a tag without a file skipped; 409 `snapshot_tag_exists` 
 error (a second run is idempotent); the password never in the output; `--dry-run` sends
 nothing; exit code 1 when the server answers with an error.
 
+Where the password goes: an address from telesma/config.md is confirmed in a terminal (or passed
+with --url) before any request; an address that is not https (http to this machine only) gets
+no request at all. What the server answers is data: a 409 whose `detail` is a string, a reply
+that is not an object, an id with an escape sequence — no crash, nothing raw in the terminal.
+A directory that is not a git repository gets a message, not a traceback.
+
 Run: python3 tools/test-specky-snapshots.py
 """
 from __future__ import annotations
@@ -49,6 +55,8 @@ class State:
         self.snapshots: list[dict] = []   # creation order
         self.requests: list[tuple[str, str]] = []
         self.refuse = False               # 500 on every POST snapshots
+        self.hostile = ""                 # "conflict": 409 with a string detail; "list": a JSON
+                                          # list; "escape": 201 with an escape sequence in the id
 
 
 STATE = State()
@@ -105,6 +113,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(403, {"detail": "CSRF"})
             if STATE.refuse:
                 return self._json(500, {"detail": "outage"})
+            if STATE.hostile == "conflict":
+                return self._json(409, {"detail": "Conflict"})
+            if STATE.hostile == "list":
+                return self._json(200, ["not", "an", "object"])
+            if STATE.hostile == "escape":
+                return self._json(201, {"id": "snap-\x1b]0;OWNED\x07-9"})
             data = json.loads(body)
             for m in STATE.snapshots:
                 if m["git_tag"] == data.get("git_tag"):
@@ -192,8 +206,36 @@ def main():
         ok(out.index("v0.1.0") < out.index("v0.10.0"), "order by version number, not lexical")
         ok(not STATE.requests, "--dry-run sent no request")
 
-        print("first run --all")
+        print("an address from config.md is confirmed before the password goes there")
         code, out, err = run(str(repo), "--all", "--email", EMAIL)
+        ok(code == 1 and not STATE.requests and "--url" in err,
+           "no terminal and no --url → exit code 1, zero requests, the message names --url")
+
+        class Terminal:
+            def isatty(self):
+                return True
+        asked = []
+        stdin, snapshots.sys.stdin = snapshots.sys.stdin, Terminal()
+        try:
+            snapshots.input = lambda prompt: asked.append(prompt) or "n"
+            code, out, err = run(str(repo), "--all", "--email", EMAIL)
+            ok(code == 1 and not STATE.requests and asked and base in asked[0],
+               "in a terminal the address is shown and asked about; `n` → zero requests")
+            snapshots.input = lambda prompt: "y"
+            code, out, err = run(str(repo), "--all", "--dry-run", "--email", EMAIL)
+            ok(code == 0 and len(asked) == 1, "--dry-run asks nothing")
+        finally:
+            snapshots.sys.stdin = stdin
+            del snapshots.input
+        code, out, err = run(str(repo), "--all", "--email", EMAIL, "--url", "http://example.invalid:8000")
+        ok(code == 1 and "not https" in err and not STATE.requests,
+           "an http address that is not this machine: refused, no login attempted")
+        ok(snapshots.address_allowed("https://app.specky.app") and snapshots.address_allowed("http://localhost:8000")
+           and not snapshots.address_allowed("http://127.evil.example") and not snapshots.address_allowed("ftp://x"),
+           "https anywhere, http only to loopback")
+
+        print("first run --all")
+        code, out, err = run(str(repo), "--all", "--email", EMAIL, "--url", base)
         ok(code == 0, f"exit code 0 (stderr: {err.strip()[:120]!r})")
         ok(len(STATE.snapshots) == 2, f"two snapshots created ({len(STATE.snapshots)})")
         ok([m["git_tag"] for m in STATE.snapshots] == ["v0.1.0", "v0.10.0"], "oldest first")
@@ -211,7 +253,7 @@ def main():
         ok("✓ v0.1.0" in out and "snap-1" in out, "the output gives the snapshot id")
 
         print("second run — idempotence (409)")
-        code, out, err = run(str(repo), "v0.10.0", "v0.1.0", "--email", EMAIL)
+        code, out, err = run(str(repo), "v0.10.0", "v0.1.0", "--email", EMAIL, "--url", base)
         ok(code == 0, "409 snapshot_tag_exists is not an error")
         ok(len(STATE.snapshots) == 2, "nothing new was created")
         ok(out.count("already exists") == 2 and "snap-2" in out, "both tags reported as existing, with id")
@@ -219,15 +261,36 @@ def main():
            "oldest first also with arguments given in reverse")
 
         print("errors")
-        code, out, err = run(str(repo), "v9.9.9", "--email", EMAIL)
+        code, out, err = run(str(repo), "v9.9.9", "--email", EMAIL, "--url", base)
         ok(code == 1 and "no such v* tags" in err, "unknown tag → exit code 1, nothing sent")
-        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL, password="wrong")
+        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL, "--url", base, password="wrong")
         ok(code == 1 and "login: HTTP 400" in err, "wrong password → exit code 1, login message")
         ok("wrong" not in out, "a wrong password does not reach the output either")
         STATE.refuse = True
-        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL)
+        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL, "--url", base)
         ok(code == 1 and "HTTP 500" in err, "server error on snapshot → exit code 1")
         STATE.refuse = False
+
+        print("what the server answers is data")
+        STATE.hostile = "conflict"
+        code, out, err = run(str(repo), "--all", "--email", EMAIL, "--url", base)
+        ok(code == 1 and err.count("HTTP 409") == 2,
+           "409 with a string `detail`: reported for every tag, no crash after the first")
+        STATE.hostile = "list"
+        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL, "--url", base)
+        ok(code == 1 and "HTTP 200" in err, "a reply that is not an object: reported, not indexed")
+        STATE.hostile = "escape"
+        code, out, err = run(str(repo), "v0.1.0", "--email", EMAIL, "--url", base)
+        ok(code == 0 and "OWNED" in out and "\x1b" not in out and "\x07" not in out,
+           "an id with an escape sequence is printed without control characters")
+        STATE.hostile = ""
+
+        print("not a git repository")
+        plain = Path(tmp) / "plain"
+        (plain / "telesma").mkdir(parents=True)
+        (plain / "telesma" / "config.md").write_text((repo / "telesma" / "config.md").read_text())
+        code, out, err = run(str(plain), "--all", "--dry-run")
+        ok(code == 1 and "git tag failed" in err, "a directory without git → a message and exit code 1")
 
         print("configuration")
         cfg = repo / "telesma" / "config.md"

@@ -13,7 +13,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from _net import NoNetwork, Cache, address, fetch  # noqa: E402
+from _net import NoNetwork, Cache, address, fetch, quote  # noqa: E402
 
 try:
     import tomllib
@@ -80,9 +80,13 @@ def deno_lock(t):
     return out
 
 
+class NoToml(Exception):
+    pass
+
+
 def toml_lock(t):
     if tomllib is None:
-        return []
+        raise NoToml()
     d = tomllib.loads(t)
     out = []
     for p in d.get('package') or []:
@@ -128,7 +132,8 @@ READERS = [
 
 def lockfiles(root):
     try:
-        r = subprocess.run(['git', '-C', root, 'ls-files'], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', 'ls-files'], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=30)
         files = r.stdout.splitlines() if r.returncode == 0 else []
     except (OSError, subprocess.TimeoutExpired):
         files = []
@@ -214,6 +219,12 @@ def main():
         try:
             with open(os.path.join(root, path), encoding='utf-8') as f:
                 found = reader(f.read())
+        except NoToml:
+            emit(file=path, line=None, rule='not-checked', severity='warn',
+                 message=f'this Python ({sys.version_info[0]}.{sys.version_info[1]}) cannot read TOML — the '
+                         f'versions in this lockfile were NOT checked; run Telesma with Python 3.11+',
+                 content_fingerprint='not-checked:no-tomllib')
+            continue
         except (OSError, ValueError, Exception):
             emit(file=path, line=None, rule='unreadable-lockfile', severity='warn',
                  message='could not read the lockfile — its dependencies were not checked',
@@ -231,7 +242,7 @@ def main():
     vulns = {}                             # (eco, name, version) → [id]
     to_query = []
     for k in keys:
-        z = cache.get('q:' + '|'.join(k))
+        z = cache.get(address('osv') + '|q:' + '|'.join(k))
         if z is None:
             to_query.append(k)
         else:
@@ -244,7 +255,7 @@ def main():
             for k, result in zip(batch, (d or {}).get('results') or []):
                 ids = sorted({v['id'] for v in (result or {}).get('vulns') or [] if v.get('id')})
                 vulns[k] = ids
-                cache.put('q:' + '|'.join(k), ids, 12 * 3600)
+                cache.put(address('osv') + '|q:' + '|'.join(k), ids, 12 * 3600)
     except NoNetwork as e:
         cache.save()
         emit(file=next(iter(packages.values()))[0], line=None, rule='not-checked', severity='warn',
@@ -255,11 +266,11 @@ def main():
     details = {}
 
     def download(vid):
-        z = cache.get('v:' + vid)
+        z = cache.get(address('osv') + '|v:' + vid)
         if z is not None:
             return vid, z, False
         try:
-            _, z = fetch(f'{address("osv")}/v1/vulns/{vid}')
+            _, z = fetch(f'{address("osv")}/v1/vulns/{quote(vid)}')
         except NoNetwork:
             z = None
         return vid, z, True
@@ -267,7 +278,7 @@ def main():
     with ThreadPoolExecutor(max_workers=8) as ex:
         for vid, z, fresh in ex.map(download, sorted({i for ids in vulns.values() for i in ids})):
             if z and fresh:
-                cache.put('v:' + vid, z, 12 * 3600)
+                cache.put(address('osv') + '|v:' + vid, z, 12 * 3600)
             details[vid] = z or {'id': vid}
     cache.save()
 

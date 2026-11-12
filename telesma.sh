@@ -56,7 +56,15 @@ MODE=""
 # migration to the version gate below) AND for every change to the instructions or guidelines
 # whose effect should be measurable: telemetry stamps events with this number and only by it
 # tells "before the change" from "after".
-TELESMA_FORMAT=20
+TELESMA_FORMAT=23
+
+# The task loop's mechanical steps (tools/telesma-task.py: next / done / commit). It runs from this
+# clone and is never copied into the project, so the agent cannot rewrite it without a question.
+# The allow rule is given to this session only (--allowedTools): settings.local.json syncs into the
+# committed config.md, and the path belongs to this machine.
+TASK_TOOL="python3 $SCRIPT_DIR/tools/telesma-task.py"
+[[ "$SCRIPT_DIR" == *" "* ]] && TASK_TOOL="python3 \"$SCRIPT_DIR/tools/telesma-task.py\""
+TASK_ALLOW="Bash($TASK_TOOL:*)"
 
 # Parse flags
 TELESMA_ARGV=("$@")          # the start as typed: the launcher execs itself after updating Telesma
@@ -247,15 +255,26 @@ close_line() {
 # first message asks to read the file. stdin stays the terminal. TELESMA_PROMPT_VIA_FILE=1 forces
 # the Windows route elsewhere (tests).
 run_claude() {
-    local how="$1" prompt="$2" f arg a rc=0 continued=false
+    local how="$1" prompt="$2" f arg a rc=0 continued=false limit=0 size
     shift 2
+    size=${#prompt}
     if [[ "$PREFLIGHT_OS" == windows || -n "${TELESMA_PROMPT_VIA_FILE:-}" ]]; then
-        if (( ${#prompt} < 28000 )); then
+        limit=28000
+    elif [[ "$how" == arg ]]; then
+        # Linux gives ONE argument 128 KiB (MAX_ARG_STRLEN), and the instructions of a chat mode
+        # alone are ~100 KB: a prompt past that goes through the file as well. Bytes, not
+        # characters — the limit counts bytes and the prompt is full of — and ✅.
+        limit=100000
+        size=$(printf '%s' "$prompt" | wc -c | tr -d ' ')
+    fi
+    if (( limit > 0 )); then
+        if (( size < limit )); then
             claude "$@" "$prompt"
             return
         fi
         for a in "$@"; do [[ "$a" == --continue ]] && continued=true; done
         f=$(mktemp "${TMPDIR:-/tmp}/telesma-prompt.XXXXXX")
+        tmp_register "$f"
         printf '%s' "$prompt" > "$f"
         arg="$f"
         if [[ "$PREFLIGHT_OS" == windows ]] && command -v cygpath > /dev/null 2>&1; then
@@ -280,15 +299,41 @@ run_claude() {
 # Edit a file in place — portable (BSD sed needs `-i ''`, GNU sed `-i`)
 sed_inplace() {
     local expr="$1" file="$2"
-    sed "$expr" "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+    sed "$expr" "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
+}
+
+# Text that comes from a file of the project or from the model (a question, a blocker, a path, a
+# log line) as it may be shown in a terminal: no control characters, so no escape sequence in it
+# can repaint the screen or hide a line. Printed with printf '%s', never through `echo -e`.
+plain() { printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013-\037\177'; }
+
+# What the launcher leaves behind is removed when it ends, however it ends: its temporary files
+# and the start lock (taken after the format gate). `exec` does not run the EXIT trap — the places
+# that start the launcher again call telesma_cleanup first.
+TELESMA_TMP=()
+TELESMA_LOCK_DIR=""
+tmp_register() { TELESMA_TMP+=("$1"); }
+telesma_cleanup() {
+    local f
+    for f in ${TELESMA_TMP[@]+"${TELESMA_TMP[@]}"}; do rm -rf "$f"; done
+    TELESMA_TMP=()
+    if [[ -n "$TELESMA_LOCK_DIR" && "$(cat "$TELESMA_LOCK_DIR/pid" 2>/dev/null)" == "$$" ]]; then
+        rm -rf "$TELESMA_LOCK_DIR"
+    fi
+    TELESMA_LOCK_DIR=""
 }
 
 # Messages in the user's language: msg KEY 'English text' [args] (templates/messages/msg.sh)
 # shellcheck source=templates/messages/msg.sh
 source "$SCRIPT_DIR/templates/messages/msg.sh"
-if [[ -n "${TELESMA_OWN_WINDOW:-}" ]]; then
-    trap 'echo ""; read -r -p "$(msg window.close "Press Enter to close this window.") " _ < /dev/tty || true' EXIT
-fi
+telesma_on_exit() {
+    telesma_cleanup
+    if [[ -n "${TELESMA_OWN_WINDOW:-}" ]]; then
+        echo ""; read -r -p "$(msg window.close "Press Enter to close this window.") " _ < /dev/tty || true
+    fi
+}
+trap telesma_on_exit EXIT
+trap 'exit 143' TERM HUP
 
 if [[ "${HOME_MENU:-false}" != "true" && -z "${TELESMA_FROM_HOME:-}" ]]; then
     echo -e "${GREEN}=== Telesma - Autonomous Development Loop ===${NC}"
@@ -406,29 +451,43 @@ check_telesma_up_to_date() {
     local behind ahead
     behind=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..$upstream" 2>/dev/null) || return 0
     ahead=$(git -C "$SCRIPT_DIR" rev-list --count "$upstream..HEAD" 2>/dev/null) || return 0
-    local have want answer
+    local have want answer update_cmd follows_branch=false
     have=$(git -C "$SCRIPT_DIR" describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)
     want=$(git -C "$SCRIPT_DIR" describe --tags --abbrev=0 --match 'v*' "$upstream" 2>/dev/null || true)
+    # A release is what was announced, so the update moves to its tag, not to whatever the branch
+    # holds past it. A clone that sits exactly on a release tag follows releases and hears nothing
+    # about unreleased commits; any other clone (a developer's, a team's own branch) follows the
+    # branch as before. TELESMA_FOLLOW_BRANCH=1 makes the update pull the branch tip.
+    update_cmd="git -C \"$SCRIPT_DIR\" merge --ff-only ${want:-<tag>}"
+    if [[ -n "${TELESMA_FOLLOW_BRANCH:-}" ]]; then
+        follows_branch=true
+        update_cmd="git -C \"$SCRIPT_DIR\" pull --ff-only"
+    elif ! git -C "$SCRIPT_DIR" describe --tags --exact-match --match 'v*' HEAD &>/dev/null; then
+        follows_branch=true
+    fi
     if (( behind > 0 )) && [[ -n "$want" && "$want" != "$have" ]]; then
         echo -e "${YELLOW}$(msg upd.new 'A new Telesma version is out: %s (this one is %s).' "${want#v}" "${have:+${have#v}}${have:-?}")${NC}"
         if (( ahead == 0 )) && { true < /dev/tty; } 2>/dev/null; then
             read -r -p "$(msg upd.ask 'Update now? Nothing of yours is touched.') [$(msg yes.no 'Y/n')]: " answer < /dev/tty || answer=n
             case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
                 ""|y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
-                    if git -C "$SCRIPT_DIR" pull --quiet --ff-only "$remote" "$branch" 2>/dev/null; then
+                    if { [[ -n "${TELESMA_FOLLOW_BRANCH:-}" ]] && git -C "$SCRIPT_DIR" pull --quiet --ff-only "$remote" "$branch" 2>/dev/null; } \
+                       || { [[ -z "${TELESMA_FOLLOW_BRANCH:-}" ]] && git -C "$SCRIPT_DIR" merge --quiet --ff-only "refs/tags/$want^{commit}" 2>/dev/null; }; then
                         echo -e "${GREEN}$(msg upd.done 'Telesma updated to %s — starting again.' "${want#v}")${NC}"
                         echo ""
                         TELESMA_UPDATED=1 exec bash "$0" "${TELESMA_ARGV[@]}"
                     fi
-                    echo -e "${RED}$(msg upd.fail 'The update did not go through (changed by hand?). Update it with: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")${NC}" ;;
-                *) echo "$(msg upd.later 'Not now. Telesma asks again at the next start; or run: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")" ;;
+                    echo -e "${RED}$(msg upd.fail 'The update did not go through (changed by hand?). Update it with: %s' "$update_cmd")${NC}" ;;
+                *) echo "$(msg upd.later 'Not now. Telesma asks again at the next start; or run: %s' "$update_cmd")" ;;
             esac
         elif (( ahead > 0 )); then
             echo -e "${YELLOW}  You also have $ahead commit(s) of your own — the pull needs a merge: git -C \"$SCRIPT_DIR\" pull${NC}"
         else
-            echo "  $(msg upd.cmd 'Update it with: %s' "git -C \"$SCRIPT_DIR\" pull --ff-only")"
+            echo "  $(msg upd.cmd 'Update it with: %s' "$update_cmd")"
         fi
         echo ""
+    elif (( behind > 0 )) && [[ "$follows_branch" != true ]]; then
+        :       # on a release tag, nothing newer released: the commits past it are not a release yet
     elif (( behind > 0 )); then
         echo -e "${YELLOW}⚠ Telesma: this clone is $behind commit(s) behind $upstream — the templates, hooks and instructions copied into the project are out of date.${NC}"
         git -C "$SCRIPT_DIR" log --oneline "HEAD..$upstream" | head -5 | sed 's/^/    /'
@@ -475,6 +534,14 @@ msg_load_language "$TELESMA_DIR/config.md"
 # old files, so the launcher stops before touching anything.
 # The version file is committed, so the whole team stays on one format.
 VERSION_FILE="$STATE_DIR/.telesma-version"
+# Before the launcher writes anything: did config.md exist (a config this run creates is the
+# launcher's own; one that was already there has to be trusted — trust gate below).
+CONFIG_EXISTED=false
+[[ -f "$TELESMA_DIR/config.md" ]] && CONFIG_EXISTED=true
+# The version file is written whole or not at all (a half-written one reads as a broken project).
+write_version() {
+    echo "$1" > "$VERSION_FILE.tmp.$$" && mv "$VERSION_FILE.tmp.$$" "$VERSION_FILE"
+}
 if [[ ! -d "$TELESMA_DIR" && -f "$PROJECT_DIR/ralph/.ralph-version" ]]; then
     echo -e "${RED}Error: this project was created by a pre-release version (ralph/.ralph-version).${NC}"
     echo -e "${RED}Convert it once with the migration tool provided for that version, then run telesma.sh again.${NC}"
@@ -483,8 +550,19 @@ if [[ ! -d "$TELESMA_DIR" && -f "$PROJECT_DIR/ralph/.ralph-version" ]]; then
 fi
 
 if [[ -f "$VERSION_FILE" ]]; then
-    PROJECT_FORMAT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)
-    [[ "$PROJECT_FORMAT" =~ ^[0-9]+$ ]] || PROJECT_FORMAT=0
+    PROJECT_FORMAT=$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || true)
+    if [[ ! "$PROJECT_FORMAT" =~ ^[0-9]+$ ]]; then
+        # Empty, cut short, or a merge conflict in this committed file: not "format 0"
+        echo -e "${RED}$(msg fmt.unreadable 'telesma/state/.telesma-version does not hold a format number (empty, damaged or a merge conflict).')${NC}"
+        echo -e "$(msg fmt.unreadable.how 'Put back the number it had — %s shows it — or, for a project that worked with this Telesma, write %s into it. Nothing in the project has been changed.' "git -C \"$PROJECT_DIR\" log -p -3 -- telesma/state/.telesma-version" "$TELESMA_FORMAT")"
+        exit 1
+    fi
+    if (( PROJECT_FORMAT > TELESMA_FORMAT )); then
+        # A newer Telesma wrote these files; this one would merge, sync and rotate them by older rules
+        echo -e "${RED}$(msg fmt.newer 'This project was last run by a newer Telesma (format %s; this one knows %s).' "$PROJECT_FORMAT" "$TELESMA_FORMAT")${NC}"
+        echo -e "$(msg fmt.newer.how 'Update Telesma (%s) and start again. Nothing in the project has been changed.' "git -C \"$SCRIPT_DIR\" pull --ff-only")"
+        exit 1
+    fi
     # Steps between public formats. A step that changes no file in the project (an instruction
     # change the telemetry should be able to date) only stamps the next number; a step that
     # rewrites files does its migration here, before anything else reads them.
@@ -493,27 +571,163 @@ if [[ -f "$VERSION_FILE" ]]; then
             18) PROJECT_FORMAT=19 ;;   # 19: recall of earlier decisions (section 0.6), instructions only
             19) PROJECT_FORMAT=20 ;;   # 20: adoption of existing projects (--adopt, Phase 0, AS_BUILT.md); the
                                        #     Adopted fields reach config.md through the merge — nothing else changes
+            20) PROJECT_FORMAT=21 ;;   # 21: the task loop's mechanics in tools/telesma-task.py (next / done /
+                                       #     commit); instructions only — no file in the project changes
+            21) PROJECT_FORMAT=22 ;;   # 22: the sandbox (## Sandbox, reaches config.md through the merge as
+                                       #     `Enabled: no`); a new config starts with `yes` where it can run
+            22) PROJECT_FORMAT=23      # 23: allow rules for what the task tool does (git add / commit, phase
+                                       #     tags, task-branch pushes, gh pr create) leave config.md and
+                                       #     settings.local.json — the guard refuses those commands anyway
+                python3 "$SCRIPT_DIR/templates/setup/retired_rules.py" apply "$PROJECT_DIR" > /dev/null 2>&1 || true ;;
             *) break ;;
         esac
-        echo "$PROJECT_FORMAT" > "$VERSION_FILE"
+        write_version "$PROJECT_FORMAT"
     done
     if (( PROJECT_FORMAT < TELESMA_FORMAT )); then
         echo -e "${RED}Error: telesma/state/.telesma-version says format ${PROJECT_FORMAT}; this Telesma starts at ${TELESMA_FORMAT}.${NC}"
         echo -e "${RED}Nothing in the project has been changed.${NC}"
         exit 1
     fi
-    # A project at a higher format than this Telesma is left as it is.
 else
     mkdir -p "$STATE_DIR"                # fresh project
-    echo "$TELESMA_FORMAT" > "$VERSION_FILE"
+    write_version "$TELESMA_FORMAT"
 fi
+
+# =============================================================================
+# Start lock — one launcher per project at a time
+# =============================================================================
+# Two launchers on one project rewrite the same files (config.md, settings.local.json, the state
+# files, the manifest) and the second `claude --continue` joins the first one's session. The lock
+# is a directory (mkdir is atomic) with the owner's pid; a lock whose process is gone is taken
+# over. Held until the launcher ends — the Claude session included — and released by the EXIT trap.
+start_lock() {
+    local dir="$STATE_DIR/.telesma-lock" pid owner here
+    here=$(cd "$PROJECT_DIR" && pwd -P)
+    if ! mkdir "$dir" 2>/dev/null; then
+        pid=$(cat "$dir/pid" 2>/dev/null || true)
+        owner=$(cat "$dir/project" 2>/dev/null || true)
+        # A lock copied along with the project (cp -R while the original was running) names the
+        # other folder: its live process does not work on this one.
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && [[ -z "$owner" || "$owner" == "$here" ]]; then
+            echo -e "${RED}$(msg lock.held 'Telesma is already running on this project (process %s). Finish or close that one first — two at once overwrite each other.' "$pid")${NC}"
+            echo "$(msg lock.stale 'If no Telesma is running, delete the folder %s and start again.' "$dir")"
+            exit 1
+        fi
+        rm -rf "$dir"                    # the owner is gone (closed window, crash)
+        mkdir "$dir" 2>/dev/null || { echo -e "${RED}$(msg lock.fail 'Cannot create %s.' "$dir")${NC}"; exit 1; }
+    fi
+    echo "$$" > "$dir/pid"
+    printf '%s\n' "$here" > "$dir/project"
+    TELESMA_LOCK_DIR="$dir"
+}
+start_lock
+
+# This machine's files in telesma/state/ stay out of git on every start, not by an instruction to
+# the model: the judge's decision log holds full command lines. .git/info/exclude, not .gitignore —
+# nothing to commit, nothing dirties the tree.
+git_exclude() {
+    local excl pat
+    excl=$(git -C "$PROJECT_DIR" rev-parse --git-path info/exclude 2>/dev/null || true)
+    [[ -n "$excl" ]] || return 0
+    [[ "$excl" = /* ]] || excl="$PROJECT_DIR/$excl"
+    mkdir -p "$(dirname "$excl")" 2>/dev/null || return 0
+    for pat in "$@"; do
+        grep -qxF "$pat" "$excl" 2>/dev/null || echo "$pat" >> "$excl"
+    done
+    return 0
+}
+git_exclude_local() {
+    git_exclude 'telesma/state/PERMISSIONS.jsonl' 'telesma/state/CHECKS.jsonl' 'telesma/state/.telesma-lock/' \
+                'telesma/state/.questions-before-plan' '.claude/settings.local.json.bak'
+}
+git_exclude_local
+
+# =============================================================================
+# Trust gate — telesma/config.md on THIS machine (templates/setup/trust.py)
+# =============================================================================
+# config.md is committed: it arrives with a clone or a pull request, and it holds values that run
+# here — the test commands (the baseline at adoption runs one), the permission mode and the allow
+# rules, the judge's and the telemetry's endpoint and key command, extra directories. A record per
+# project per machine (~/.config/telesma/trust/) holds a hash of each such section; a section that
+# is new or changed is shown and confirmed once, before anything reads it. A config this run of
+# the launcher created is its own; the launcher's own later writes (merge, wizard, permission
+# write-back) are stamped again — at that point every section is trusted, the gate has passed.
+# Without a terminal: TELESMA_TRUST_CONFIG=yes (CI, scripts). `Mode: bypassPermissions` is typed
+# by the person, never taken from the variable.
+TRUST_TOOL="$SCRIPT_DIR/templates/setup/trust.py"
+TRUST_FRESH=false
+trust_stamp() { python3 "$TRUST_TOOL" stamp "$PROJECT_DIR" > /dev/null 2>&1 || true; }
+# A config this launcher creates starts with the sandbox on where it can run (change plan K1);
+# an existing project gets `Enabled: no` from the merge and a one-line tip at every start.
+sandbox_default() {
+    [[ "$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" available 2>/dev/null)" == yes ]] || return 0
+    python3 "$SCRIPT_DIR/templates/setup/configure.py" set "$1" Sandbox Enabled yes > /dev/null 2>&1 || true
+}
+trust_gate() {
+    local mode untrusted answer needs_word=false
+    [[ -f "$TELESMA_DIR/config.md" ]] || return 0
+    if ! mode=$(python3 "$TRUST_TOOL" mode "$PROJECT_DIR"); then
+        echo -e "${RED}$(msg trust.mode.bad 'telesma/config.md → ## Permissions → Mode: "%s" is not a permission mode of Claude Code.' "$mode")${NC}"
+        echo "$(msg trust.mode.known 'Use one of: default, acceptEdits, plan, auto, dontAsk, bypassPermissions. Nothing was started.')"
+        exit 1
+    fi
+    if [[ "$CONFIG_EXISTED" != true || "$TRUST_FRESH" == true ]]; then
+        trust_stamp
+        return 0
+    fi
+    untrusted=$(python3 "$TRUST_TOOL" check "$PROJECT_DIR") || untrusted="Permissions"
+    [[ -n "$untrusted" ]] || return 0
+    if [[ "$mode" == "bypassPermissions" ]] && grep -qx 'Permissions' <<< "$untrusted"; then
+        needs_word=true
+    fi
+    if [[ "${TELESMA_TRUST_CONFIG:-}" == "yes" && "$needs_word" != true ]]; then
+        trust_stamp
+        return 0
+    fi
+    if ! { true < /dev/tty; } 2>/dev/null; then
+        echo -e "${RED}$(msg trust.notty 'telesma/config.md holds settings that run on this machine (commands, permissions, endpoints) and nobody here has confirmed them yet.')${NC}"
+        if [[ "$needs_word" == true ]]; then
+            echo "$(msg trust.notty.bypass 'It asks for Mode: bypassPermissions — that is confirmed only in a terminal. Nothing was started.')"
+        else
+            echo "$(msg trust.notty.how 'Start Telesma once in a terminal, or set TELESMA_TRUST_CONFIG=yes for a config you trust. Nothing was started.')"
+        fi
+        exit 1
+    fi
+    echo ""
+    echo -e "${YELLOW}$(msg trust.title '=== Settings of this project that run on your computer ===')${NC}"
+    echo "$(msg trust.why1 'telesma/config.md came with the project or changed since you last confirmed it. These values')"
+    echo "$(msg trust.why2 'start programs, set what Claude may do without asking, or send data somewhere:')"
+    echo ""
+    # shellcheck disable=SC2086  # section names, one per line: split on newlines only
+    (IFS=$'\n'; python3 "$TRUST_TOOL" show "$PROJECT_DIR" --template "$SCRIPT_DIR/templates/config.md" $untrusted) || true
+    echo ""
+    if [[ "$needs_word" == true ]]; then
+        echo -e "${RED}$(msg trust.bypass1 'Mode: bypassPermissions — Claude will run every command without asking you, and nothing checks them.')${NC}"
+        read -r -p "$(msg trust.bypass.ask 'To accept, type bypassPermissions (anything else stops)'): " answer < /dev/tty || answer=""
+        if [[ "$answer" != "bypassPermissions" ]]; then
+            echo "$(msg trust.no 'Stopped. Nothing was started. Edit telesma/config.md, or ask whoever changed it.')"
+            exit 1
+        fi
+    else
+        read -r -p "$(msg trust.ask 'Do you accept these settings?') [$(msg no.yes 'y/N')]: " answer < /dev/tty || answer=""
+        case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+            y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')") ;;
+            *) echo "$(msg trust.no 'Stopped. Nothing was started. Edit telesma/config.md, or ask whoever changed it.')"
+               exit 1 ;;
+        esac
+    fi
+    trust_stamp
+    echo ""
+}
 
 # Create telesma/spec/ if it does not exist + seed it with the template if empty
 SPEC_DIR="$TELESMA_DIR/spec"
 SPEC_UX_UI_DIR="$SPEC_DIR/ux_ui"
 SPEC_TEMPLATE_FILE="$SCRIPT_DIR/templates/SPEC_TEMPLATE.md"
+# shellcheck disable=SC2034  # the two template paths are named here for the wizard (templates/setup/wizard.sh copies them)
 APP_FLOW_TEMPLATE_FILE="$SCRIPT_DIR/templates/APP_FLOW_TEMPLATE.md"
 APP_FLOW_FILE="$SPEC_DIR/APP_FLOW.md"
+# shellcheck disable=SC2034
 UX_LINKS_TEMPLATE_FILE="$SCRIPT_DIR/templates/UX_LINKS_TEMPLATE.md"
 UX_LINKS_FILE="$SPEC_UX_UI_DIR/LINKS.md"
 if [[ ! -d "$SPEC_DIR" ]]; then
@@ -560,9 +774,11 @@ run_interview() {
         cp "$SCRIPT_DIR/templates/config.md" "$cfg"
         python3 "$configure" set "$cfg" Project Language "${lang:-$(msg_system_language)}" > /dev/null
         python3 "$configure" set "$cfg" Project Experience beginner > /dev/null
+        sandbox_default "$cfg"
     fi
     msg_load_language "$cfg"
     lang=$(grep -m1 '^- \*\*Language\*\*:' "$cfg" | sed 's/^[^:]*:[[:space:]]*//'); lang=${lang:-en}
+    # shellcheck disable=SC2010  # a listing for the prompt: names as ls prints them are what is wanted
     existing=$(ls -A "$SPEC_DIR" 2>/dev/null | grep -v '^ux_ui$' | sed 's|^|- telesma/spec/|')
     prompt="$(cat "$instr/INTERVIEW.md")
 
@@ -614,6 +830,7 @@ continue_or_stop() {    # continue_or_stop <question> [arguments of the next run
     fi
     case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
         ""|y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
+            telesma_cleanup
             exec bash "$SCRIPT_DIR/telesma.sh" "$PROJECT_DIR" "$@" ;;
     esac
     echo -e "$(msg later 'When you want to go on, type: %s' "${GREEN}$0 $PROJECT_DIR${NC}")"
@@ -694,6 +911,7 @@ adopt_prepare() {
             exit 0
         fi
         git -C "$PROJECT_DIR" init -q || exit 1
+        git_exclude_local             # the repository exists only now
         adopt_ignore_junk
         if ! git -C "$PROJECT_DIR" add -A || ! git -C "$PROJECT_DIR" commit -q -m "Existing system before Telesma"; then
             echo -e "${RED}$(msg adopt.git.fail 'The first commit did not go through (git user.name / user.email set?). Commit by hand and start again.')${NC}"
@@ -724,6 +942,7 @@ if [[ "${ADOPT:-false}" == "true" ]] && ! project_adopted; then
 fi
 
 # Empty telesma/spec/ → copy the technical guidelines template and explain what goes where
+# shellcheck disable=SC2010  # a count of entries, not a loop over names
 SPEC_CONTENT_COUNT=$(ls -A "$SPEC_DIR" 2>/dev/null | grep -v '^APP_FLOW\.md$' | grep -v '^ux_ui$' | wc -l | tr -d ' ')
 if [[ "${NEW_PROJECT:-false}" == "true" ]] && grep -qi '^- \*\*Clarified\*\*:.*yes' "$TELESMA_DIR/config.md" 2>/dev/null; then
     echo -e "${RED}This project already has a specification and a plan — --new is for a project without one.${NC}"
@@ -733,6 +952,7 @@ fi
 if [[ "${NEW_PROJECT:-false}" == "true" ]] && ! interview_complete; then
     run_interview                 # exits itself when the interview did not finish
     SETUP_WIZARD_AUTO=true        # config.md was created above; the first-start wizard still has to run
+    TRUST_FRESH=true              # written in this terminal, with this person: the launcher's own config
 elif [[ "$SPEC_CONTENT_COUNT" -eq 0 ]]; then
     if [[ -f "$SPEC_TEMPLATE_FILE" ]]; then
         cp "$SPEC_TEMPLATE_FILE" "$SPEC_DIR/TECHNICAL_GUIDELINES.md"
@@ -825,11 +1045,14 @@ INSTR_DIR="$SCRIPT_DIR/templates/instructions"
 # telesma/config.md - required (created from the template when missing)
 if [[ ! -f "$CONFIG_FILE" ]]; then
     cp "$SCRIPT_DIR/templates/config.md" "$CONFIG_FILE"
+    sandbox_default "$CONFIG_FILE"
     echo -e "${GREEN}Created telesma/config.md from the template${NC}"
     # A fresh config = first run with content in telesma/spec/ → the setup wizard
     # (further below, after the config merge — every section must already exist)
     SETUP_WIZARD_AUTO=true
 fi
+# Nothing below reads a value of config.md that this machine has not confirmed
+trust_gate
 
 # Modular instructions — assembled per mode (clarification/1/2/3/4), so that the prompt does
 # not carry sections of modes Claude is not working in
@@ -848,6 +1071,22 @@ done
 # - Keeps fields added by the user (not in the template)
 # - Does NOT touch the ## Permissions section (synced separately below)
 # =============================================================================
+# The quality checks keep a baseline of their own section (`## Checks`) and stop the next commit when
+# the section differs from it — the agent must not switch a check off. The merge below is the
+# launcher's own write: when the section matched the baseline before it and differs after, the
+# launcher records the new state (further down, `--baseline --config-section`). A section that
+# already differed before the merge stays a difference for the human (`--approve`).
+checks_section_sum() { awk '/^## Checks[[:space:]]*$/{s=1;next} /^## /{s=0} s' "$CONFIG_FILE" 2>/dev/null | cksum; }
+CHECKS_SECTION_BY_LAUNCHER=no
+_chk_clean=no
+_chk_runner="$PROJECT_DIR/telesma/checks/telesma-checks.py"
+_chk_base=$(git -C "$PROJECT_DIR" rev-parse --git-path telesma-checks/baseline.json 2>/dev/null || true)
+[[ -n "$_chk_base" && "$_chk_base" != /* ]] && _chk_base="$PROJECT_DIR/$_chk_base"
+if [[ -n "$_chk_base" && -f "$_chk_base" && -f "$_chk_runner" ]] && command -v python3 &> /dev/null; then
+    _chk_out=$(python3 "$_chk_runner" --baseline "$PROJECT_DIR" 2>/dev/null || true)
+    case "$_chk_out" in *"## Checks (changed)"*) ;; *) _chk_clean=yes ;; esac
+fi
+_chk_sum_before=$(checks_section_sum)
 if command -v python3 &> /dev/null; then
     # A beginner did not write config.md and cannot act on a list of merged keys.
     MERGE_QUIET=0
@@ -861,9 +1100,30 @@ from collections import OrderedDict, defaultdict
 GREEN, CYAN, YELLOW, NC = '\033[0;32m', '\033[0;36m', '\033[1;33m', '\033[0m'
 template_path, local_path = sys.argv[1], sys.argv[2]
 
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    import tempfile
+    path = str(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.telesma-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 with open(template_path, encoding='utf-8') as f:
     t_content = f.read()
-with open(local_path, encoding='utf-8') as f:
+with open(local_path, encoding='utf-8', errors='replace') as f:
     l_content = f.read()
 
 SKIP_SECTION = 'Permissions'
@@ -939,8 +1199,7 @@ if added_sections:
             blocks.append(blk)
     if blocks:
         l_content = l_content.rstrip() + '\n\n' + '\n\n'.join(blocks) + '\n'
-        with open(local_path, 'w', encoding='utf-8') as f:
-            f.write(l_content)
+        write_atomic(local_path, l_content)
         # Re-parse the local sections — they now include the appended ones
         l_sections = parse_fields(l_content)
 
@@ -994,8 +1253,7 @@ if added:
             new_block.append('')
             new_block.extend(blk)
         l_lines = l_lines[:insert_at] + new_block + l_lines[insert_at:]
-    with open(local_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(l_lines) + '\n')
+    write_atomic(local_path, '\n'.join(l_lines) + '\n')
 
 # Reported only when the file changed (a new section or field) or carries a field the template
 # does not know (a typo, or a key of another version). Values the user set are kept silently:
@@ -1017,6 +1275,9 @@ elif added_sections or added or custom:
         for s, l in custom:
             print(f'    * {s} -> {l}')
 PYMERGE
+fi
+if [[ "$_chk_clean" == yes && "$(checks_section_sum)" != "$_chk_sum_before" ]]; then
+    CHECKS_SECTION_BY_LAUNCHER=yes
 fi
 
 # --adopt: the Adopted fields, now that the merge guarantees them in the file (a config from an
@@ -1042,6 +1303,7 @@ load_integrations() {
     INTEG_TRACKER=$(config_field Integrations Tracker | tr '[:upper:]' '[:lower:]'); INTEG_TRACKER=${INTEG_TRACKER:-none}
     INTEG_REPO_NAME=$(config_field Integrations Repo)
     INTEG_MERGE=$(config_field Integrations Merge | tr '[:upper:]' '[:lower:]'); INTEG_MERGE=${INTEG_MERGE:-agent}
+    # shellcheck disable=SC2034  # read with the other fields; the judge and the instructions use the config directly
     INTEG_CHECKS=$(config_field Integrations "Required checks")
     INTEG_LIMIT=$(config_field Integrations "Open PR limit"); [[ "$INTEG_LIMIT" =~ ^[0-9]+$ ]] || INTEG_LIMIT=3
     INTEG_BRANCH_PREFIX=$(config_field Integrations "Branch prefix"); INTEG_BRANCH_PREFIX=${INTEG_BRANCH_PREFIX:-task-}
@@ -1061,6 +1323,13 @@ if [[ "${SETUP_WIZARD_AUTO:-false}" == "true" || "${SETUP_WIZARD:-false}" == "tr
     else
         setup_wizard_menu
     fi
+    trust_stamp                   # the wizard's answers were given here
+    # ... and so were the checks it switched on or off: record the section for the checks' baseline
+    # (a runner from before this option ignores the call; the next start creates the baseline).
+    if [[ -f "$PROJECT_DIR/telesma/checks/telesma-checks.py" ]]; then
+        python3 "$PROJECT_DIR/telesma/checks/telesma-checks.py" --baseline "$PROJECT_DIR" \
+            --templates "$SCRIPT_DIR/templates/checks" --config-section > /dev/null 2>&1 || true
+    fi
     if [[ "${WIZARD_NEXT:-}" == "clarify" ]]; then
         continue_or_stop "$(msg go.clarify 'Go on now? Telesma reads the description, asks a few questions about the details and plans the work')"
     elif [[ "${WIZARD_NEXT:-}" == "survey" ]]; then
@@ -1074,6 +1343,7 @@ if [[ "${INTEGRATIONS_WIZARD:-false}" == "true" ]]; then
     source "$INTEGRATIONS_DIR/wizard.sh"
     integrations_wizard
     load_integrations
+    trust_stamp
     echo -e "Done. Start the project: ${GREEN}$0 $PROJECT_DIR${NC}"
     exit 0
 fi
@@ -1171,8 +1441,32 @@ import sys
 
 config_path, settings_path = sys.argv[1], sys.argv[2]
 TELESMA_FOOTER = '🤖 Generated with Telesma'
+# The permission modes Claude Code has. The value goes to `claude --permission-mode` and into
+# settings.local.json; anything else is a typo or somebody's experiment, not a mode.
+KNOWN_MODES = ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions')
 
-with open(config_path, 'r', encoding='utf-8') as f:
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    import tempfile
+    path = str(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.telesma-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
     content = f.read()
 
 section_re = re.compile(r'^## Permissions.*?(?=^## |\Z)', re.MULTILINE | re.DOTALL)
@@ -1187,6 +1481,8 @@ def parse_field(label):
     r = re.search(r'^- \*\*' + re.escape(label) + r'\*\*:\s*(.+?)\s*$',
                   section, re.MULTILINE)
     return r.group(1).strip() if r else None
+
+MD_ESCAPE = re.compile(r'\\([*_\[\]()#.`-])')
 
 def parse_list(label):
     """List items under a field, tolerant of comments and grouping.
@@ -1214,10 +1510,16 @@ def parse_list(label):
             continue
         mi = re.match(r'^-\s+(.+?)\s*$', s)
         if mi:
-            items.append(mi.group(1).strip().strip('`'))
+            # A Markdown editor saves `Bash(git add:*)` as `Bash(git add:\*)`: the escape is the
+            # editor's, not the rule's — kept, it would be a rule that matches nothing.
+            items.append(MD_ESCAPE.sub(r'\1', mi.group(1).strip().strip('`')))
     return items
 
 mode = parse_field('Mode') or 'acceptEdits'
+if mode not in KNOWN_MODES:
+    sys.stderr.write(f"telesma/config.md → ## Permissions → Mode: {mode!r} is not a permission mode of "
+                     f"Claude Code ({', '.join(KNOWN_MODES)}) — nothing was synced\n")
+    sys.exit(3)
 auto_sync_raw = parse_field('Auto-sync new permissions') or 'yes'
 auto_sync = auto_sync_raw.strip().lower() in ('yes', 'true', 'y')
 generalize_raw = parse_field('Generalize permissions') or 'yes'
@@ -1230,7 +1532,21 @@ if os.path.exists(settings_path):
     try:
         with open(settings_path, 'r', encoding='utf-8') as f:
             existing = json.load(f)
-    except Exception:
+        if not isinstance(existing, dict):
+            raise ValueError('not a JSON object')
+    except Exception as e:
+        # A file that does not parse (a trailing comma, a half-written save) holds hooks, env
+        # and allow-always answers of the person: it is kept aside, never silently replaced.
+        import shutil
+        backup = settings_path + '.bak'
+        try:
+            shutil.copyfile(settings_path, backup)
+            kept = f'kept as {backup}'
+        except OSError:
+            kept = 'and it could not be copied aside'
+        sys.stderr.write(f"WARNING: {settings_path} is not valid JSON ({e}) — {kept}; a new file is "
+                         f"written from telesma/config.md. Hooks, env and other keys you had there are in "
+                         f"the copy: fix it and merge them back.\n")
         existing = {}
 
 existing_perms = existing.get('permissions', {}) or {}
@@ -1250,27 +1566,30 @@ gen_count = 0
 if generalize:
     TWO_TOKEN = {'git', 'npm', 'yarn', 'pnpm', 'docker', 'uv', 'poetry', 'pip',
                  'go', 'cargo', 'bundle', 'gradle'}
+    # Only families whose every variation reads, or builds and tests the project. NOT here, on
+    # purpose: interpreters and runners of arbitrary code (python, node, npx, make, uv run,
+    # go run, npm exec, docker compose), and tools one flag away from destroying data
+    # (find -delete, xargs rm, sed -i, awk, mv, cp over a file, git stash drop, git tag -d,
+    # git branch -D). One approved xargs grep must not become any xargs command.
     SAFE_FAMILIES = {
-        # file / diagnostic tools (read and create, no deletion)
-        'ls', 'pwd', 'mkdir', 'touch', 'cp', 'mv', 'cat', 'head', 'tail', 'wc',
-        'grep', 'find', 'which', 'date', 'echo', 'diff', 'sort', 'uniq', 'tree',
-        'sed', 'awk', 'xargs',
-        # test runners / linters / builds
-        'pytest', 'jest', 'vitest', 'playwright', 'detox', 'tsc', 'node', 'npx',
+        # reading and listing
+        'ls', 'pwd', 'mkdir', 'cat', 'head', 'tail', 'wc',
+        'grep', 'which', 'date', 'echo', 'diff', 'sort', 'uniq', 'tree',
+        # test runners / linters / typecheckers
+        'pytest', 'jest', 'vitest', 'playwright', 'detox', 'tsc',
         'ruff', 'eslint', 'prettier', 'black', 'mypy', 'flake8', 'isort',
-        'alembic', 'uvicorn', 'make', 'expo', 'python', 'python3',
         # two-token families (the full prefix must be on the list)
-        'git status', 'git diff', 'git log', 'git show', 'git branch', 'git stash',
-        'git add', 'git commit', 'git tag', 'git fetch', 'git describe',
-        'npm install', 'npm ci', 'npm run', 'npm test', 'npm exec', 'npm ls',
+        'git status', 'git diff', 'git log', 'git show',
+        'git fetch', 'git describe',
+        'npm install', 'npm ci', 'npm run', 'npm test', 'npm ls',
         'yarn install', 'yarn add', 'yarn run', 'yarn test',
         'pnpm install', 'pnpm add', 'pnpm run', 'pnpm test',
-        'docker compose', 'docker build', 'docker ps', 'docker logs', 'docker images',
+        'docker build', 'docker ps', 'docker logs', 'docker images',
         'pip install', 'pip list', 'pip show',
-        'uv run', 'uv sync', 'uv add', 'uv pip', 'uv venv', 'uv lock',
-        'poetry install', 'poetry run', 'poetry add', 'poetry lock',
-        'go build', 'go test', 'go run', 'go mod', 'go vet',
-        'cargo build', 'cargo test', 'cargo run', 'cargo check', 'cargo fmt', 'cargo clippy',
+        'uv sync', 'uv add', 'uv pip', 'uv venv', 'uv lock',
+        'poetry install', 'poetry add', 'poetry lock',
+        'go build', 'go test', 'go mod', 'go vet',
+        'cargo build', 'cargo test', 'cargo check', 'cargo fmt', 'cargo clippy',
     }
 
     def family_of(cmd):
@@ -1324,9 +1643,7 @@ new_settings['attribution'] = {
     'sessionUrl': False,
 }
 new_settings.pop('includeCoAuthoredBy', None)   # old key; it conflicts with `attribution` in one file
-with open(settings_path, 'w', encoding='utf-8') as f:
-    json.dump(new_settings, f, indent=2, ensure_ascii=False)
-    f.write('\n')
+write_atomic(settings_path, json.dumps(new_settings, indent=2, ensure_ascii=False) + '\n')
 
 added_allow = sorted(set(existing_allow) - set(cfg_allow))
 added_deny = sorted(set(existing_deny) - set(cfg_deny))
@@ -1368,8 +1685,7 @@ if auto_sync and config_changed:
 
     new_section = '\n'.join(lines) + '\n'
     new_content = content[:m.start()] + new_section + content[m.end():]
-    with open(config_path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+    write_atomic(config_path, new_content)
 
     total_added = len(added_allow) + len(added_deny)
     if total_added:
@@ -1412,10 +1728,10 @@ if notes:
 PYEOF
 )
     if [[ -n "$BYPASSED" ]]; then
-        set -- $BYPASSED
-        echo -e "${YELLOW}Previous session(s) ran in Claude Code's '$1' permission mode (last: $2, $3 session(s)) — the permission judge was bypassed;${NC}"
-        echo -e "${YELLOW}only its contract layer ran. Keep the mode shown in the status bar at '${PERMISSION_MODE:-acceptEdits}' (Shift+Tab cycles it). See docs/PERMISSION_JUDGE.md.${NC}"
-        set --
+        # the three words come from a log the session writes: read, not word-split and globbed
+        read -r _by_mode _by_ts _by_n <<< "$(plain "$BYPASSED")"
+        printf '%b%s%b\n' "$YELLOW" "Previous session(s) ran in Claude Code's '${_by_mode}' permission mode (last: ${_by_ts}, ${_by_n} session(s)) — the permission judge was bypassed;" "$NC"
+        printf '%b%s%b\n' "$YELLOW" "only its contract layer ran. Keep the mode shown in the status bar at '${PERMISSION_MODE:-acceptEdits}' (Shift+Tab cycles it). See docs/PERMISSION_JUDGE.md." "$NC"
     fi
 else
     echo -e "${YELLOW}python3 not available — skipping permission sync${NC}"
@@ -1439,8 +1755,8 @@ hash_of() { cksum < "$1" | awk '{print $1 "-" $2}'; }
 manifest_get() { awk -v n="$1" '$1==n{print $2; exit}' "$MANIFEST_FILE" 2>/dev/null || true; }
 
 manifest_set() {
-    { grep -v "^$1 " "$MANIFEST_FILE" 2>/dev/null || true; echo "$1 $2"; } > "${MANIFEST_FILE}.tmp" \
-        && mv "${MANIFEST_FILE}.tmp" "$MANIFEST_FILE"
+    { grep -v "^$1 " "$MANIFEST_FILE" 2>/dev/null || true; echo "$1 $2"; } > "${MANIFEST_FILE}.tmp.$$" \
+        && mv "${MANIFEST_FILE}.tmp.$$" "$MANIFEST_FILE"
 }
 
 # Is the project file identical to any historical version of the template?
@@ -1451,6 +1767,31 @@ template_history_match() {
     git -C "$SCRIPT_DIR" rev-list --all -- "$rel" 2>/dev/null | while IFS= read -r c; do
         git -C "$SCRIPT_DIR" rev-parse -q --verify "$c:$rel" 2>/dev/null || true
     done | grep -qx "$ph"
+}
+
+# The judge hook and the quality checks supervise the session — and live in the project, where the
+# session can write. "User edits win" stays (nothing is overwritten), but a copy that is neither
+# the delivered version nor any earlier one is said out loud on EVERY start, not once: an edit
+# nobody remembers making is exactly what this is for.
+#   supervision_differs <manifest key> <template path relative to the Telesma repo> <project file> <template file>
+SUPERVISION_CHANGED=()
+supervision_differs() {
+    local rel="$2" pf="$3" tf="$4"     # $1, the manifest key, names the file for the reader of a call
+    [[ -f "$pf" && -f "$tf" ]] || return 0
+    [[ "$(hash_of "$pf")" == "$(hash_of "$tf")" ]] && return 0
+    template_history_match "$rel" "$pf" && return 0
+    SUPERVISION_CHANGED+=("$pf")
+    return 0
+}
+supervision_report() {
+    [[ ${#SUPERVISION_CHANGED[@]} -gt 0 ]] || return 0
+    local f
+    echo -e "${RED}$(msg sup.changed '⚠ Files that supervise the session differ from every version Telesma has delivered:')${NC}"
+    for f in "${SUPERVISION_CHANGED[@]}"; do
+        printf '    %s\n' "$(plain "${f#"$PROJECT_DIR"/}")"
+    done
+    echo -e "${RED}$(msg sup.changed.how 'If you edited them yourself, this is only a reminder. If not, a session changed its own supervision: compare with %s and restore the file from there.' "$SCRIPT_DIR/templates/")${NC}"
+    echo ""
 }
 
 if [[ ! -d "$GUIDELINES_DIR" ]] && [[ -d "$TEMPLATES_GUIDELINES_DIR" ]]; then
@@ -1558,8 +1899,29 @@ import sys
 
 config_path, settings_path, project_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    import tempfile
+    path = str(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.telesma-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 try:
-    with open(config_path, encoding='utf-8') as f:
+    with open(config_path, encoding='utf-8', errors='replace') as f:
         content = f.read()
 except OSError:
     sys.exit(0)
@@ -1649,9 +2011,7 @@ else:
 if perms:
     settings['permissions'] = perms
 os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2, ensure_ascii=False)
-    f.write('\n')
+write_atomic(settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
 
 # Merge back: directories added outside config.md return to the list, so that the file
 # stays the single source of truth (same as the ## Permissions section).
@@ -1669,8 +2029,7 @@ if auto_sync and appended:
             end -= 1             # insert after the last item, not after a blank line
         insert = [f'  - {d}' for d in appended]
         new = '\n'.join(lines[:end] + insert + lines[end:])
-        with open(config_path, 'w', encoding='utf-8') as f:
-            f.write(content[:m.start()] + new.rstrip() + '\n\n' + content[m.end():])
+        write_atomic(config_path, content[:m.start()] + new.rstrip() + '\n\n' + content[m.end():])
 
 # \x1f separator, not a tab: a tab is an IFS whitespace character, so `read` would
 # merge empty fields and the messages would shift by one position
@@ -1686,6 +2045,9 @@ PYDIRS
         [[ "$WD_NEW" != "0" ]] && echo -e "${GREEN}  + added ${WD_NEW} to telesma/config.md${NC}"
     fi
 fi
+# The merge, the plan's test commands and the two write-backs above were the launcher's own
+# writes to a config that passed the trust gate: the record follows them.
+trust_stamp
 
 # =============================================================================
 # Permission auto-approval — PermissionRequest hook (opt-in)
@@ -1727,6 +2089,7 @@ if [[ -f "$HOOKS_TEMPLATE" ]] && command -v python3 &> /dev/null; then
             fi
         fi
     fi
+    supervision_differs "$hk_name" "templates/hooks/telesma-permission-judge.py" "$HOOK_JUDGE" "$HOOKS_TEMPLATE"
 
     AUTO_APPROVE_STATE=$(python3 - "$CONFIG_FILE" "$PROJECT_DIR/.claude/settings.local.json" <<'PYHOOK'
 import json
@@ -1736,12 +2099,33 @@ import sys
 
 config_path, settings_path = sys.argv[1], sys.argv[2]
 
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    import tempfile
+    path = str(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.telesma-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 MARKER = 'telesma-permission-judge'          # our command hooks are recognized by their path
 MARKER_PROMPT = '[telesma-judge]'            # prompt/agent hooks — by the marker in their text
 SCRIPT = f'python3 "{os.environ.get("TELESMA_HOOK_ROOT", "$CLAUDE_PROJECT_DIR")}/.claude/hooks/telesma-permission-judge.py"'
 
 try:
-    with open(config_path, encoding='utf-8') as f:
+    with open(config_path, encoding='utf-8', errors='replace') as f:
         content = f.read()
 except OSError:
     sys.exit(0)
@@ -1938,9 +2322,7 @@ else:
     settings.pop('hooks', None)
 
 os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-with open(settings_path, 'w', encoding='utf-8') as f:
-    json.dump(settings, f, indent=2, ensure_ascii=False)
-    f.write('\n')
+write_atomic(settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
 
 if not enabled:
     print('off')
@@ -2012,20 +2394,20 @@ PYHOOK
 )
     if [[ -n "$AUTO_APPROVE_STATE" && "$AUTO_APPROVE_STATE" != "off" ]]; then
         IFS=$'\x1f' read -r _st AA_JUDGE AA_RISK AA_MATCHER AA_PROBLEMS AA_NOTES <<< "$AUTO_APPROVE_STATE"
-        echo -e "${GREEN}Auto-approval: judge=${AA_JUDGE}, risk=${AA_RISK}, tools=${AA_MATCHER}${NC}"
+        printf '%b%s%b\n' "$GREEN" "Auto-approval: judge=$(plain "$AA_JUDGE"), risk=$(plain "$AA_RISK"), tools=$(plain "$AA_MATCHER")" "$NC"
         if [[ -n "$AA_NOTES" ]]; then
-            echo -e "  ${AA_NOTES}"
+            printf '  %s\n' "$(plain "$AA_NOTES")"
         fi
         if [[ -n "$AA_PROBLEMS" ]]; then
             if [[ "$AA_JUDGE" == *"+pretooluse"* ]]; then
                 # The worst possible state: the layer that adds questions works,
                 # and the one that was supposed to remove them does not. All cost, no benefit.
-                echo -e "${RED}  ✗ ${AA_PROBLEMS}${NC}"
+                printf '%b%s%b\n' "$RED" "  ✗ $(plain "$AA_PROBLEMS")" "$NC"
                 echo -e "${RED}    The judge DOES NOT WORK, while 'Force ask despite allowlist' is on —${NC}"
                 echo -e "${RED}    you are adding questions and getting nothing back. Fix the above or set${NC}"
                 echo -e "${RED}    'Force ask despite allowlist: no'.${NC}"
             else
-                echo -e "${YELLOW}  ⚠ ${AA_PROBLEMS} — the judge will stay silent, every question will come to you${NC}"
+                printf '%b%s%b\n' "$YELLOW" "  ⚠ $(plain "$AA_PROBLEMS") — the judge will stay silent, every question will come to you" "$NC"
             fi
         fi
         if [[ "$PERMISSION_MODE" == "bypassPermissions" ]]; then
@@ -2064,7 +2446,10 @@ if [[ "$CHECKS_ENABLED" == "yes" && -d "$CHECKS_TEMPLATES_DIR" ]]; then
             continue
         fi
         _hs=$(manifest_get "$_key")
-        [[ "$_ht" == "$_hs" ]] && continue
+        if [[ "$_ht" == "$_hs" ]]; then
+            supervision_differs "$_key" "templates/checks/$_rel" "$_pf" "$_tf"
+            continue
+        fi
         _hp=$(hash_of "$_pf")
         if [[ "$_hp" == "$_ht" ]]; then
             manifest_set "$_key" "$_ht"
@@ -2076,9 +2461,23 @@ if [[ "$CHECKS_ENABLED" == "yes" && -d "$CHECKS_TEMPLATES_DIR" ]]; then
             echo -e "  ${YELLOW}⚠${NC} telesma/checks/$_rel — LOCAL CHANGES + a newer template version; merge by hand:"
             echo -e "      diff \"$_pf\" \"$_tf\""
             manifest_set "$_key" "$_ht"
+            supervision_differs "$_key" "templates/checks/$_rel" "$_pf" "$_tf"
         fi
     done < <(find "$CHECKS_TEMPLATES_DIR" -type f ! -name '*.pyc' ! -path '*/__pycache__/*' ! -path '*/.ruff_cache/*' \
                   ! -path '*/.mypy_cache/*' ! -path '*/.pytest_cache/*' -print0)
+
+    # Integrity baseline of the check files (.git/telesma-checks/baseline.json): created when
+    # missing, module files identical to the delivered templates recorded (the sync above just wrote
+    # them). Without it the hook denies the first commit: "no baseline" is not "unchanged".
+    if [[ -f "$CHECKS_DIR/telesma-checks.py" ]] && command -v python3 &> /dev/null; then
+        if [[ "$CHECKS_SECTION_BY_LAUNCHER" == yes ]]; then
+            python3 "$CHECKS_DIR/telesma-checks.py" --baseline "$PROJECT_DIR" \
+                --templates "$CHECKS_TEMPLATES_DIR" --config-section > /dev/null 2>&1 || true
+        else
+            python3 "$CHECKS_DIR/telesma-checks.py" --baseline "$PROJECT_DIR" \
+                --templates "$CHECKS_TEMPLATES_DIR" > /dev/null 2>&1 || true
+        fi
+    fi
 
     # Attack surface map: the `intent` check is in the config and there is no map → skeleton from
     # the code (routes, candidate roles, hosts, secrets). Without it, enabling the check on an
@@ -2103,6 +2502,27 @@ import sys
 
 settings_path, enabled = sys.argv[1], sys.argv[2] == 'yes'
 MARKER = 'telesma-checks.py'
+
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    import tempfile
+    path = str(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.telesma-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 settings = {}
 if os.path.exists(settings_path):
     try:
@@ -2139,12 +2559,15 @@ else:
     hooks.pop('PreToolUse', None)
 # PostToolUse: after `git commit` the check evidence gets the commit's SHA, after `git push`
 # to a task branch the hook posts the "Telesma: checks (local)" status on the PR (PR status: yes).
+# After any Bash command a commit that has no evidence is checked after the fact (in a temporary
+# worktree — hence the longer limit); after an Edit the human approved, the baseline of the check
+# files moves with it.
 post = without_ours('PostToolUse')
 if enabled:
-    post.append({'matcher': 'Bash', 'hooks': [{
+    post.append({'matcher': 'Bash|Edit|Write|MultiEdit', 'hooks': [{
         'type': 'command',
         'command': f'python3 "{os.environ.get("TELESMA_HOOK_ROOT", "$CLAUDE_PROJECT_DIR")}/telesma/checks/telesma-checks.py" --posttooluse',
-        'timeout': 60,
+        'timeout': 300,
     }]})
 if post:
     hooks['PostToolUse'] = post
@@ -2156,23 +2579,59 @@ else:
     settings.pop('hooks', None)
 if settings or os.path.exists(settings_path):
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-    with open(settings_path, 'w', encoding='utf-8') as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-        f.write('\n')
+    write_atomic(settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
 PYCHECKS
     if [[ "$CHECKS_ENABLED" == "yes" ]]; then
-        # The check log is data of this machine, not of the project: .git/info/exclude instead of
-        # .gitignore — nothing to commit, nothing dirties the tree (a dirty tree blocks the release tag)
-        _excl=$(git -C "$PROJECT_DIR" rev-parse --git-path info/exclude 2>/dev/null || true)
-        if [[ -n "$_excl" ]]; then
-            [[ "$_excl" = /* ]] || _excl="$PROJECT_DIR/$_excl"
-            mkdir -p "$(dirname "$_excl")"
-            grep -qxF 'telesma/state/CHECKS.jsonl' "$_excl" 2>/dev/null || echo 'telesma/state/CHECKS.jsonl' >> "$_excl"
-        fi
+        # (the check log stays out of git through git_exclude_local, on every start)
         _cl=$(awk '/^## Checks/{s=1;next} /^## /{s=0} s && /^### /{sub(/^### /,""); printf "%s ", $0}' "$CONFIG_FILE")
         echo -e "${GREEN}Quality checks: ${_cl:-none}${NC}"
     fi
 fi
+
+# The "code only" guard (tools/telesma-guard.py, change plan Z7): commits, ticks and the report's
+# history belong to the task tool. Registered on every start whatever ## Auto-approval and
+# ## Checks say — it decides by itself (format 21+, no repository integration) and never asks.
+# It runs from this clone, so the path is this machine's: settings.local.json is local.
+if command -v python3 &> /dev/null; then
+    python3 - "$PROJECT_DIR/.claude/settings.local.json" "$SCRIPT_DIR/tools/telesma-guard.py" <<'PYGUARD' || true
+import json, os, sys, tempfile
+settings_path, guard = sys.argv[1], sys.argv[2]
+MARKER = 'telesma-guard.py'
+settings = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path, encoding='utf-8') as f:
+            settings = json.load(f)
+    except (OSError, ValueError):
+        sys.exit(0)                     # a broken file is the permission sync's to report and back up
+hooks = settings.get('hooks') or {}
+groups = []
+for grp in hooks.get('PreToolUse') or []:
+    kept = [h for h in (grp.get('hooks') or []) if MARKER not in json.dumps(h)]
+    if kept:
+        groups.append({**grp, 'hooks': kept})
+command = f'python3 "{guard}"'
+groups.insert(0, {'matcher': 'Bash|Edit|Write|MultiEdit',
+                  'hooks': [{'type': 'command', 'command': command, 'timeout': 10}]})
+hooks['PreToolUse'] = groups
+# PostToolUse: the tool-call counter of the session budget (a warning, never a refusal)
+post = []
+for grp in hooks.get('PostToolUse') or []:
+    kept = [h for h in (grp.get('hooks') or []) if MARKER not in json.dumps(h)]
+    if kept:
+        post.append({**grp, 'hooks': kept})
+post.append({'matcher': '*', 'hooks': [{'type': 'command', 'command': command + ' --post', 'timeout': 5}]})
+hooks['PostToolUse'] = post
+settings['hooks'] = hooks
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path), prefix='.settings-')
+with os.fdopen(fd, 'w', encoding='utf-8') as f:
+    f.write(json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
+os.replace(tmp, settings_path)
+PYGUARD
+fi
+
+supervision_report
 
 # telesma/changes/ - channel for introducing changes after clarification (telesma/spec/ is frozen)
 # We create the directory + processed/ + an example file (if the template exists)
@@ -2346,21 +2805,23 @@ fi
 # The (id, url) pairs are also collected for the SPEC_INDEX freshness check (below, when assembling the prompt).
 UX_LINKS_PAIRS=""
 if [[ -f "$UX_LINKS_FILE" ]] && ! head -1 "$UX_LINKS_FILE" 2>/dev/null | grep -qF "TELESMA_UX_LINKS_TEMPLATE"; then
-    UX_LINKS_PAIRS=$(awk '/^## /{id=$2} /^- link:/{sub(/^- link:[[:space:]]*/,""); if (id != "") print id "\t" $0}' "$UX_LINKS_FILE" 2>/dev/null || true)
+    # Only http(s) addresses leave this file: the value goes to curl, and "-K file" is not a link
+    UX_LINKS_PAIRS=$(awk '/^## /{id=$2} /^- link:[[:space:]]*https?:\/\/[^[:space:]]+[[:space:]]*$/{sub(/^- link:[[:space:]]*/,""); sub(/[[:space:]]+$/,""); if (id != "") print id "\t" $0}' "$UX_LINKS_FILE" 2>/dev/null || true)
     UX_DUP_IDS=$(awk '/^## /{print $2}' "$UX_LINKS_FILE" 2>/dev/null | sort | uniq -d | tr '\n' ' ')
     if [[ -n "${UX_DUP_IDS// /}" ]]; then
-        echo -e "${YELLOW}⚠ telesma/spec/ux_ui/LINKS.md: duplicate entry ids: ${UX_DUP_IDS}— tags (ui-*: LINKS.md#id) will be ambiguous${NC}"
+        printf '%b%s%b\n' "$YELLOW" "⚠ telesma/spec/ux_ui/LINKS.md: duplicate entry ids: $(plain "$UX_DUP_IDS")— tags (ui-*: LINKS.md#id) will be ambiguous" "$NC"
     fi
     UX_NO_LINK=$(awk '/^## /{if (id != "" && !has) print id; id=$2; has=0} /^- link:[[:space:]]*http/{has=1} END{if (id != "" && !has) print id}' "$UX_LINKS_FILE" 2>/dev/null | tr '\n' ' ')
     if [[ -n "${UX_NO_LINK// /}" ]]; then
-        echo -e "${YELLOW}⚠ telesma/spec/ux_ui/LINKS.md: entries without a valid '- link: http…' field: ${UX_NO_LINK}${NC}"
+        printf '%b%s%b\n' "$YELLOW" "⚠ telesma/spec/ux_ui/LINKS.md: entries without a valid '- link: http…' field: $(plain "$UX_NO_LINK")" "$NC"
     fi
     if [[ -n "$UX_LINKS_PAIRS" ]] && command -v curl >/dev/null 2>&1; then
         while IFS=$'\t' read -r ux_id ux_url; do
             [[ -z "$ux_id" || -z "$ux_url" ]] && continue
-            UX_HTTP_CODE=$(curl -s -o /dev/null -L -m 6 -w '%{http_code}' "$ux_url" 2>/dev/null) || UX_HTTP_CODE="000"
+            [[ "$ux_url" =~ ^https?:// ]] || continue
+            UX_HTTP_CODE=$(curl -s -o /dev/null -L -m 6 --proto '=http,https' --proto-redir '=http,https' -w '%{http_code}' -- "$ux_url" 2>/dev/null) || UX_HTTP_CODE="000"
             if [[ ! "$UX_HTTP_CODE" =~ ^[23] ]]; then
-                echo -e "${YELLOW}⚠ telesma/spec/ux_ui/LINKS.md: link '$ux_id' unreachable (HTTP ${UX_HTTP_CODE})${NC}"
+                printf '%b%s%b\n' "$YELLOW" "⚠ telesma/spec/ux_ui/LINKS.md: link '$(plain "$ux_id")' unreachable (HTTP ${UX_HTTP_CODE})" "$NC"
                 echo -e "${CYAN}  Share the mockup (public/share link) — Telesma cannot fetch a private artifact.${NC}"
             fi
         done <<< "$UX_LINKS_PAIRS"
@@ -2471,8 +2932,8 @@ resolve_contradictions() {
         local sp="${s_props[$i]}"
 
         echo -e "${RED}$(msg s.item '--- Contradiction S%s ---' "$sn")${NC}"
-        echo -e "\n  ${st}\n"
-        echo -e "  ${YELLOW}$(msg s.proposal 'Proposed resolution: %s' "$sp")${NC}\n"
+        printf '\n  %s\n\n' "$(plain "$st")"
+        printf '  %b%s%b\n\n' "$YELLOW" "$(msg s.proposal 'Proposed resolution: %s' "$(plain "$sp")")" "$NC"
 
         local answer
         read -r -p "  $(msg s.prompt 'Resolution'): " answer < /dev/tty
@@ -2486,7 +2947,8 @@ resolve_contradictions() {
 
         # Every heading ends the item (`/^#/`): the ones after S1 are `## Assumptions`, `### A1:` …,
         # and a flag reset only at the next `### S` would mark every A and Q below as ✅ too.
-        awk -v snum="$sn" -v ans="$answer" '
+        # the answer through the environment: awk -v would read C:\temp as a tab and split \n into lines
+        TELESMA_ANSWER="$answer" awk -v snum="$sn" '
             /^#/ { in_s = 0 }
             /^### S[0-9]+:/ {
                 s = $0
@@ -2495,10 +2957,10 @@ resolve_contradictions() {
                 gsub(/ /, "", s)
                 if (s == snum) in_s = 1
             }
-            in_s && /^- \*\*Resolution\*\*:/ { print "- **Resolution**: " ans; next }
+            in_s && /^- \*\*Resolution\*\*:/ { print "- **Resolution**: " ENVIRON["TELESMA_ANSWER"]; next }
             in_s && /^- \*\*Status\*\*:/ { print "- **Status**: ✅"; next }
             { print }
-        ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        ' "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
 
         echo ""
     done
@@ -2542,10 +3004,10 @@ review_assumptions() {
     # possible by hand in QUESTIONS.md; the file says where.
     if [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" ]]; then
         awk '/^### /{ina=($0 ~ /^### A/)} ina && /^- \*\*Status\*\*:.*🔵/{print "- **Status**: ✅"; next} {print}' \
-            "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+            "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
         echo -e "\n${CYAN}$(msg a.b.decided 'Telesma decided %s smaller things on its own, the usual way — for example:' "$pending")${NC}"
         local i
-        for i in 0 1 2; do [[ $i -lt $pending ]] && echo "  - ${a_texts[$i]}"; done
+        for i in 0 1 2; do [[ $i -lt $pending ]] && printf '  - %s\n' "$(plain "${a_texts[$i]}")"; done
         echo "  $(msg a.b.where '(all of them are listed in telesma/state/QUESTIONS.md if you want to look)')"
         echo ""
         return 0
@@ -2560,8 +3022,8 @@ review_assumptions() {
         local ar="${a_reasons[$i]}"
 
         echo -e "${CYAN}$(msg a.item '--- Assumption A%s ---' "$an")${NC}"
-        echo -e "\n  ${at}"
-        [[ -n "$ar" ]] && echo -e "  ${YELLOW}$(msg a.rationale 'Rationale: %s' "$ar")${NC}"
+        printf '\n  %s\n' "$(plain "$at")"
+        [[ -n "$ar" ]] && printf '  %b%s%b\n' "$YELLOW" "$(msg a.rationale 'Rationale: %s' "$(plain "$ar")")" "$NC"
         echo ""
 
         local answer
@@ -2586,10 +3048,10 @@ review_assumptions() {
                 }
                 in_a && /^- \*\*Status\*\*:/ { print "- **Status**: " st; next }
                 { print }
-            ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+            ' "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
         else
             new_status="❌"
-            awk -v anum="$an" -v st="$new_status" -v cm="$answer" '
+            TELESMA_ANSWER="$answer" awk -v anum="$an" -v st="$new_status" '
                 /^#/ { in_a = 0 }
                 /^### A[0-9]+:/ {
                     s = $0
@@ -2600,11 +3062,11 @@ review_assumptions() {
                 }
                 in_a && /^- \*\*Status\*\*:/ {
                     print "- **Status**: " st
-                    print "- **User comment**: " cm
+                    print "- **User comment**: " ENVIRON["TELESMA_ANSWER"]
                     next
                 }
                 { print }
-            ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+            ' "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
         fi
 
         echo ""
@@ -2668,8 +3130,8 @@ ask_questions() {
         local qp="${q_proposals[$i]}"
 
         echo -e "${CYAN}$(msg q.item '--- Question %s/%s ---' "$qn" "$total")${NC}"
-        echo -e "\n  ${qt}\n"
-        echo -e "  ${YELLOW}$(msg q.proposal 'Proposal: %s' "$qp")${NC}\n"
+        printf '\n  %s\n\n' "$(plain "$qt")"
+        printf '  %b%s%b\n\n' "$YELLOW" "$(msg q.proposal 'Proposal: %s' "$(plain "$qp")")" "$NC"
 
         local answer
         read -r -p "  $(msg q.prompt 'Answer'): " answer < /dev/tty
@@ -2682,7 +3144,7 @@ ask_questions() {
         [[ -z "$answer" ]] && answer="${qp:-(accepted)}"    # never empty: empty = never shown to the user
 
         # Update the file: write the answer and change the status
-        awk -v qnum="$qn" -v ans="$answer" '
+        TELESMA_ANSWER="$answer" awk -v qnum="$qn" '
             /^#/ { in_q = 0 }
             /^### Q[0-9]+:/ {
                 s = $0
@@ -2691,10 +3153,10 @@ ask_questions() {
                 gsub(/ /, "", s)
                 if (s == qnum) in_q = 1
             }
-            in_q && /^- \*\*Answer\*\*:/ { print "- **Answer**: " ans; next }
+            in_q && /^- \*\*Answer\*\*:/ { print "- **Answer**: " ENVIRON["TELESMA_ANSWER"]; next }
             in_q && /^- \*\*Status\*\*:/ { print "- **Status**: ✅"; next }
             { print }
-        ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        ' "$file" > "${file}.tmp.$$" && mv "${file}.tmp.$$" "$file"
 
         answered_count=$((answered_count + 1))
         sed_inplace "s/^\(- \*\*Answered\*\*: \).*/\1${answered_count}/" "$file"
@@ -2783,13 +3245,24 @@ select_mode() {
 # permission mode `default` and Edit/Write allowed for telesma/** only — a write anywhere else is
 # a question nobody answers in pipe mode, i.e. refused; with -i the human sees it.
 run_survey() {
-    local today cmd rc out tmp parts stack i name files tests sample n b w
+    local today cmd rc out tmp parts stack i name files tests sample n b w oq started counts numbers
     local baseline="" checks_line="" survey_block prompt config_plain adopted_at sha date
     today=$(date +%F)
     adopted_at=$(config_field Project "Adopted at"); sha=${adopted_at%% *}; date=${adopted_at#* }
-    if ! clean_tree; then
+    # Changes inside telesma/ are the launcher's own (the config merge, a permission written back,
+    # a format stamp) or the survey's; they go into the survey's first commit. Only the code of
+    # the project has to be committed — it is what the survey describes.
+    local dirty
+    dirty=$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no 2>/dev/null | grep -Ev '^.. "?telesma/' || true)
+    if [[ -n "$dirty" ]]; then
         echo -e "${RED}$(msg survey.dirty 'Uncommitted changes in %s — the survey commits what it writes. Commit or stash first.' "$PROJECT_DIR")${NC}"
-        git -C "$PROJECT_DIR" status --short --untracked-files=no | head -10 | sed 's/^/  /'
+        printf '%s\n' "$(plain "$dirty")" | head -10 | sed 's/^/  /'
+        exit 1
+    fi
+    # A plan that already holds tasks is somebody's work: never replaced by the Phase 0 skeleton
+    if [[ -f "$PLAN_FILE" ]] && grep -q '^- \[' "$PLAN_FILE" && ! grep -q '^### Phase 0:' "$PLAN_FILE"; then
+        echo -e "${RED}$(msg survey.hasplan 'telesma/state/PLAN.md already holds tasks but no Phase 0 — this project runs with Telesma already, and the survey would replace its plan.')${NC}"
+        echo "$(msg survey.hasplan.how 'Set Adopted: no in telesma/config.md (## Project) to go on with the plan; nothing was changed.')"
         exit 1
     fi
     [[ -f "$AS_BUILT_FILE" ]] || cp "$AS_BUILT_TEMPLATE_FILE" "$AS_BUILT_FILE"
@@ -2847,6 +3320,7 @@ run_survey() {
         else
             echo -e "${CYAN}$(msg survey.baseline 'Baseline: running the full suite once — %s' "$cmd")${NC}"
             tmp=$(mktemp "${TMPDIR:-/tmp}/telesma-baseline.XXXXXX")
+            tmp_register "$tmp"
             started=$(date +%s)
             (cd "$PROJECT_DIR" && bash -c "$cmd") 2>&1 | tee "$tmp" || true
             rc=${PIPESTATUS[0]}
@@ -2881,10 +3355,10 @@ run_survey() {
     fi
     if [[ -n "$baseline" || -n "$checks_line" ]]; then
         python3 - "$REPORT_FILE" "$baseline" "$checks_line" "$today" "${counts:-}" <<'PYBASE'
-import re, sys
+import os, re, sys
 from pathlib import Path
 p, para, problem, today, counts = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-t = p.read_text(encoding="utf-8")
+t = p.read_text(encoding="utf-8", errors="replace")
 if para:
     t = re.sub(r"^- \*\*Start\*\*: .*$", f"- **Start**: {today} (adoption)", t, count=1, flags=re.M)
     t = re.sub(r"^- \*\*Status\*\*: .*$", "- **Status**: In progress — survey of the existing system", t, count=1, flags=re.M)
@@ -2913,18 +3387,15 @@ if problem:
         while end > idx + 1 and not out[end - 1].strip():
             end -= 1
         out[end:end] = [problem]
-p.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+tmp = p.with_name(f".telesma-{os.getpid()}.tmp")
+tmp.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+os.replace(str(tmp), str(p))
 PYBASE
     fi
 
     # The survey commits with `git add telesma/`: the judge's decision log (full commands, this
     # machine's data) must not ride along — the pilot committed it. Same place as CHECKS.jsonl.
-    _excl=$(git -C "$PROJECT_DIR" rev-parse --git-path info/exclude 2>/dev/null || true)
-    if [[ -n "$_excl" ]]; then
-        [[ "$_excl" = /* ]] || _excl="$PROJECT_DIR/$_excl"
-        mkdir -p "$(dirname "$_excl")"
-        grep -qxF 'telesma/state/PERMISSIONS.jsonl' "$_excl" 2>/dev/null || echo 'telesma/state/PERMISSIONS.jsonl' >> "$_excl"
-    fi
+    git_exclude_local
     survey_block=$(python3 "$SURVEY_TOOL" "$PROJECT_DIR" 2>/dev/null || echo "SURVEY: unavailable (tools/telesma-survey.py failed) — read git log yourself, sparingly")
     config_plain=$(sed '/^[[:space:]]*<!--.*-->[[:space:]]*$/d' "$CONFIG_FILE")
     prompt="$(cat "$INSTR_DIR/SURVEY.md")
@@ -2963,7 +3434,9 @@ MODE: survey
 
 ${LANGUAGE_LINE}
 
-Start the survey (section -3): take the first open task of Phase 0 in telesma/state/PLAN.md and work through the phase task by task — read, write inside telesma/ only, tick the box, commit. The files above are in your context already; read telesma/spec/AS_BUILT.md and telesma/spec/TECHNICAL_GUIDELINES.md with the Read tool before editing them (Edit refuses a file it has not read). You cannot ask the person anything in this session — open questions go into AS_BUILT.md. End with TELESMA: SURVEY DONE (section -3.6)."
+TASK_TOOL: ${TASK_TOOL}
+
+Start the survey (section -3): \`${TASK_TOOL} next\` gives the first open task of Phase 0; work through the phase task by task — read, write inside telesma/ only, then \`${TASK_TOOL} done --only telesma/\` (it ticks the task and commits), then \`next\` again. The files above are in your context already; read telesma/spec/AS_BUILT.md and telesma/spec/TECHNICAL_GUIDELINES.md with the Read tool before editing them (Edit refuses a file it has not read). You cannot ask the person anything in this session — open questions go into AS_BUILT.md. End with TELESMA: SURVEY DONE (section -3.6)."
 
     echo ""
     echo -e "${GREEN}$(msg survey.start 'Survey: Claude reads the code module by module and writes telesma/spec/AS_BUILT.md — no code is changed.')${NC}"
@@ -2971,14 +3444,16 @@ Start the survey (section -3): take the first open task of Phase 0 in telesma/st
     echo ""
     cd "$PROJECT_DIR"
     if [[ "$INTERACTIVE" == true ]]; then
-        run_claude arg "$prompt" --allowedTools "Edit(telesma/**)" --permission-mode default || true
+        run_claude arg "$prompt" --allowedTools "Edit(telesma/**)" "$TASK_ALLOW" --permission-mode default || true
     else
-        run_claude pipe "$prompt" --allowedTools "Edit(telesma/**)" --permission-mode default || true
+        run_claude pipe "$prompt" --allowedTools "Edit(telesma/**)" "$TASK_ALLOW" --permission-mode default || true
     fi
     echo ""
     if survey_complete; then
-        n=$(grep -c '^## ' "$AS_BUILT_FILE" 2>/dev/null || echo 0)
-        echo -e "${GREEN}$(msg survey.done '=== Survey done === telesma/spec/AS_BUILT.md: %s modules, %s open questions.' "$((n > 2 ? n - 2 : 0))" "$(grep -c '^- OQ[0-9]' "$AS_BUILT_FILE" 2>/dev/null || echo 0)")${NC}"
+        # `grep -c` prints 0 AND fails on no match: `|| echo 0` would make it "0\n0"
+        n=$(grep -c '^## ' "$AS_BUILT_FILE" 2>/dev/null) || n=0
+        oq=$(grep -c '^- OQ[0-9]' "$AS_BUILT_FILE" 2>/dev/null) || oq=0
+        echo -e "${GREEN}$(msg survey.done '=== Survey done === telesma/spec/AS_BUILT.md: %s modules, %s open questions.' "$((n > 2 ? n - 2 : 0))" "$oq")${NC}"
         adopt_next_steps
     else
         echo -e "${YELLOW}$(msg survey.unfinished 'The survey did not finish — Phase 0 still has open tasks. Start again to continue: %s' "${GREEN}$0 $PROJECT_DIR${NC}${YELLOW}")${NC}"
@@ -3129,7 +3604,7 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish. $(c
             }
             { print }
             END { print fixed + 0 > "/dev/stderr" }
-        ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp") && mv "${QUESTIONS_FILE}.tmp" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp"
+        ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp.$$") && mv "${QUESTIONS_FILE}.tmp.$$" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp.$$"
         [[ "$NORMALIZED" =~ ^[0-9]+$ ]] || NORMALIZED=0
         if [[ "$NORMALIZED" -gt 0 && "${PROJECT_EXPERIENCE:-developer}" != "beginner" ]]; then
             echo -e "${YELLOW}Normalized ${NORMALIZED} statuses in QUESTIONS.md (the model marked them resolved — the user has to see them)${NC}"
@@ -3178,7 +3653,7 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish. $(c
             if (kind != "" && /^- \*\*Status\*\*:/) { status_line = $0; status_at = n }
         }
         END { flush(); print fixed + 0 > "/dev/stderr" }
-    ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp") && mv "${QUESTIONS_FILE}.tmp" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp"
+    ' "$QUESTIONS_FILE" 2>&1 >"${QUESTIONS_FILE}.tmp.$$") && mv "${QUESTIONS_FILE}.tmp.$$" "$QUESTIONS_FILE" || rm -f "${QUESTIONS_FILE}.tmp.$$"
     [[ "$UNSEEN" =~ ^[0-9]+$ ]] || UNSEEN=0
     if [[ "$UNSEEN" -gt 0 ]]; then
         echo -e "${YELLOW}$(msg q.unseen '%s items in QUESTIONS.md were marked resolved without an answer — they are asked now.' "$UNSEEN")${NC}"
@@ -3236,8 +3711,8 @@ IMPORTANT: do NOT ask the user any questions. Generate the files and finish. $(c
             [[ -f "$QUESTIONS_BEFORE_PLAN" ]] || return 0
             local lost
             lost=$(python3 - "$QUESTIONS_BEFORE_PLAN" "$QUESTIONS_FILE" <<'PYRESTORE'
-import re, sys
-before, after = (open(p, encoding='utf-8').read() for p in sys.argv[1:3])
+import os, re, sys
+before, after = (open(p, encoding='utf-8', errors='replace').read() for p in sys.argv[1:3])
 FIELD = {'S': 'Resolution', 'Q': 'Answer'}
 
 def items(text):
@@ -3264,7 +3739,10 @@ if lost:
     for key, answer in lost:
         after = re.sub(r'(^### ' + re.escape(key) + r':.*?^- \*\*' + FIELD[key[0]] + r'\*\*:)[ \t]*$',
                        lambda m: m.group(1) + ' ' + answer, after, count=1, flags=re.M | re.S)
-    open(sys.argv[2], 'w', encoding='utf-8').write(after)
+    tmp = sys.argv[2] + f'.tmp.{os.getpid()}'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(after)
+    os.replace(tmp, sys.argv[2])
 print(' '.join(differing) if lost else '')
 PYRESTORE
             ) || lost=""
@@ -3444,6 +3922,50 @@ if awk '
     echo -e "${CYAN}Found a previous session - Telesma will resume from the last state${NC}"
 fi
 
+# Sandbox (## Sandbox, change plan K1): Claude Code's built-in sandbox under every Bash command —
+# writes only inside the project, hosts from a list, no reading of the person's keys. Written here,
+# after the mode is final: an autonomous session refuses an unknown host (a question there reaches
+# nobody), a chat asks. templates/setup/sandbox.py holds the rules and the fixed settings.
+if command -v python3 &> /dev/null; then
+    _sbmode=--chat
+    [[ "$INTERACTIVE" == true ]] || _sbmode=--autonomous
+    _sandbox=$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" sync "$PROJECT_DIR" \
+        "$PROJECT_DIR/.claude/settings.local.json" "$_sbmode" 2>/dev/null) || true
+    case "$_sandbox" in
+        on) echo -e "${GREEN}$(msg sandbox.on 'Sandbox: on — commands write only inside the project and reach only the listed hosts.')${NC}" ;;
+        required-unavailable*)
+            echo -e "${RED}$(msg sandbox.required 'Sandbox: required by telesma/config.md, but it cannot run here: %s. Nothing was started.' "${_sandbox#required-unavailable }")${NC}"
+            exit 1 ;;
+        unavailable*)
+            echo -e "${YELLOW}$(msg sandbox.unavailable 'Sandbox: cannot run here (%s) — commands run with all your rights.' "${_sandbox#unavailable }")${NC}" ;;
+        off)
+            if [[ "$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" available 2>/dev/null)" == yes ]]; then
+                echo "$(msg sandbox.hint 'Tip: the sandbox is off for this project. ## Sandbox → Enabled: yes in telesma/config.md keeps commands inside the project.')"
+            fi ;;
+    esac
+fi
+
+# Session budget (## Telesma loop → Max … per session / per task, change plan K2): the task tool
+# takes the limits once, here, and counts. A session that ran out of its budget left BLOCKED.md;
+# going on is the person's answer, never the agent's.
+if [[ "$MODE" != "2" && "$MODE" != "3" && "$MODE" != "4" ]] && command -v python3 &> /dev/null; then
+    _budget=$(python3 "$SCRIPT_DIR/tools/telesma-task.py" session-start --project "$PROJECT_DIR" 2>&1) && _brc=0 || _brc=$?
+    if [[ "$_brc" == "3" ]]; then
+        echo -e "${YELLOW}$(msg budget.stop 'The previous session stopped on its budget: %s' "${_budget#exhausted: }")${NC}"
+        echo "$(msg budget.how 'telesma/state/BLOCKED.md and the Problem log in REPORT.md say where it stopped.')"
+        answer=""
+        if { : < /dev/tty; } 2> /dev/null; then
+            read -r -p "$(msg budget.ask 'Go on (the counters start again)?') [$(msg no.yes 'y/N')]: " answer < /dev/tty || answer=""
+        fi
+        case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+            y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')")
+                python3 "$SCRIPT_DIR/tools/telesma-task.py" session-start --continue --project "$PROJECT_DIR" > /dev/null || true
+                ;;
+            *) echo "$(msg dirty.stop 'Stopped. Nothing was started.')"; exit 0 ;;
+        esac
+    fi
+fi
+
 # Blocker from the previous session (TELESMA BLOCKED in pipe mode gets lost in the scrollback —
 # the instructions say to write its content to telesma/state/BLOCKED.md; here we show it to the user)
 BLOCKED_FILE="$STATE_DIR/BLOCKED.md"
@@ -3452,7 +3974,7 @@ if [[ -s "$BLOCKED_FILE" ]]; then
     BLOCKED_CONTENT=$(cat "$BLOCKED_FILE")
     echo ""
     echo -e "${YELLOW}=== NOTE: the previous session ended with a blocker (telesma/state/BLOCKED.md) ===${NC}"
-    echo -e "${YELLOW}${BLOCKED_CONTENT}${NC}"
+    printf '%b%s%b\n' "$YELLOW" "$(plain "$BLOCKED_CONTENT")" "$NC"
     echo -e "${YELLOW}=====================================================================${NC}"
     echo -e "The content goes into the prompt — Claude will ask again or take your answer from the chat into account."
     echo ""
@@ -3464,7 +3986,7 @@ WAITING_FILE="$STATE_DIR/WAITING.md"
 WAITING_BLOCK=""
 if [[ -s "$WAITING_FILE" ]]; then
     echo -e "${CYAN}=== The previous session was waiting for PRs to be merged (telesma/state/WAITING.md) ===${NC}"
-    cat "$WAITING_FILE"
+    printf '%s\n' "$(plain "$(cat "$WAITING_FILE")")"
     echo -e "${CYAN}=====================================================================${NC}"
     echo -e "Telesma starts by reconciling the state of the PRs (section 17.1)."
     echo ""
@@ -3484,10 +4006,34 @@ ROTATION=$(sed -n 's/^[[:space:]]*-[[:space:]]*\*\*Rotate state files\*\*:[[:spa
 PLAN_PHASES_IN_FILE=$(sed -n 's/^[[:space:]]*-[[:space:]]*\*\*Plan phases in file\*\*:[[:space:]]*//p' "$CONFIG_FILE" 2>/dev/null | head -1 | tr -d ' ')
 if command -v python3 &> /dev/null && [[ "${ROTATION:-yes}" != "no" ]]; then
     ROTATED=$(python3 - "$REPORT_FILE" "$CONTEXT_FILE" "$PLAN_FILE" "${PLAN_PHASES_IN_FILE:-5}" <<'PYROT'
-import sys, re, datetime
+import os, sys, re, datetime, tempfile
 from pathlib import Path
 
 report_path, context_path, plan_path = (Path(p) for p in sys.argv[1:4])
+
+
+def read_state(path):
+    """A stray byte (a paste from another encoding) must not stop the start: it reads as U+FFFD."""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def write_atomic(path, text):
+    """The file is replaced whole or not at all: a temporary file next to it, then a rename."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".telesma-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            os.chmod(tmp, os.stat(str(path)).st_mode & 0o777)
+        except OSError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 phases_in_file = sys.argv[4].strip().lower()
 
 KEEP           = 10       # Task history entries / Problem log entries
@@ -3568,6 +4114,8 @@ def append_archive(path, desc, blocks):
     parts.append(f"\n## Rotation {datetime.date.today().isoformat()}\n")
     with path.open("a", encoding="utf-8") as f:
         f.write("".join(parts + blocks))
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def to_archive(found, texts, keep):
@@ -3688,7 +4236,7 @@ def rotate_table(lines, title, keep, columns_header, desc, blocks, counts):
 
 # --- REPORT.md ---------------------------------------------------------------
 if report_path.is_file():
-    lines = report_path.read_text(encoding="utf-8").split("\n")
+    lines = read_state(report_path).split("\n")
     blocks, counts = [], []
 
     def collect(new, block, n, desc, block_title):
@@ -3795,8 +4343,10 @@ if report_path.is_file():
         lines = collect(*cut(lines, entries, KEEP), "problems", "Problem log")
 
     if counts:
-        report_path.write_text("\n".join(squeeze_blanks(lines)), encoding="utf-8")
+        # The archive first: a start that dies between the two writes leaves an entry in both
+        # files, never in neither.
         append_archive(report_path.parent / "REPORT_ARCHIVE.md", "REPORT.md", blocks)
+        write_atomic(report_path, "\n".join(squeeze_blanks(lines)))
         messages.append("REPORT.md → REPORT_ARCHIVE.md (" + ", ".join(counts) + ")")
 
 # --- PROJECT_CONTEXT.md ------------------------------------------------------
@@ -3804,7 +4354,7 @@ if report_path.is_file():
 # (section 10), "Known problems and solutions" from the end-of-phase checkpoint. A row
 # marked 📌 stays forever — that is how an item that still applies is marked.
 if context_path.is_file():
-    lines = context_path.read_text(encoding="utf-8").split("\n")
+    lines = read_state(context_path).split("\n")
     blocks, counts = [], []
     arch = context_path.parent / "CONTEXT_ARCHIVE.md"
     lines = rotate_table(lines, "## Key decisions", KEEP_DECISIONS,
@@ -3817,8 +4367,8 @@ if context_path.is_file():
                          "| Problem | Solution |\n|---------|----------|\n",
                          "pitfalls", blocks, counts)
     if counts:
-        context_path.write_text("\n".join(squeeze_blanks(lines)), encoding="utf-8")
-        append_archive(arch, "PROJECT_CONTEXT.md", blocks)
+        append_archive(arch, "PROJECT_CONTEXT.md", blocks)     # archive first, as above
+        write_atomic(context_path, "\n".join(squeeze_blanks(lines)))
         messages.append("PROJECT_CONTEXT.md → CONTEXT_ARCHIVE.md (" + ", ".join(counts) + ")")
 
 # --- PLAN.md -----------------------------------------------------------------
@@ -3826,7 +4376,7 @@ if context_path.is_file():
 # The file keeps a stub with the list of ids — thanks to it (requires: X.Y) on an archived
 # task still resolves (the validator reads `telesma-archived`).
 if plan_path.is_file() and phases_in_file not in ("none", "no", "-"):
-    text = plan_path.read_text(encoding="utf-8")
+    text = read_state(plan_path)
     if len(text) > PLAN_THRESHOLD:
         keep_n = int(phases_in_file) if phases_in_file.isdigit() else 5
         lines = text.split("\n")
@@ -3916,7 +4466,7 @@ if plan_path.is_file() and phases_in_file not in ("none", "no", "-"):
 
         new_text = "\n".join(squeeze_blanks(lines))
         if new_text != text:
-            plan_path.write_text(new_text, encoding="utf-8")
+            write_atomic(plan_path, new_text)
             messages.append(f"PLAN.md {len(text) // 1024} KB → {len(new_text) // 1024} KB")
 
 print("\n".join(messages))
@@ -4045,8 +4595,10 @@ for _pair in "git:$INTEG_REPO" "tracker:$INTEG_TRACKER"; do
     _type="${_pair%%:*}"; _name="${_pair##*:}"
     [[ "$_name" == "none" || -z "$_name" ]] && continue
     _file="$INTEGRATIONS_DIR/$_type/$_name/INSTRUCTIONS.md"
-    if [[ ! -f "$_file" ]]; then
-        echo -e "${RED}Error: ## Integrations → ${_type} = '${_name}', but there is no $_file${NC}"
+    # The name is a directory of templates/integrations/<type>/, nothing else: "../../x" in the
+    # config must not pull a file from elsewhere into the prompt.
+    if [[ ! "$_name" =~ ^[a-z0-9][a-z0-9_-]*$ || ! -f "$_file" ]]; then
+        printf '%b%s%b\n' "$RED" "Error: ## Integrations → ${_type} = '$(plain "$_name")' is not an integration of this Telesma" "$NC"
         echo -e "Available: $(ls "$INTEGRATIONS_DIR/$_type" 2>/dev/null | tr '\n' ' ')— fix telesma/config.md or set 'none'."
         exit 1
     fi
@@ -4080,7 +4632,7 @@ REQUIRED = {("Tests", "Test command"), ("Tests", "Full suite command")}
 
 section, fields = "", {}
 in_comment = False
-for line in config_path.read_text(encoding="utf-8").split("\n"):
+for line in config_path.read_text(encoding="utf-8", errors="replace").split("\n"):
     if in_comment:
         in_comment = "-->" not in line
         continue
@@ -4181,7 +4733,8 @@ PYCFG
     # Quality checks — the section parser lives in the runner, so that the validator and the hook
     # read ## Checks the same way (it also checks the modules and their tools)
     if [[ "$CHECKS_ENABLED" == "yes" && -f "$CHECKS_DIR/telesma-checks.py" ]]; then
-        _cw=$(python3 "$CHECKS_DIR/telesma-checks.py" --validate "$PROJECT_DIR" 2>/dev/null)
+        _cw=$(python3 "$CHECKS_DIR/telesma-checks.py" --validate "$PROJECT_DIR" 2>/dev/null) \
+            || _cw+=$'\n'"W:the quality checks could not validate their section (telesma/checks/telesma-checks.py --validate failed) — run it by hand to see why"
         [[ -n "$_cw" ]] && CONFIG_CHECK+=$'\n'"$_cw"
     fi
 
@@ -4190,9 +4743,9 @@ PYCFG
             [[ -z "$_line" ]] && continue
             if [[ "$_line" == E:* ]]; then
                 CONFIG_ERRORS=$((CONFIG_ERRORS + 1))
-                echo -e "${RED}  ✗ config.md: ${_line#E:}${NC}"
+                printf '%b%s%b\n' "$RED" "  ✗ config.md: $(plain "${_line#E:}")" "$NC"
             else
-                echo -e "${YELLOW}  ⚠ config.md: ${_line#W:}${NC}"
+                printf '%b%s%b\n' "$YELLOW" "  ⚠ config.md: $(plain "${_line#W:}")" "$NC"
             fi
         done <<< "$CONFIG_CHECK"
     fi
@@ -4216,7 +4769,11 @@ fi
 # a project grows and decays silently for years (a year on the reference project). File reads only,
 # no git — silent when there is nothing to report.
 if [[ -f "$REPAIR_TOOL" ]] && command -v python3 &> /dev/null; then
-    DIAGNOSIS=$(python3 "$REPAIR_TOOL" "$PROJECT_DIR" 2>/dev/null)
+    if ! DIAGNOSIS=$(python3 "$REPAIR_TOOL" "$PROJECT_DIR" 2>/dev/null); then
+        # the diagnosis is advice: its own failure is said, it does not end the start in silence
+        echo -e "${YELLOW}State files: the diagnosis did not finish (python3 \"$REPAIR_TOOL\" \"$PROJECT_DIR\" shows why) — continuing without it.${NC}"
+        DIAGNOSIS=""
+    fi
     if [[ -n "$DIAGNOSIS" ]]; then
         echo -e "${YELLOW}State files — to tidy up:${NC}"
         _needs_repair=false
@@ -4224,9 +4781,9 @@ if [[ -f "$REPAIR_TOOL" ]] && command -v python3 &> /dev/null; then
             [[ -z "$_msg" ]] && continue
             if [[ "$_severity" == "damage" ]]; then
                 _needs_repair=true
-                echo -e "  ${RED}✗${NC} $_msg"
+                printf '  %b✗%b %s\n' "$RED" "$NC" "$(plain "$_msg")"
             else
-                echo -e "  ${YELLOW}•${NC} $_msg"
+                printf '  %b•%b %s\n' "$YELLOW" "$NC" "$(plain "$_msg")"
             fi
         done <<< "$DIAGNOSIS"
         if [[ "$_needs_repair" == "true" ]]; then
@@ -4253,8 +4810,8 @@ if [[ -f "$TELEMETRY_TOOL" ]] && command -v python3 &> /dev/null \
     if [[ ! -f "$_telemetry_consent.declined" ]] && { true < /dev/tty; } 2>/dev/null; then
         echo -e "${CYAN}$(msg tel.header 'Telemetry'):${NC} $(msg tel.start1 "this project is set to report the quality of Telesma's work to the")"
         echo "$(msg tel.start2 'shared Telesma hub, but you have not opted in on this machine. Sent: task outcomes and')"
-        echo "$(msg tel.start3 "timings, test results, Telesma's own problem/decision entries (secrets removed), counters,")"
-        echo "$(msg tel.start4 'hashes of the origin URL and your git e-mail. Never: spec, code, changes/, commands, prompts.')"
+        echo "$(msg tel.start3 "timings, test results, Telesma's entries — problems, decisions, bugfixes, reviews, blockers, change history, testers' scenario notes (secrets removed) —")"
+        echo "$(msg tel.start4 'counters, a hash of the origin URL, a salted hash of your git e-mail. Never: spec, code, changes/, commands, prompts.')"
         echo "$(msg tel.start5 'Privacy: %s · undo: %s' "$(python3 "$TELEMETRY_TOOL" --shared-hub)/privacy" "$0 --telemetry-forget")"
         read -r -p "$(msg tel.start.ask 'Opt in on this machine? [y/N/metrics]'): " _ans < /dev/tty || _ans=""
         case "$_ans" in
@@ -4273,9 +4830,10 @@ if [[ -f "$TELEMETRY_TOOL" ]] && command -v python3 &> /dev/null \
    && grep -q '^- \*\*Send\*\*:[[:space:]]*yes' "$CONFIG_FILE" 2>/dev/null \
    && { grep -Eq '^- \*\*Endpoint\*\*:[[:space:]]*https?://' "$CONFIG_FILE" 2>/dev/null \
         || [[ -f "$_telemetry_consent" ]]; }; then
-    _telemetry_error=$(python3 "$TELEMETRY_TOOL" "$PROJECT_DIR" --last-error 2>/dev/null)
+    # telemetry never blocks the start: neither a failing collector nor what its error file holds
+    _telemetry_error=$(python3 "$TELEMETRY_TOOL" "$PROJECT_DIR" --last-error 2>/dev/null) || _telemetry_error=""
     if [[ -n "$_telemetry_error" ]]; then
-        echo -e "${YELLOW}Telemetry: the previous send did not arrive —${NC} $_telemetry_error"
+        printf '%b%s%b %s\n' "$YELLOW" "Telemetry: the previous send did not arrive —" "$NC" "$(plain "$_telemetry_error")"
         echo ""
     fi
     ( python3 "$TELEMETRY_TOOL" "$PROJECT_DIR" --send > /dev/null 2>&1 & )
@@ -4286,95 +4844,41 @@ fi
 # not as TELESMA BLOCKED in the middle of the loop after the context has been burned.
 PLAN_HINT=""
 if [[ "$MODE" != "2" && "$MODE" != "3" && "$MODE" != "4" ]] && command -v python3 &> /dev/null; then
-    PLAN_CHECK=$(python3 - "$PLAN_FILE" "$CONFIG_FILE" "$GUIDELINES_DIR" "$SPEC_DIR" <<'PYPLAN'
+    PLAN_CHECK=$(python3 - "$PLAN_FILE" "$CONFIG_FILE" "$GUIDELINES_DIR" "$SPEC_DIR" "$SCRIPT_DIR/tools" <<'PYPLAN'
 import re, sys
 from pathlib import Path
 
 plan_path, config_path = Path(sys.argv[1]), Path(sys.argv[2])
 guidelines_dir, spec_dir = Path(sys.argv[3]), Path(sys.argv[4])
 project_root = spec_dir.parent.parent        # <project>/telesma/spec
-
-PHASE_RE = re.compile(r"^### Phase ([0-9]+[A-Z]?(?:\.Z[0-9]+)?):\s*(.*)$")
-# Task id: 1.2, 1M.2, 3.1a and the rework numbering 1.Z1.2 / 2M.Z1.3; a bare number (old style
-# "Test 1:") is matched but NOT registered globally (it repeats per phase — that is not a duplicate)
-TASK_ID = r"[0-9]+[A-Z]?(?:\.Z[0-9]+)?\.[0-9]+[a-z]?"
-# Optional ✅ decoration after the checkbox — when checking a task off Telesma sometimes writes "- [x] ✅ Task..."
-TASK_RE = re.compile(r"^- \[( |x|X)\]\s*\W*(?:Task|Test)\s*(" + TASK_ID + r"|[0-9]+)?\s*:?")
-# Stub of a phase moved to telesma/state/PLAN_ARCHIVE.md (state file rotation). The list of ids in the
-# comment keeps (requires: X.Y) on tasks from the archive resolvable.
-ARCHIVED_RE = re.compile(r"^<!--\s*telesma-archived:\s*([^>]*?)\s*-->\s*$")
-# Repository integration (section 17): a task with an open/merged PR carries (pr: #n).
-# Checkbox `[ ]` + (pr:) = "waiting for the merge" — not to be taken, but it counts toward the PR limit.
-PR_RE = re.compile(r"\(pr:\s*#?([0-9]+)\)")
-# A task description is one sentence — rationale and realization notes belong in telesma/state/REPORT.md
-
-def tags(line, name):
-    out = []
-    for m in re.finditer(r"\(" + name + r":\s*([^)]*)\)", line):
-        out += [v.strip() for v in m.group(1).split(",") if v.strip()]
-    return out
-
-def tag_values(line, name):
-    # The whole tag value without splitting on commas — ui-*/flow tags have the format
-    # file#Id1,Id2 (commas separate identifiers, not separate files)
-    return [m.group(1).strip() for m in re.finditer(r"\(" + name + r":\s*([^)]*)\)", line)]
+# Plan parsing and the choice of the next task live in tools/telesma_state.py — the same code
+# that `telesma-task.py next` uses, so the hint here and the task `next` issues cannot differ.
+sys.path.insert(0, sys.argv[5])
+import telesma_state as ts
+PHASE_RE, TASK_RE, ARCHIVED_RE = ts.PHASE_RE, ts.TASK_RE, ts.ARCHIVED_RE
+tags, tag_values = ts.tags, ts.tag_values
 
 def links_ids(path, _cache={}):
     # Entry ids of the link registry (telesma/spec/ux_ui/LINKS.md): the first token after "## "
     k = str(path)
     if k not in _cache:
         try:
-            _cache[k] = set(re.findall(r"^##\s+(\S+)", path.read_text(encoding="utf-8"), re.M))
+            _cache[k] = set(re.findall(r"^##\s+(\S+)", path.read_text(encoding="utf-8", errors="replace"), re.M))
         except OSError:
             _cache[k] = set()
     return _cache[k]
 
-lines = plan_path.read_text(encoding="utf-8").split("\n")
-errors, warns = [], []
-phases = {}      # phase_id -> {"title", "start", "tasks": [line_idx], "archived"}
-tasks = {}       # task_id -> {"done", "deps", "line", "phase", "pr"}
-order = []       # (line_idx, task_id or None, done, deps, phase_id)
-pr_lines = {}    # line_idx -> PR number from the (pr: #n) tag
-cur_phase = None
+plan = ts.Plan(plan_path.read_text(encoding="utf-8", errors="replace"))
+cfg = ts.Config(config_path.read_text(encoding="utf-8", errors="replace"))
+lines, phases, tasks = plan.lines, plan.phases, plan.tasks
+order = [(o["idx"], o["tid"], o["done"], o["deps"], o["phase"]) for o in plan.order]
+errors, warns = list(plan.errors), []
 
-for i, line in enumerate(lines):
-    pm = PHASE_RE.match(line)
-    if pm:
-        cur_phase = pm.group(1)
-        if cur_phase in phases:
-            errors.append(f"line {i+1}: duplicate Phase {cur_phase}")
-        phases[cur_phase] = {"title": pm.group(2).strip(), "start": i,
-                             "tasks": [], "archived": False}
-        continue
-    am = ARCHIVED_RE.match(line)
-    if am:
-        if cur_phase:
-            phases[cur_phase]["archived"] = True
-        for tid in am.group(1).split():
-            tasks.setdefault(tid, {"done": True, "deps": [], "line": i, "phase": cur_phase})
-        continue
-    # Task-line hygiene (length, notes posing as tasks) belongs to the state file diagnosis
-    # (tools/telesma-repair.py) — it tells a repairable case from a human decision and gives the
-    # repair command. Here we guard the correctness of the plan.
-    tm = TASK_RE.match(line)
-    if not tm:
-        continue
-    done = tm.group(1).lower() == "x"
-    tid = tm.group(2)
-    deps = tags(line, "requires")
-    prm = PR_RE.search(line)
-    pr = int(prm.group(1)) if prm else None
-    if cur_phase:
-        phases[cur_phase]["tasks"].append(i)
-    if tid and "." in tid:
-        if tid in tasks:
-            errors.append(f"line {i+1}: duplicate task id {tid}")
-        else:
-            tasks[tid] = {"done": done, "deps": deps, "line": i, "phase": cur_phase, "pr": pr}
-    order.append((i, tid, done, deps, cur_phase))
-    if pr is not None:
-        pr_lines[i] = pr
-
+# Task-line hygiene (length, notes posing as tasks) belongs to the state file diagnosis
+# (tools/telesma-repair.py) — it tells a repairable case from a human decision and gives the
+# repair command. Here we guard the correctness of the plan.
+for o in plan.order:
+    i, line = o["idx"], lines[o["idx"]]
     for tag in tags(line, "tech"):
         if not (guidelines_dir / f"{tag}.md").is_file():
             errors.append(f"line {i+1}: (tech: {tag}) without a telesma/guidelines/{tag}.md file")
@@ -4403,7 +4907,7 @@ for i, line in enumerate(lines):
 for tid, t in tasks.items():
     for d in t["deps"]:
         if d not in tasks and d not in phases:
-            msg = f"line {t['line']+1}: task {tid} (requires: {d}) — neither a task nor a phase {d} exists"
+            msg = f"line {t['idx']+1}: task {tid} (requires: {d}) — neither a task nor a phase {d} exists"
             (warns if t["done"] else errors).append(msg)
 
 state = {}
@@ -4423,81 +4927,12 @@ for tid in tasks:
     if state.get(tid, 0) == 0:
         has_cycle(tid, [tid])
 
-# Active phases from the config (Active phases: all | list)
-active = None
-cm = re.search(r"^\-\s*\*\*Active phases\*\*:\s*(.+)$", config_path.read_text(encoding="utf-8"), re.M)
-if cm and cm.group(1).strip().lower() != "all":
-    active = {p.strip() for p in cm.group(1).split(",") if p.strip()}
-
-def phase_active(pid):
-    if active is None or pid is None:
-        return True
-    return pid in active or re.sub(r"\.Z[0-9]+$", "", pid) in active
-
-# Hint: the first unchecked task in an active phase with completed dependencies
-def dep_done(d):
-    if d in tasks:
-        return tasks[d]["done"]
-    p = phases.get(d)
-    if p:
-        if p["archived"]:
-            return True     # a phase lands in telesma/state/PLAN_ARCHIVE.md only when 100% completed
-        return bool(p["tasks"]) and all(any(o[0] == j and o[2] for o in order) for j in p["tasks"])
-    return False
-
-# Next-task hint. ⛔ on the line is the convention for "waiting on a human" (manual test in
-# production, a decision of the owner) — such a task COUNTS toward phase completeness, so the phase
-# does not vanish with unfinished work, but it is not what the session should start with: the loop
-# would point at it on every start and stall. We take it only when nothing else is left — then it is
-# exactly the information the user has to see.
-#
-# Repository integration (section 17): `[ ]` with (pr: #n) waits for the merge — skipped like ⛔,
-# but counted toward the open PR limit. A task whose ONLY unmet dependencies are such PRs comes back
-# as the last option, labelled "chain" (a branch off the branch of that PR).
-cfg_txt = config_path.read_text(encoding="utf-8")
-def cfg_field(section, label):
-    m = re.search(r"^## " + re.escape(section) + r"\b.*?(?=^## |\Z)", cfg_txt, re.M | re.S)
-    if not m:
-        return ""
-    r = re.search(r"^- \*\*" + re.escape(label) + r"\*\*:[ \t]*(.*?)[ \t]*$", m.group(0), re.M)
-    return r.group(1).strip() if r else ""
-git_integration = cfg_field("Integrations", "Repository").lower() not in ("", "none")
-pr_limit = cfg_field("Integrations", "Open PR limit")
-pr_limit = int(pr_limit) if pr_limit.isdigit() else 3
-open_prs = [(pr_lines[i], tid or f"line {i+1}") for i, tid, done, deps, pid in order
-            if not done and i in pr_lines]
-if pr_lines and not git_integration:
-    warns.append(f"(pr: #n) tags on {len(pr_lines)} tasks, but ## Integrations → Repository: none")
-
-def pr_open(d):
-    t = tasks.get(d)
-    return bool(t) and not t["done"] and t.get("pr") is not None
-
-hint, hint_blocked, hint_chain = "", "", ""
-for i, tid, done, deps, pid in order:
-    if done or not phase_active(pid):
-        continue
-    if i in pr_lines:
-        continue                # PR open — waiting for the merge, reconciled by section 17.1
-    if git_integration and not hint_chain and not all(dep_done(d) for d in deps) \
-            and all(dep_done(d) or pr_open(d) for d in deps):
-        waiting = [f"{d} (PR #{tasks[d]['pr']})" for d in deps if pr_open(d)]
-        hint_chain = f"{tid or f'line {i+1}'} (chain — depends on unmerged: {', '.join(waiting)}; section 17.2)"
-    if all(dep_done(d) for d in deps):
-        lbl = tid or f"line {i+1}"
-        if "⛔" in lines[i]:
-            hint_blocked = hint_blocked or f"{lbl} (⛔ waiting on a human)"
-            continue
-        hint = lbl
-        break
-hint = hint or hint_blocked or hint_chain
-if git_integration:
-    listing = ", ".join(f"#{n}→{t}" for n, t in open_prs) or "none"
-    if len(open_prs) >= pr_limit:
-        hint = (f"PR LIMIT REACHED ({len(open_prs)}/{pr_limit}: {listing}) — after the 17.1 reconciliation "
-                f"TELESMA WAITING, unless one of the PRs is red (17.4)" + (f"; queued: {hint}" if hint else ""))
-    else:
-        hint = (hint or "none — only PRs in progress") + f" | open PRs: {len(open_prs)}/{pr_limit} ({listing})"
+# Next-task hint (ts.select): the first unchecked task in an active phase with completed
+# dependencies; ⛔ ("waiting on a human") only when nothing else is left; with a repository
+# integration a task with (pr: #n) waits for its merge and the open-PR limit is reported.
+if plan.pr_lines and not ts.git_integration(cfg):
+    warns.append(f"(pr: #n) tags on {len(plan.pr_lines)} tasks, but ## Integrations → Repository: none")
+hint = ts.launcher_hint(plan, ts.select(plan, cfg))
 
 for e in errors:
     print(f"  ERROR: {e}", file=sys.stderr)
@@ -4645,11 +5080,14 @@ Validation at the start: if 'Screenshots: no' AND 'Recordings: no' in the config
     *)
         MODE_SUFFIX="MODE: autonomous
 
-Start working in Telesma mode. Perform the startup procedure (section 0). Load documents from telesma/spec/ ONLY through telesma/state/SPEC_INDEX.md + Read with offset/limit (section 0.1). Load guidelines from telesma/guidelines/ per task following the procedure of section 0.2. If there are pending changes above — first apply the procedure of section 0.3 (modifying PLAN.md, the report, moving the files to telesma/changes/processed/), and only then choose a task."
+Start working in Telesma mode. Perform the startup procedure (section 0). If there are pending changes above — first apply the procedure of section 0.3 (\`changes\` → edit PLAN.md → \`changes-done\`). Then the loop of section 1: \`next\` → implement and test → \`done\` → \`next\` …, with \`suite\` whenever \`done\` or \`changes-done\` says the full suite is due."
         ;;
 esac
 
 MODE_SUFFIX+="
+
+TASK_TOOL: ${TASK_TOOL}
+Run it exactly in this form (the session allows this command): \`${TASK_TOOL} next\`, \`${TASK_TOOL} done\`, \`${TASK_TOOL} suite\`, \`${TASK_TOOL} changes\`, \`${TASK_TOOL} changes-done <file> --kind … -m \"…\"\`, \`${TASK_TOOL} commit --kind <kind> -m \"…\"\`. Give the ones that run tests (done, suite, changes-done, commit) the Bash tool timeout 600000. Commits, task ticks and the report's history go through it only — a hook refuses git add / commit and edits of those sections.
 
 ${LANGUAGE_LINE}${EXPERIENCE_BLOCK}"
 
@@ -4662,22 +5100,25 @@ ${LANGUAGE_LINE}${EXPERIENCE_BLOCK}"
 if command -v python3 &> /dev/null; then
     _trim=$(mktemp -d 2>/dev/null || echo "")
     if [[ -n "$_trim" ]]; then
+        tmp_register "$_trim"
         printf '%s' "$CONFIG"  > "$_trim/config"
         printf '%s' "$CONTEXT" > "$_trim/context"
         printf '%s' "$REPORT"  > "$_trim/report"
-        python3 - "$_trim" <<'PYTRIM'
+        # `if`: the trimming is a saving, not a condition of the start — on a failure the
+        # untrimmed copies go into the prompt (a bare command under set -e would end the launcher)
+        if python3 - "$_trim" <<'PYTRIM'
 import re, sys
 from pathlib import Path
 d = Path(sys.argv[1])
 ROW_LIMIT, STATE_LIMIT = 400, 2000
 SUFFIX = " … (full text: telesma/state/PROJECT_CONTEXT.md)"
 
-cfg = d.joinpath("config").read_text(encoding="utf-8")
+cfg = d.joinpath("config").read_text(encoding="utf-8", errors="replace")
 cfg = re.sub(r"[ \t]*<!--.*?-->[ \t]*\n?", "", cfg, flags=re.S)
 cfg = re.sub(r"\n{3,}", "\n\n", cfg)
 d.joinpath("config").write_text(cfg, encoding="utf-8")
 
-ctx = d.joinpath("context").read_text(encoding="utf-8").split("\n")
+ctx = d.joinpath("context").read_text(encoding="utf-8", errors="replace").split("\n")
 out, section = [], ""
 state_chars = 0
 for l in ctx:
@@ -4696,7 +5137,7 @@ for l in ctx:
     out.append(l)
 d.joinpath("context").write_text("\n".join(out), encoding="utf-8")
 
-rep = d.joinpath("report").read_text(encoding="utf-8").split("\n")
+rep = d.joinpath("report").read_text(encoding="utf-8", errors="replace").split("\n")
 out, skip = [], False
 for l in rep:
     if l.startswith("## "):
@@ -4708,7 +5149,7 @@ for l in rep:
         out.append(l)
 d.joinpath("report").write_text("\n".join(out), encoding="utf-8")
 PYTRIM
-        if [[ $? -eq 0 ]]; then
+        then
             CONFIG=$(cat "$_trim/config")
             CONTEXT=$(cat "$_trim/context")
             REPORT=$(cat "$_trim/report")
@@ -4721,7 +5162,7 @@ fi
 if [[ -n "$PLAN_HINT" ]] && [[ "$MODE" != "2" && "$MODE" != "3" && "$MODE" != "4" ]]; then
     MODE_SUFFIX+="
 
-Next task according to the script's scan: ${PLAN_HINT} (the first '- [ ]' in the active phases with completed dependencies). Verify it briefly against PLAN.md — the scan does not take pending changes into account — and start with it instead of scanning the plan from scratch."
+Next task according to the script's scan: ${PLAN_HINT}. You get it, with its context, from \`next\` (after the pending changes, if any) — do not scan the plan yourself."
 fi
 
 # The VERSIONS line: the last release version (v* tag) and the number of commits since — data for
@@ -4782,7 +5223,7 @@ if [[ -n "$GUIDELINES_INDEX" ]] && command -v python3 &> /dev/null; then
     GUIDELINES_INDEX_PROMPT=$(TELESMA_GI="$GUIDELINES_INDEX" python3 - "$PLAN_FILE" "$_stacks" <<'PYGI'
 import os, re, sys
 from pathlib import Path
-plan = Path(sys.argv[1]).read_text(encoding="utf-8") if Path(sys.argv[1]).is_file() else ""
+plan = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") if Path(sys.argv[1]).is_file() else ""
 stacks = sys.argv[2].split()
 index = os.environ.get("TELESMA_GI", "").rstrip("\n").split("\n")
 tags = {}
@@ -4890,6 +5331,26 @@ echo -e "Spec: $SPEC_DIR/ ($SPEC_COUNT files)"
 echo -e "Config: $CONFIG_FILE"
 echo ""
 
+# `done` commits everything `git status` shows (minus `Ignore on commit`): work of the person's own
+# left uncommitted in the tree would land in the first task's commit. Said before the session, once.
+if [[ "$MODE" != "2" && "$MODE" != "3" ]]; then
+    _dirty=$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal 2>/dev/null \
+             | grep -v -E '^.. "?(telesma/|\.claude/)' | head -n 6 || true)
+    if [[ -n "$_dirty" ]]; then
+        echo -e "${YELLOW}$(msg dirty.tree 'Uncommitted changes outside telesma/ — the next task commit would include them:')${NC}"
+        printf '%s\n' "$_dirty" | sed 's/^/    /'
+        echo "$(msg dirty.how 'Commit or stash them first if they are yours and not part of the next task.')"
+        if { : < /dev/tty; } 2> /dev/null; then
+            read -r -p "$(msg dirty.ask 'Continue anyway?') [$(msg no.yes 'y/N')]: " answer < /dev/tty || answer=""
+            case "$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')" in
+                y|yes|"$(msg yes.short 'y')"|"$(msg yes.word 'yes')") ;;
+                *) echo "$(msg dirty.stop 'Stopped. Nothing was started.')"; exit 0 ;;
+            esac
+        fi
+        echo ""
+    fi
+fi
+
 # Start Claude
 cd "$PROJECT_DIR"
 
@@ -4906,12 +5367,13 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo ""
     # The mode from ## Permissions explicitly, so the session does not start in a mode remembered
     # from elsewhere (`auto` would bypass the permission judge — see docs/PERMISSION_JUDGE.md).
-    run_claude arg "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} || [[ "$BEGINNER_RETURN" == true ]]
+    run_claude arg "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} --allowedTools "$TASK_ALLOW" || [[ "$BEGINNER_RETURN" == true ]]
 else
-    run_claude pipe "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} || [[ "$BEGINNER_RETURN" == true ]]
+    run_claude pipe "$INITIAL_PROMPT" ${PERMISSION_MODE:+--permission-mode "$PERMISSION_MODE"} --allowedTools "$TASK_ALLOW" || [[ "$BEGINNER_RETURN" == true ]]
 fi
 
 if [[ "$BEGINNER_RETURN" == true ]]; then
     trap - INT
+    telesma_cleanup
     exec bash "$SCRIPT_DIR/telesma.sh" "$PROJECT_DIR"
 fi

@@ -22,6 +22,7 @@ A directory without git gets a block that says so; nothing fails.
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections import Counter
@@ -64,6 +65,16 @@ def git(root, *args, check=False):
 
 def lines(text):
     return [l for l in (text or '').split('\n') if l.strip()]
+
+
+def regular(path):
+    """A plain file — not a symlink, a FIFO or a device. A repository can track a link named
+    `x.py` that points at a pipe or at /dev/zero; opening it would hang the launcher or read
+    something outside the project."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def is_code(p):
@@ -198,6 +209,8 @@ def inventory(root, tracked):
     # TODO / FIXME / HACK in code — a count and the files with most of them (never the text)
     todo_files = Counter()
     for p in code[:2000]:
+        if not regular(os.path.join(root, p)):
+            continue
         try:
             with open(os.path.join(root, p), encoding='utf-8', errors='replace') as f:
                 n = sum(1 for l in f if TODO.search(l))
@@ -308,7 +321,7 @@ def junit_counts(root, since):
             p = os.path.join(dirpath, n)
             if not (RESULT_DIRS.search(rel + '/') or JUNIT_FILE.search(n)):
                 continue
-            if not n.lower().endswith('.xml'):
+            if not n.lower().endswith('.xml') or not regular(p):
                 continue
             try:
                 if os.path.getmtime(p) < since:
@@ -363,7 +376,7 @@ def log_counts(text):
 
 def test_results(root, since, log_path):
     counts = junit_counts(root, since)
-    if counts is None and log_path and os.path.isfile(log_path):
+    if counts is None and log_path and regular(log_path):
         with open(log_path, encoding='utf-8', errors='replace') as f:
             counts = log_counts(f.read())
     if not counts:

@@ -18,13 +18,30 @@ INVARIANT 4 — the collector only reads: the project after a run is byte-for-by
 
 INVARIANT 5 — the shared hub needs a per-machine opt-in. `Send: yes` + `Endpoint: shared` without
 ~/.config/telesma/hub makes zero HTTP requests; with it, the batch carries no sender name and no
-directory name; `Scope: metrics` carries no title, text or entry opener; `--forget` deletes on the
-hub and removes the opt-in.
+directory name; `Scope: metrics` carries no title, text or entry opener — and no free text
+anywhere else in an event; `--forget` deletes on the hub and removes the opt-in.
+
+INVARIANT 6 — a committed config cannot act on a machine whose user never saw it. `Send: yes` +
+a custom endpoint + a literal, `env:` or `cmd:` key without the trust record of this machine
+(~/.config/telesma/trust/, written by telesma.sh) makes zero requests and runs no command; an
+edit after the confirmation withdraws it; `auto` is never a key for a server other than the
+shared hub; endpoints are https (http only to this machine).
+
+INVARIANT 7 — what a server answers is data: a status line with escape sequences, a malformed
+`rejected_ids`, a non-numeric counter neither reach the terminal nor break the bookkeeping.
+
+The scrub is pinned with secret-shaped canaries in every text source (problem log, REVIEWS.md,
+BLOCKED.md, a tester's scenario note): a URL with credentials, an AWS key id, a JWT, GitHub and
+Google tokens, an Authorization header, an e-mail address, an absolute path outside home. The
+name of a change file and free text in config values, plan tags, the status cell and the judge
+log never leave in any scope.
 
 Plus the sources beyond state files: git (the commit subject and the session transcript carry
 canaries too — only numbers come out of them), the `Kind` field and the framework version.
 """
+import hashlib
 import http.server
+import importlib.util
 import json
 import os
 import re
@@ -32,15 +49,30 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tokenize
 from pathlib import Path
 
 TOOL = Path(__file__).resolve().parent / "telesma-telemetry.py"
 CANARIES = ("CANARY_SPEC", "CANARY_CODE", "CANARY_CHANGES", "CANARY_COMMAND",
-            "CANARY_COMMIT", "CANARY_TRANSCRIPT")
+            "CANARY_COMMIT", "CANARY_TRANSCRIPT",
+            # a change file's name; free text in config values, a plan tag, the status cell,
+            # the judge log — none of them is an entry Telesma wrote about its work
+            "CANARY_CHANGENAME", "CANARY_CONFIG", "canary_tag", "CANARY_STATUS", "CANARY_PERM")
 SECRET = "sk-abcdefghijklmnopqrstuvwxyz123456"
+# Secret-shaped strings inside entry text (which does go out with scope `full`): each must be
+# cut by the scrub, wherever the entry lives.
+SECRET_CANARIES = (
+    "Q0FOQVJZX0JBU0lDOnB3ZA",                                   # Authorization: Basic … (problem log)
+    "reviewer.canary@example.org", "CANARY_DBPASS", "db.canary.internal",   # REVIEWS.md
+    "/srv/clients/acme-canary",                                 # REVIEWS.md: absolute path outside home
+    "eyJzdWIiOiJDQU5BUllfSldUIn0", "AKIACANARYAWSKEY0001",      # BLOCKED.md: JWT, AWS key id
+    "github_pat_11CANARYG0abcdefghijklmnop", "AIzaSyCANARY7890abcdefghijklmnopqrstuv",  # scenario note
+    "ghs_CANARYabcdefghijklmnopqrstuvwxyz01",
+)
 
 LOG_ENTRY = f"""- [2026-02-02] Task 7.2: **mock returned 200, production 401** — first line.
   Second line: the token in the test was {SECRET}, it had to be moved out.
+  The request carried `Authorization: Basic Q0FOQVJZX0JBU0lDOnB3ZA==` and ghs_CANARYabcdefghijklmnopqrstuvwxyz01.
   **General lesson: a test on a mock does not prove authorization.**
 """
 
@@ -71,10 +103,11 @@ over 5 repeats.
 |------|--------|-------|-------|--------|------|
 | 7.1 first | ✅ | 3/3 | 1 | abc1234 | 2026-02-01 |
 | 7.2 endpoint `accept|reject` | ✅ | 5/5 | 3 | def5678 | 2026-02-02 |
+| 7.3 test on production | CANARY_STATUS_LONGWORD waiting for the owner | 0/1 | 1 | — | 2026-02-03 |
 
 ## Change history
 
-### 2026-02-03 2026-02-03-new-limit.md
+### 2026-02-03 2026-02-03-CANARY_CHANGENAME-limit.md
 - **Kind**: bug
 - **Bug source**: task 7.1
 - **Detected by**: production
@@ -94,12 +127,15 @@ FILES = {
     "telesma/state/.telesma-version": "7\n",
     "telesma/config.md": "## Project\n\n- **Adopted**: yes\n\n## Tests\n\n- **Smoke suite**: none\n\n## Integrations\n\n"
                        "- **Repository**: github\n- **Merge**: agent\n- **Tracker**: none\n\n"
+                       "## Telesma loop\n\n- **Max tries per task**: CANARY_CONFIG tries\n\n"
+                       "## Auto-approval\n\n- **Auto-approve**: yes\n"
+                       "- **Judge**: CANARY_CONFIG my own judge\n\n"
                        "## Telemetry\n\n"
                        "- **Send**: yes\n- **Endpoint**: ENDPOINT\n"
                        "- **API key**: env:TELESMA_TEST_HUB_KEY\n- **Project label**:\n",
     "telesma/state/PLAN.md": "### Phase 7: Something\n\n- [x] Task 7.1: first (tech: python) (pr: #7)\n"
                      "- [x] Task 7.2: endpoint (requires: 7.1) (tech: python, sql)\n"
-                     "- [ ] ⛔ Task 7.3: test on production (tech: python) (pr: #8)\n",
+                     "- [ ] ⛔ Task 7.3: test on production (tech: python, canary_tag with words) (pr: #8)\n",
     "telesma/state/REPORT.md": REPORT % LOG_ENTRY,
     "telesma/state/BUGFIXES.md": "# BUGFIXES\n\n<!--\n## YYYY-MM-DD HH:MM — [template]\n-->\n\n"
                          "## 2026-02-05 10:00 — 500 on an empty cart\n**Symptom**: 500.\n"
@@ -115,21 +151,32 @@ FILES = {
                                 "| `pytest` loses a fixture in `conftest.py` | scope=session |\n",
     "telesma/state/PERMISSIONS.jsonl": json.dumps({"tool": "Bash", "input": "echo CANARY_COMMAND",
                                            "mode": "command", "layer": 3, "decision": "allow",
-                                           "ts": "2026-02-02T10:00:00"}) + "\n",
+                                           "ts": "2026-02-02T10:00:00"}) + "\n"
+                                       + json.dumps({"tool": "Bash", "input": "x", "layer": 3,
+                                                     "mode": "CANARY_PERM mode", "decision": "ask",
+                                                     "ts": "2026-02-03T10:00:00"}) + "\n",
+    "telesma/state/REVIEWS.md": "# REVIEWS\n\n## 2026-02-09 11:00 — Review of task 7.2\n"
+                        "**Files**: src/app.py\n**Findings**: 🔴 1 | 🟡 0 | 🟢 0\n\n### Findings\n"
+                        "- 🔴 src/app.py:42 — reported by reviewer.canary@example.org; reproduced "
+                        "against postgres://admin:CANARY_DBPASS@db.canary.internal:5432/app, log in "
+                        "`/srv/clients/acme-canary/logs/app.log` → fixed\n",
     "docs/test-scenarios/v0.1.0.md": "# v0.1.0\n\n- **Date:** 2026-02-07\n\n### 1.1 Login\n\n"
                                      "- [x] **Result 1.1**\n\n### 1.2 Export\n\n"
-                                     "- [-] **Result 1.2**\n  Empty file instead of CSV.\n\n"
+                                     "- [-] **Result 1.2**\n  Empty file instead of CSV; the tester's "
+                                     "github_pat_11CANARYG0abcdefghijklmnop and "
+                                     "AIzaSyCANARY7890abcdefghijklmnopqrstuv were in the request.\n\n"
                                      "### 1.3 Limit\n\n- [ ] **Result 1.3**\n",
     "telesma/spec/requirements.md": "CANARY_SPEC secret business model\n",
     "src/app.py": "# CANARY_CODE\n",
-    "telesma/changes/processed/2026-02-03-new-limit.md": "CANARY_CHANGES client X pays too little\n",
+    "telesma/changes/processed/2026-02-03-CANARY_CHANGENAME-limit.md": "CANARY_CHANGES client X pays too little\n",
 }
 
 
 class Hub(http.server.BaseHTTPRequestHandler):
-    received, alive, header, sender = [], True, "", None
+    received, alive, header, sender, requests = [], True, "", None, 0
 
     def do_POST(self):
+        Hub.requests += 1
         body = self.rfile.read(int(self.headers["Content-Length"]))
         Hub.header = self.headers.get("Authorization", "")
         if not Hub.alive or self.headers.get("Authorization") != "Bearer secret":
@@ -203,11 +250,63 @@ def commit(project, date, subject, *files):
     gitc(project, date, "commit", "-q", "-m", subject)
 
 
+class Hostile(http.server.BaseHTTPRequestHandler):
+    """A server that answers with what a terminal or a parser should never be handed."""
+    requests, mode = [], "status"
+
+    def reply(self, code, body=b"{}", reason=None):
+        self.send_response(code, reason)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        Hostile.requests.append(("POST", self.path, self.headers.get("Authorization", "")))
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/register":
+            return self.reply(200, b'{"token": ["th_' + b"c" * 48 + b'"]}')
+        if Hostile.mode == "status":
+            return self.reply(503, reason="down \x1b]0;OWNED\x07 \\033[31mRED")
+        self.reply(200, b'{"rejected_ids": [["x"], 7, {"a": 1}]}' if Hostile.mode == "ids" else b"[1, 2]")
+
+    def do_DELETE(self):
+        Hostile.requests.append(("DELETE", self.path, self.headers.get("Authorization", "")))
+        self.reply(200, b'{"deleted_events": "7 \\u001b[31mRED"}')
+
+    def log_message(self, *a):
+        pass
+
+
 SHARED = {}
 
 
-def run(project, home, *flags):
+def section_hash(project, name):
+    """The trust contract, written out independently of the tool: the `- ` lines of the first
+    `## <name>` section, right-stripped, joined with a newline, sha256."""
+    lines = (Path(project) / "telesma/config.md").read_text(encoding="utf-8").split("\n")
+    start = next((k for k, l in enumerate(lines) if l.rstrip() == f"## {name}"), None)
+    section = []
+    if start is not None:
+        for l in lines[start + 1:]:
+            if l.startswith("## "):
+                break
+            section.append(l)
+    kept = [l.rstrip() for l in section if l.lstrip().startswith("- ")]
+    return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()
+
+
+def trust(project, home):
+    """What telesma.sh does once a person has seen the section in a terminal."""
+    real = os.path.realpath(str(project))
+    d = Path(home) / ".config/telesma/trust"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (hashlib.sha256(real.encode()).hexdigest()[:32] + ".json")).write_text(json.dumps(
+        {"project": real, "sections": {"Telemetry": section_hash(project, "Telemetry")}}),
+        encoding="utf-8")
+
+
+def run(project, home, *flags, **extra):
     env = dict(os.environ, HOME=str(home), TELESMA_TEST_HUB_KEY="secret", **SHARED)
+    env.update(extra)
     env.pop("CLAUDE_CONFIG_DIR", None)
     env.pop("XDG_CONFIG_HOME", None)
     args = [str(project), *flags] if project else list(flags)
@@ -221,6 +320,178 @@ def events(project, home):
 
 def file_bytes(project):
     return {str(f.relative_to(project)): f.read_bytes() for f in project.rglob("*") if f.is_file()}
+
+
+def small_project(tmp, name, key, endpoint, extra=""):
+    p = Path(tmp) / name
+    (p / "telesma/state").mkdir(parents=True)
+    (p / "telesma/config.md").write_text(
+        f"## Telemetry\n\n- **Send**: yes\n- **Endpoint**: {endpoint}\n- **API key**: {key}\n"
+        f"- **Project label**:\n{extra}", encoding="utf-8")
+    (p / "telesma/state/REPORT.md").write_text(
+        "## Problem log\n\n- [2026-01-01] Task 1.1: an entry with text.\n", encoding="utf-8")
+    return p
+
+
+def trust_and_hostile_servers(check, port):
+    own = f"http://127.0.0.1:{port}"
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "home"
+        home.mkdir()
+        marker = Path(tmp) / "COMMAND_RAN"
+
+        print("6. a committed config cannot act on a machine whose user never saw it")
+        Hub.requests, Hub.header = 0, ""
+        for name, key in (("literal", "secret"), ("env", "env:VICTIM_TOKEN"),
+                          ("cmd", f"cmd:touch {marker}; echo secret")):
+            p = small_project(tmp, name, key, own)
+            r = run(p, home, "--send", VICTIM_TOKEN="secret")
+            check(r.returncode == 1 and Hub.requests == 0 and not marker.exists(),
+                  f"`Send: yes` + custom endpoint + {name} key, no trust record → zero requests"
+                  + (", no command run" if name == "cmd" else ""))
+            check(not run(p, home, "--last-error").stdout.strip(),
+                  f"{name}: not sending for lack of a confirmation is not reported as a failed send")
+        trust(p, home)
+        r = run(p, home, "--send")
+        check(r.returncode == 0 and Hub.requests == 1 and marker.exists() and Hub.header == "Bearer secret",
+              "the same `cmd:` project after the confirmation: the command runs, the batch goes out")
+        cfg = p / "telesma/config.md"
+        cfg.write_text(cfg.read_text().replace("echo secret", "echo secret # edited after the confirmation"))
+        (p / "telesma/state/REPORT.md").write_text(
+            "## Problem log\n\n- [2026-01-02] Task 1.2: a new entry.\n", encoding="utf-8")
+        marker.unlink()
+        r = run(p, home, "--send")
+        check(r.returncode == 1 and Hub.requests == 1 and not marker.exists(),
+              "a section edited after the confirmation is unconfirmed again: nothing sent, nothing run")
+
+        p = small_project(tmp, "two-sections", "secret", "shared",
+                          f"\n## Telemetry\n\n- **Send**: yes\n- **Endpoint**: {own}\n- **API key**: secret\n")
+        trust(p, home)
+        r = run(p, home, "--send")
+        check(r.returncode != 0 and Hub.requests == 1,
+              "a second `## Telemetry` section does not ride on the confirmation of the first")
+
+        (home / ".config/telesma").mkdir(parents=True, exist_ok=True)
+        (home / ".config/telesma/hub").write_text("token: th_" + "a" * 48 + "\nscope: metrics\n")
+        p = small_project(tmp, "auto", "auto", own)
+        trust(p, home)
+        r = run(p, home, "--send")
+        check(r.returncode == 2 and Hub.requests == 1 and "th_" not in Hub.header,
+              "`API key: auto` with a custom endpoint: the shared hub's token goes nowhere else")
+        Hub.received.clear()
+        p = small_project(tmp, "narrow", "secret", own)
+        trust(p, home)
+        r = run(p, home, "--send")
+        check(r.returncode == 0 and Hub.received
+              and not any(e["title"] or e["text"] or "key" in e for e in Hub.received),
+              "`scope: metrics` chosen at the opt-in holds for an own server too")
+        (home / ".config/telesma/hub").unlink()
+
+        print("https only (http to this machine)")
+        # example.invalid never resolves (RFC 6761) — and no request may be attempted at all
+        p = small_project(tmp, "clear-text", "secret", "http://example.invalid:8443")
+        trust(p, home)
+        r = run(p, home, "--send")
+        check(r.returncode == 2 and "not https" in r.stdout,
+              "a confirmed `http://` endpoint that is not this machine is refused before any request")
+        r = run(None, home, "--register", TELESMA_SHARED_HUB="http://example.invalid:8443")
+        check(r.returncode == 2 and "not https" in r.stdout and not (home / ".config/telesma/hub").exists(),
+              "--register: a shared-hub address that is not https turns nothing on")
+        (home / ".config/telesma/hub").write_text(
+            "token: th_" + "a" * 48 + "\nscope: full\nendpoint: http://example.invalid:8443\n")
+        p = small_project(tmp, "consent-endpoint", "", "shared")
+        r = run(p, home, "--send")
+        check(r.returncode == 2 and "not https" in r.stdout,
+              "an `endpoint:` in the opt-in file that is not https gets no token")
+        r = run(None, home, "--forget")
+        check(r.returncode == 2 and (home / ".config/telesma/hub").exists(),
+              "--forget does not send the token to a clear-text address either")
+        (home / ".config/telesma/hub").unlink()
+
+        print("7. what a server answers is data")
+        bad = http.server.HTTPServer(("127.0.0.1", 0), Hostile)
+        threading.Thread(target=bad.serve_forever, daemon=True).start()
+        hostile = f"http://127.0.0.1:{bad.server_port}"
+        p = small_project(tmp, "hostile", "secret", hostile)
+        trust(p, home)
+        r = run(p, home, "--send")
+        err = run(p, home, "--last-error").stdout
+        check(r.returncode == 2 and "503" in err and "OWNED" in err
+              and not re.search(r"[\x00-\x09\x0b-\x1f\x7f\\\\]", err + r.stdout),
+              f"a status line with escape sequences: the error is kept, without control characters "
+              f"or backslashes ({err.strip()[-40:]!r})")
+        for mode in ("ids", "list"):
+            Hostile.mode = mode
+            n = len(Hostile.requests)
+            r = run(p, home, "--send")
+            check(r.returncode == 0 and not r.stderr.strip() and len(Hostile.requests) == n + 1,
+                  f"a malformed reply ({mode}) is not a crash: the batch counts as delivered")
+            r = run(p, home, "--send")
+            check(len(Hostile.requests) == n + 1, f"({mode}) and it is not sent again at every start")
+            for cache in (home / ".cache/telesma").glob("telemetry-*.json"):
+                cache.unlink()
+        r = run(None, home, "--register", TELESMA_SHARED_HUB=hostile)
+        check(r.returncode == 2 and not (home / ".config/telesma/hub").exists(),
+              "--register: a token that is not a string of the expected shape turns nothing on")
+        (home / ".config/telesma/hub").write_text(
+            "token: th_" + "a" * 48 + f"\nscope: full\nendpoint: {hostile}\n")
+        r = run(None, home, "--forget")
+        check(r.returncode == 0 and "RED" not in r.stdout and "\x1b" not in r.stdout,
+              "--forget prints a counter from the hub only when it is a number")
+        bad.shutdown()
+
+        print("identifiers")
+        spec = importlib.util.spec_from_file_location("telemetry", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        keys = {tool.remote_key(u) for u in (
+            "git@github.com:Org/Repo.git", "https://github.com/Org/Repo.git", "https://github.com/org/repo/",
+            "ssh://git@github.com/Org/Repo", "https://user:token@github.com/Org/Repo.git")}
+        check(keys == {"github.com/org/repo"},
+              f"one repository, one project id — scp form, https, ssh, with credentials ({sorted(keys)})")
+        check(tool.remote_key("ssh://git@git.example.com:2332/team/app.git") == "git.example.com:2332/team/app",
+              "a `scheme://user@host:port/…` remote keeps the key it always had (ids already reported stay)")
+        p = small_project(tmp, "client-name", "", "none")
+        pid = json.loads(run(p, home, "--json").stdout.split("\n")[0])["project"]
+        other = Path(tmp) / "home2"
+        other.mkdir()
+        check(pid != hashlib.sha256(b"client-name").hexdigest()[:16]
+              and pid == json.loads(run(p, home, "--json").stdout.split("\n")[0])["project"]
+              and pid != json.loads(run(p, other, "--json").stdout.split("\n")[0])["project"],
+              "a project without a remote: the id is not a bare hash of the directory name, is "
+              "stable on this machine and differs on another")
+
+
+def reused_quotes(path):
+    """Lines where a replacement field of an f-string reuses the quote of the f-string itself
+    (`f"{x["a"]}"`) — legal from Python 3.12, a SyntaxError on the 3.9 Telesma supports. An older
+    interpreter simply compiles the file; a newer one walks the f-string tokens."""
+    if sys.version_info < (3, 12):
+        try:
+            compile(path.read_text(encoding="utf-8"), str(path), "exec", dont_inherit=True)
+            return []
+        except SyntaxError as e:
+            return [e.lineno]
+    out, stack = [], []
+    with path.open("rb") as f:
+        for tok in tokenize.tokenize(f.readline):
+            if tok.type == tokenize.FSTRING_START:
+                stack.append(tok.string.lstrip("rRbBfFuU"))
+            elif tok.type == tokenize.FSTRING_END:
+                stack.pop()
+            elif stack and tok.type == tokenize.STRING \
+                    and any(q[0] in tok.string.lstrip("rRbBfFuU")[:1] for q in stack):
+                out.append(tok.start[0])
+    return out
+
+
+def python39_grammar(check):
+    print("the harness that reads this tool's --json, and the tools, parse on Python 3.9")
+    root = TOOL.parent.parent
+    for rel in ("benchmark/bench.py", "tools/telesma-telemetry.py", "tools/telesma-repair.py",
+                "tools/telesma-survey.py", "tools/telesma-specky-snapshots.py"):
+        lines = reused_quotes(root / rel)
+        check(not lines, f"{rel}: no f-string reuses its own quote inside a replacement field {lines[:3]}")
 
 
 def main():
@@ -255,7 +526,9 @@ def main():
         # A blocker that is NO LONGER in the directory — Telesma deletes the file once resolved.
         blk = project / "telesma/state/BLOCKED.md"
         blk.write_text("TELESMA BLOCKED\n\nTask: 7.3 test on production\nProblem: no access\n"
-                       "  to the server.\n", encoding="utf-8")
+                       "  to the server.\nDetails: the session eyJhbGciOiJIUzI1NiJ9."
+                       "eyJzdWIiOiJDQU5BUllfSldUIn0.c2lnbmF0dXJlLWNhbmFyeQ expired, key id "
+                       "AKIACANARYAWSKEY0001.\n", encoding="utf-8")
         commit(project, "2026-02-05", "Telesma: blocker", "telesma/state/BLOCKED.md")
         blk.unlink()
         commit(project, "2026-02-06", "Telesma: blocker resolved", "telesma/state/BLOCKED.md")
@@ -281,11 +554,20 @@ def main():
             check(k not in everything, f"{k} did not leak")
         check(SECRET not in everything and "[removed]" in everything, "secret from the log cut out")
         check("t@example.com" not in everything, "committer e-mail did not leak")
+        for k in SECRET_CANARIES:
+            check(k not in everything, f"scrub: {k[:28]} cut out of the entry text")
+        rv = next((e for e in ev if e["type"] == "review"), {"text": ""})
+        check("src/app.py:42" in rv["text"] and "[e-mail]" in rv["text"]
+              and "postgres://[removed]" in rv["text"] and "[path]/app.log" in rv["text"],
+              "scrub: the review entry keeps its prose and the file it is about; the address, the "
+              "URL with credentials and the directories of an absolute path are replaced")
+        check(not any(c in e["text"] + e["title"] + e["key"] for e in ev for c in ("\x1b", "\x07")),
+              "no control character in any event")
 
         print("event content")
         check(types == {"problem", "task", "bugfix", "decision", "change", "pitfall",
                         "scenario", "permissions", "state", "session", "test_run", "blocker",
-                        "pr"},
+                        "pr", "review"},
               f"all types present ({sorted(types)})")
         by = {(e["type"], e["key"]): e for e in ev}
         t72 = by[("task", "7.2")]
@@ -309,7 +591,17 @@ def main():
         check(st["plan"] == {"done": 2, "waiting_for_human": 1} and st["smoke"] is False,
               "state: ⛔ counted separately, missing smoke suite visible")
         check(st["adopted"] is True, "state: an adopted project is flagged (Adopted: yes)")
-        check(by[("change", "2026-02-03-new-limit.md")]["metrics"]["rework"], "change → rework")
+        changes = [e for e in ev if e["type"] == "change"]
+        chg = changes[0] if changes else {"metrics": {}, "key": "", "title": "", "format_version": None}
+        check(len(changes) == 1 and chg["metrics"]["rework"], "change → rework")
+        check(re.fullmatch(r"change:[0-9a-f]{16}", chg["key"]) is not None
+              and chg["title"] == "change request",
+              "the name of a change file does not leave: the event carries a hash of it")
+        check(by[("task", "7.3")]["metrics"]["status"] == "other" and by[("task", "7.3")]["tech"] == ["python"]
+              and t72["metrics"]["status"] == "✅",
+              "status cell: a mark stays, a sentence becomes `other`; a tag that is not one word is dropped")
+        check(st["judge"] == "other" and st["max_tries"] == "other" and st["auto_approve"] == "yes",
+              "state: a config value goes out only as one short word, anything else as `other`")
 
         print("repository integration (counters only)")
         check(st["integrations"] == {"repository": "github", "merge": "agent", "tracker": "none"}
@@ -351,12 +643,12 @@ def main():
         st_d = next(e for e in ev if e["type"] == "state")["metrics"]["diagnosis"]
         check(isinstance(st_d, dict) and set(st_d) == {"damage", "notice"},
               f"state carries the state-file diagnosis as numbers only ({st_d})")
-        check(by[("change", "2026-02-03-new-limit.md")]["metrics"]["kind"] == "bug"
+        check(chg["metrics"]["kind"] == "bug"
               and by[("decision", "## 2026-02-06 — limit counted per organization")]["metrics"]
               ["kind"] == "correction"
               and by[("decision", "## 2026-02-07 — entry from before the Kind field")]["metrics"]
               ["kind"] is None, "Kind field: read, and without the field None (we do not guess)")
-        ch = by[("change", "2026-02-03-new-limit.md")]
+        ch = chg
         check(ch["format_version"] == 7 and ch["metrics"]["source_task"] == "7.1"
               and "source_version" in ch["metrics"] and ch["metrics"]["source_version"] is None
               and ch["metrics"]["source_date"] == "2026-02-01",
@@ -391,6 +683,8 @@ def main():
               "a pitfall without a task gets its technology from the text — and it is flagged")
         pm = by[("permissions", "2026-02-02")]
         check(pm["metrics"] == {"command/l3/allow": 1}, f"judge log → counters per day ({pm['metrics']})")
+        check(by[("permissions", "2026-02-03")]["metrics"] == {"other/l3/ask": 1},
+              "judge log: a field that is not one word is counted as `other`")
 
         print("2. the id survives rotation")
         (project / "telesma/state/REPORT.md").write_text(REPORT % "", encoding="utf-8")
@@ -400,6 +694,12 @@ def main():
         ev2 = events(project, home)
         check({e["id"] for e in ev} == {e["id"] for e in ev2}, "same ids after moving the entry")
         check(any("General lesson" in e["text"] for e in ev2), "entry text from the archive complete")
+
+        print("6. a custom endpoint from a committed file needs this machine's confirmation")
+        r = run(project, home, "--send")
+        check(r.returncode == 1 and Hub.requests == 0 and "not confirmed on this machine" in r.stdout,
+              "`Send: yes` + a custom endpoint + a readable key, no trust record → zero requests")
+        trust(project, home)
 
         print("3. sending is idempotent and loses nothing")
         Hub.alive = False
@@ -414,6 +714,12 @@ def main():
         n = Hub.sender or {}
         check(re.fullmatch(r"[0-9a-f]{12}", n.get("id", "")) is not None and n.get("name")
               and "@" not in json.dumps(n), "batch signed by the sender (hash, no e-mail)")
+        salt = home / ".config/telesma/salt"
+        mail = subprocess.run(["git", "-C", str(project), "config", "user.email"],
+                              capture_output=True, text=True).stdout.strip() or "?"
+        check(salt.is_file() and (salt.stat().st_mode & 0o777) == 0o600
+              and n.get("id") != hashlib.sha256(mail.lower().encode()).hexdigest()[:12],
+              "sender id is salted per machine (salt 0600 next to the opt-in), not a bare hash of the e-mail")
         run(project, home, "--send")
         check(len(Hub.received) == len(ev2), "second run sends nothing")
         cfg = project / "telesma/config.md"
@@ -451,6 +757,22 @@ def main():
         check(SharedHub.received and not any(e["title"] or e["text"] or "key" in e
                                              for e in SharedHub.received),
               f"`Scope: metrics` → no title, text or key ({len(SharedHub.received)} events)")
+
+        def strings(x):
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    yield k
+                    yield from strings(v)
+            elif isinstance(x, list):
+                for v in x:
+                    yield from strings(v)
+            elif isinstance(x, str):
+                yield x
+        loose = sorted({t for e in SharedHub.received for t in strings(e)
+                        if len(t) > 64 or re.search(r"\s", t)})
+        dump = json.dumps(SharedHub.received, ensure_ascii=False)
+        check(not loose and not any(k in dump for k in CANARIES + SECRET_CANARIES),
+              f"`Scope: metrics` → no free text anywhere in an event: every string is one word {loose[:3]}")
         own = list((home / ".cache/telesma").glob("telemetry-*.json"))
         r = run(None, home, "--forget")
         check(r.returncode == 0 and ("DELETE", "/mine", f"Bearer {SharedHub.token}") in SharedHub.requests
@@ -472,6 +794,8 @@ def main():
                                          "telesma/config.md", "telesma/state/BUGFIXES.md"},
               "no new files in the project")
 
+    trust_and_hostile_servers(check, srv.server_port)
+    python39_grammar(check)
     srv.shutdown()
     shared.shutdown()
     print("OK" if not failures else f"FAILURES: {len(failures)}")

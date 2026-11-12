@@ -57,7 +57,9 @@ templates/
 ├── setup/                         preflight.sh (git, python3, claude + sign-in; every start and --doctor;
 │                                  the ## Tests tools before a build session); home.sh (--home start menu);
 │                                  setup wizard: wizard.sh (questions, first start and --setup) + configure.py (engine:
-│                                  stack detection, profiles minimal/recommended/full, check tiers basic/standard/security)
+│                                  stack detection, profiles minimal/recommended/full, check tiers basic/standard/security);
+│                                  trust.py (per-machine confirmation of config.md's executable sections — the only writer);
+│                                  sandbox.py (## Sandbox → Claude Code's built-in sandbox in settings.local.json)
 ├── hooks/telesma-permission-judge.py  Permission judge (PermissionRequest/PreToolUse/PostToolUse hook)
 ├── checks/                        Quality checks (## Checks, section 19), copied to telesma/checks/
 │   ├── telesma-checks.py            Runner: git-operation hook, PR status, --point ci, --validate
@@ -81,12 +83,21 @@ templates/
     └── tracker/specky/            Section 18: requirement anchors, criteria evidence, sync, snapshots
                                    (each: INSTRUCTIONS.md, setup.sh, permissions.txt, DESCRIPTION.txt)
 tools/
+├── telesma-task.py                  The task loop's mechanics for the model: next (task + context, terminal
+│                                  states, reservation), done (tests, checks, tick, Task history row, commit),
+│                                  commit --kind, suite (full suite, Test status, phase tag, regression gate),
+│                                  changes / changes-done; runs from this clone, never copied into a project
+├── telesma_state.py               Shared plan / config / report reading (the launcher's plan check and next)
+├── telesma_github.py              The GitHub flow of section 17 for the task tool: PR list, required checks,
+│                                  squash merge, chain re-point + rebase, branch, push, PR
+├── telesma-guard.py                 PreToolUse "code only" guard: refuses git / gh writes, ticks in PLAN.md and edits
+│                                  of REPORT.md's history sections (format 21+)
 ├── telesma-repair.py                State-file diagnosis (every start) and repair (--repair)
 ├── telesma-telemetry.py             Optional quality telemetry collector (schema 2)
 ├── telesma-survey.py                Git digest + survey units for --adopt (SURVEY: block, Phase 0 tasks)
 ├── telesma-specky-snapshots.py      Backfill Specky release snapshots for existing vX.Y.Z tags
 ├── telesma-judge-eval.py            Judge evaluation on a labelled set; gate = zero false allows
-├── judge-eval/dataset.jsonl       The labelled set (dangerous / safe / disputed)
+├── judge-eval/dataset.jsonl       The labelled set (dangerous / safe / disputed); heldout.jsonl is never tuned against
 ├── test-*.py                      Self-tests (fixtures in temp dirs, never touch this repo)
 └── test-all.sh                    Runs every self-test
 benchmark/                         Frozen benchmark: same small project on any Telesma version, hidden HTTP judge
@@ -109,6 +120,8 @@ examples/example-plan.md           Example plan
   `MODE_REVIEW.md`, `MODE_ARTIFACTS.md`; mode 1 has none) + `CHECKS.md` when checks are enabled +
   each configured integration's `INSTRUCTIONS.md` (appended after the mode block, so a project
   without integrations pays no tokens for them);
+- `TASK_TOOL: python3 <clone>/tools/telesma-task.py` for the implementation modes and the survey,
+  with a session-only allow rule (`--allowedTools`, never written to `settings.local.json`);
 - the state files (PLAN, PROJECT_CONTEXT, REPORT, SPEC_INDEX, config) as **prompt copies**,
   trimmed (finished phases collapsed to ids, template comments stripped, long table rows cut);
 - computed directives: `MODE: <mode>`, `LANGUAGE: <code>` (+ the `EXPERIENCE: beginner` block
@@ -140,27 +153,88 @@ is written in the user's `Language`; the structure is always English.
 - **The permission judge only removes prompts, it never adds blocks** — with one deliberate,
   tiny exception: the **contract layer** in PreToolUse refuses two things the instructions already
   forbid the agent (a merge while a required check is red, pending or missing, or with `--admin`;
-  a push of a release tag). PreToolUse runs in every Claude Code permission mode, including `auto`,
+  a push of a release tag) — in every spelling it can read: `gh pr merge`, `gh api …/merge`,
+  `git push` of `v*` tags, `--tags`, `--mirror`, `gh release create vX`, and a merge or push whose
+  PR or ref is a substitution or variable ("write it literally"). PreToolUse runs in every Claude Code permission mode, including `auto`,
   where the PermissionRequest hook is never called — a question there would reach nobody. Anything
   else dangerous still reaches the human: hard patterns and `Always ask` mean "ask", not "deny". A
-  rule change must pass the evaluation gate (zero false allows on `dangerous`). The one switch that
-  adds prompts (`Force ask despite allowlist`) is opt-in. A `gh` failure never refuses.
-- **Checks never print secrets** (findings carry rule, file, line and a hash) and **never block
-  on network failure** (unreachable registry or OSV = warning). Exceptions are the human's: writes
-  to `telesma/state/CHECK_EXCEPTIONS.md`, `telesma/checks/` and the `## Checks` section ask the user.
+  rule change must pass the evaluation gate (zero false allows on `dangerous`, in the working set
+  and in the held-out set, which is never used to tune a rule; the mutation test in
+  `test-judge.py` respells every dangerous case). What the parser cannot read is a question, never
+  a pass. The one switch that adds prompts (`Force ask despite allowlist`) is opt-in. A `gh`
+  failure never refuses.
+- **`telesma/config.md` is confirmed per machine.** It is committed, and it names what runs on a
+  person's machine: test, lint and typecheck commands, the permission mode and allow rules, judge
+  and telemetry endpoints and key forms, extra directories, integrations. The launcher's trust
+  gate (`templates/setup/trust.py`, record in `~/.config/telesma/trust/`) shows new or changed
+  values and asks once, before anything executes one; without a terminal the start stops unless
+  `TELESMA_TRUST_CONFIG=yes`; `bypassPermissions` is typed by the person, never taken from the
+  environment. Only the launcher writes the record; the judge hook, the telemetry tool and the
+  `lint-types` check read it and treat an unconfirmed section as "no key / do not run". The section
+  hash is defined once (field lines of the section, sha256) and implemented identically in each.
+- **Checks never print secrets** (findings carry rule, file, line, length and a hash — no part of
+  the value) and **never block on network failure** (unreachable registry or OSV = warning; a
+  missing tool or a time limit is a warning too, while an internal error of the hook, a crashed
+  module or an unreadable command shape refuses the commit). **What is checked is what is
+  committed**: the scope widens to everything modified whenever the `git add` plan is not exact,
+  and a commit that appears without evidence is checked after the fact. Exceptions are the
+  human's: writes to `telesma/state/CHECK_EXCEPTIONS.md`, `telesma/checks/` and the `## Checks`
+  section ask the user, and a difference from the integrity baseline
+  (`.git/telesma-checks/baseline.json`) that no approved edit explains stops the next commit until
+  the human runs `telesma-checks.py --approve` in a terminal. The baseline lives where the agent
+  can reach it — it catches a careless model, not a determined one; CI (`--point ci`) is the
+  verifiable layer.
+- **A task is finished by the script, not by the model.** `tools/telesma-task.py done` chooses the
+  files (everything `git status` shows minus `Ignore on commit` and this machine's files), runs the
+  `## Tests` commands only when that section is confirmed on the machine (a run with 0 tests is a
+  failure), runs the commit-point checks on exactly those files and records their evidence, and only
+  then ticks the task, writes the `Task history` row and commits with the footer. A refusal leaves
+  PLAN.md and REPORT.md byte-identical. `next` and the launcher's hint choose the task with the same
+  code (`tools/telesma_state.py`). The reservation lives in `.git/telesma-task/` — this machine's
+  data; it keeps a careless model in line, not a determined one.
+- **The "code only" guard refuses, by design** (`tools/telesma-guard.py`, registered by the launcher
+  on every start, whatever `## Auto-approval` and `## Checks` say): git commands that write history
+  or move refs, GitHub writes through `gh`, a tick or untick in PLAN.md, and edits of `Task history`,
+  `Test status` and `Change history` in REPORT.md — each with the command to use instead. It is the
+  second deliberate exception to "the judge only removes prompts" (the judge itself is unchanged);
+  it is off below format 21. With `Repository: github` the task tool does the whole GitHub side
+  (reconcile, merge on green required checks by squash, chain re-point before the merge and rebase
+  after it, branch, push, PR); task PRs carry the task's work only, and what GitHub says (ticks,
+  `(pr: #n)`, history rows, the phase run on main) is derived on main and committed by a state PR.
+  A command it cannot read that mentions a git write is refused; an internal error lets the call through.
+- **The session budget is the script's** (`## Telesma loop` → `Max refusals per task`, `Max attempts
+  per task`, `Max tasks per session`, `Max hours per session`): the launcher snapshots the limits at
+  `session-start`, the task tool counts and, past a limit, writes BLOCKED.md and marks the session;
+  the guard then refuses everything but reads (with an integration too). Going on is the person's
+  answer at the next start of the launcher, never the agent's.
 - **Telemetry is off by default**; it sends only after an explicit per-machine opt-in, to the shared
   Telesma hub (opt-in file `~/.config/telesma/hub`, never a committed `Send: yes` alone; no sender
-  name, no directory name) or to the user's own server; it never blocks startup, and never sends
+  name, no directory name) or to the user's own server (https only, and only after the
+  `## Telemetry` section is confirmed on that machine); it never blocks startup, and never sends
   `telesma/spec/`, source code, `telesma/changes/` or commands from `PERMISSIONS.jsonl` (counters
   only). `tools/test-telemetry.py` pins this with canaries.
 - **Repair never deletes what git does not know about**, and opens only REPORT.md,
-  REPORT_ARCHIVE.md, PLAN.md and PLAN_ARCHIVE.md. A second run changes nothing.
+  REPORT_ARCHIVE.md, PLAN.md and PLAN_ARCHIVE.md (the diagnosis at every start also reads
+  PROJECT_CONTEXT.md). A run on a clean project changes nothing, byte for byte.
 - **Rotation is block-based and date-driven**: an entry is a block, never a line; the N newest by
   date survive regardless of position; current-state sections are overwritten, chronicle sections
-  rotate.
+  rotate; the archive is written before the source file is shortened.
+- **State and settings files are written atomically** (temp file in the same directory, then
+  rename), and one launcher at a time works on a project (`telesma/state/.telesma-lock/`).
 - **Prompt-copy trimming never touches files on disk.**
+- **The sandbox is a layer under the questions, never instead of them** (`## Sandbox`,
+  `templates/setup/sandbox.py`, written to `settings.local.json` after the mode is final): a refused
+  command is never retried outside it (`allowUnsandboxedCommands: false` — the live probe showed an
+  allow rule letting that retry through), `autoAllowBashIfSandboxed: false`, an autonomous session
+  refuses an unknown host (`strictAllowlist`), the person's keys are not readable, while
+  `~/.config/telesma` (the trust record, read by the task tool inside the sandbox) and, with the
+  GitHub integration, `~/.config/gh` stay readable. The section is under the trust gate: `Allowed
+  hosts`, `Writable paths` and `Excluded commands` loosen it.
 - **Release version tags are never created without the user's answer**, never with `-f`, never
-  pushed by Telesma. Commit/PR footer is exactly `🤖 Generated with Telesma`.
+  pushed by Telesma. From format 21 they are created by `telesma-task.py release` only (clean tree, a
+  green full suite on that state, the scenarios file committed, the `release` checks), which the
+  guard always turns into a question to the person — in `auto` too — and refuses where a question
+  reaches nobody (`bypassPermissions`, `dontAsk`); a hand-made `git tag` is refused. Commit/PR footer is exactly `🤖 Generated with Telesma`.
 - **Everything in English** — identifiers, comments, messages, instructions, docs. The one
   exception is `templates/messages/<lang>.txt`: translations of the launcher lines a person sees
   from the idea to the first build, looked up by `msg KEY 'English text'` (the English stays in
@@ -173,14 +247,19 @@ Two independent numbers:
 
 - **Release version** (`vX.Y.Z` git tag, `CHANGELOG.md`) — what users install.
 - **`TELESMA_FORMAT`** in `telesma.sh` — internal state-format / migration counter, stored per
-  project in `telesma/state/.telesma-version`. Currently **20**. Bump it when a project's files need a
+  project in `telesma/state/.telesma-version`. Currently **23**. Bump it when a project's files need a
   migration, *and* when an instruction change should be measurable (telemetry tells "before" from
   "after" by this number). The format gate in the launcher runs before anything creates, reads or
   writes a file in the project: 18 = the first public format (the layout every later number
   shares), 19 = recall of earlier decisions (section 0.6, instructions only — the gate stamps a
   format-18 project 19 without touching any other file), 20 = adoption of existing projects
-  (`--adopt`, section -3; the `Adopted` fields reach an older config through the merge). A new
-  step is one `case` line in the gate's loop.
+  (`--adopt`, section -3; the `Adopted` fields reach an older config through the merge), 21 = the
+  task loop's mechanics in `tools/telesma-task.py` (`next` / `done` / `commit`; instructions only),
+  22 = the sandbox (`## Sandbox` reaches an older config through the merge as `Enabled: no`; a config
+  the launcher creates starts with `yes`), 23 = allow rules for what the task tool does (`git add` /
+  `git commit`, phase tags, task-branch pushes, `gh pr create`) removed from config.md and
+  settings.local.json (`templates/setup/retired_rules.py`).
+  A new step is one `case` line in the gate's loop.
 
 ## Tests
 
@@ -193,9 +272,18 @@ python3 tools/telesma-judge-eval.py   # judge gate: zero false allows on "danger
 
 Self-tests: `test-setup.py` (configure.py engine; the launcher's first start without a terminal and
 through a pty), `test-repair.py` (no word lost, out-of-scope files byte-identical, idempotent),
-`test-telemetry.py` (canaries), `test-judge.py` (mocked `gh`), `test-checks.py`,
-`test-integrations.py` (launcher heredocs on fixtures), `test-specky-snapshots.py` (fake Specky),
-`test-survey.py` (git digest: numbers, never an author; survey units).
+`test-telemetry.py` (canaries), `test-judge.py` (mocked `gh`; both evaluation sets, the mutation
+test, the contract layer, answer parsing, the trust record), `test-checks.py`,
+`test-integrations.py` (launcher heredocs on fixtures), `test-launcher.py` (rotation and prompt
+trimming extracted from the launcher, trust gate, lock, format gate), `test-specky-snapshots.py` (fake Specky),
+`test-survey.py` (git digest: numbers, never an author; survey units), `test-task.py` (`next` / `done` /
+`commit` / `suite` / `changes` on temp git projects: selection, spec anchors, refusals that leave the
+state files as they were, the 0-tests guard, the trust record, check evidence, the regression gate),
+`test-guard.py` (what the guard refuses and lets through, when it is off, its registration),
+`test-github-flow.py` (a fake `gh` and a local bare `origin`: PRs, merge on green, WAITING, PR fix,
+the phase on main and its state PR, a chain re-pointed and rebased, side PRs, a closed PR),
+`test-sandbox.py` (`## Sandbox` → the settings: fixed values, stack / check / GitHub hosts, the
+person's additions kept, `Enabled: no` removing only Telesma's own key, the trust section).
 A parser change comes with a fixture that would have failed before it. The benchmark
 (`benchmark/bench.py`, see `benchmark/README.md`) costs real tokens; do not edit `project/`,
 `telesma/changes/` or `hidden/` casually — any edit changes its fingerprint.

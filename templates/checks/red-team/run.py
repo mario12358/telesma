@@ -27,6 +27,10 @@ import _routes as R  # noqa: E402
 
 MAX_FINDINGS = 30
 MARKER = re.compile(r'telesma:\s*red-team\s+([A-Za-z]+|\*)\s+(\S+)\s*(.*)$')
+# Where a test starts, in the languages the route extraction knows (and a few neighbours)
+TEST_START = re.compile(r'^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*(?:it|test)(?:\.\w+)*\s*\(|^\s*func\s+Test\w+\s*\(|'
+                        r'^\s*@Test\b|^\s*#\[(?:tokio::)?test\]|^\s*(?:it|specify|scenario)\s+[\'"]')
+MARKER_REACH = 40          # lines between a marker and the test it stands above
 CASES = ('no-session', 'foreign-role', 'foreign-owner', 'csrf')
 ALIASES = {'other-organization': 'foreign-owner', 'foreign-organization': 'foreign-owner',
            'no-session': 'no-session', 'anonymous': 'no-session',
@@ -51,22 +55,43 @@ def changed_lines(root, since, p):
     return out
 
 
+def marker_problem(method, path, rows, i):
+    """Why a marker does not count, or None. A marker names what a test attacks: a concrete
+    route (or a route prefix with a concrete beginning), and it stands in or right above a test.
+    `* /*` named everything and proved nothing — one comment line covered every route for good."""
+    prefix = [x for x in R.canonical(path[:-2] if path.endswith('/*') else path).split('/') if x]
+    if path.endswith('*') and not prefix:
+        return 'a wildcard without a path prefix covers nothing'
+    below = rows[i + 1:i + 1 + MARKER_REACH]
+    above = rows[max(0, i - 200):i]
+    if not any(TEST_START.search(w) for w in below) and not any(TEST_START.search(w) for w in above):
+        return 'no test in or below the marker'
+    return None
+
+
 def markers(root):
-    """[(method, path, {cases}, file)] from every test file in the repository."""
-    out = []
+    """([(method, path, {cases}, file)], [(file, line, reason)]) — the markers that count and the
+    ones that do not, from every test file in the repository."""
+    out, rejected = [], []
     for p in (R.git(root, 'ls-files') or '').splitlines():
         if not R.TEST_FILE.search(p) or R.SKIPPED_DIRS.search(p):
             continue
         t = R.read_file(root, p)
         if not t or 'red-team' not in t:
             continue
-        for w in t.split('\n'):
+        rows = t.split('\n')
+        for i, w in enumerate(rows):
             m = MARKER.search(w)
             if not m:
                 continue
+            method, path = m.group(1).upper(), m.group(2).strip('`"\'')
+            problem = marker_problem(method, path, rows, i)
+            if problem:
+                rejected.append((p, i + 1, problem))
+                continue
             words = re.findall(r'[\w-]+', m.group(3).lower())
-            out.append((m.group(1).upper(), m.group(2).strip('`"\''), {ALIASES[s] for s in words if s in ALIASES}, p))
-    return out
+            out.append((method, path, {ALIASES[s] for s in words if s in ALIASES}, p))
+    return out, rejected
 
 
 def covers(marker, path):
@@ -98,7 +123,7 @@ def main():
     if '--check' in sys.argv:
         return 0
     point = os.environ.get('TELESMA_POINT', 'phase')
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     files = [p for p in files if R.is_code_file(p)]
     smap = R.read_map(root)
     if not files or smap is None:
@@ -116,8 +141,13 @@ def main():
                 touched.append(tr)
     if not touched:
         return 0
-    mk = markers(root)
+    mk, rejected = markers(root)
     found, undecided = [], 0
+    for p, nr, problem in rejected[:5]:
+        found.append(dict(file=p, line=nr, rule='red-team-marker-invalid', severity='warn',
+                          content_fingerprint=fingerprint(f'{p}|{problem}'),
+                          message=f'this red-team marker does not count: {problem} — name the route '
+                                  f'(`telesma: red-team <METHOD> <path> — <cases>`) in or right above the test that attacks it'))
     for tr in sorted(touched, key=lambda x: (x['file'], x['line'])):
         k = R.route_key(tr['method'], tr['path'])
         row = smap['routes'].get(k)
@@ -151,7 +181,8 @@ def main():
     rest = found[MAX_FINDINGS:]
     if rest:
         emit(file=rest[0]['file'], line=None, rule='red-team-missing', severity=rest[0]['severity'],
-             file_fingerprint=False, content_fingerprint='counter',
+             file_fingerprint=False,
+             content_fingerprint=fingerprint('more|' + '|'.join(z['content_fingerprint'] for z in rest)),
              message=f'+{len(rest)} more routes without a red team — full list: '
                      f'python3 telesma/checks/telesma-checks.py --point {point}')
     return 0

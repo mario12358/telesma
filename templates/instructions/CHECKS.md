@@ -1,18 +1,32 @@
 ## 19. Quality checks (active: `## Checks` → `Enabled: yes`)
 
-Before `git commit`, `git tag telesma/phase-*` and `git tag … vX.Y.Z` a hook runs the checks
-from `telesma/checks/` (secrets, weakenings and the others listed in the config). You do not run
-them yourself — they happen at the git operation you perform anyway.
+The checks from `telesma/checks/` (secrets, weakenings and the others listed in the config) run
+at `done` and `commit` of the task tool — on exactly the files it is about to commit — and, through a
+hook, before any `git commit`, `git tag telesma/phase-*` and `git tag … vX.Y.Z` you run yourself. You
+do not run them yourself. A refusal of `done` that quotes findings is a 19.1 stop like the hook's.
 
-A check reads files **before** the command runs. That is why a commit and a tag always go as a
+The rest of this paragraph is about commits and tags you still make by hand (a phase tag, the
+amend of section 17), which the hook checks: it reads the files **before** the command runs. That is why a commit and a tag always go as a
 separate command: in the same command, only `git add`/`rm`/`mv`, `cd` and reading commands without
 redirection (`grep`, `ls`, `cat`, `head`, `find` without `-exec`/`-delete`) may stand before
 `git commit`, and a tag goes after the commit, in the next command. A file write and a commit in one
-command, `bash -c "git commit …"` or a git alias that is a script are rejected by the hook before it
-checks anything.
+command, `bash -c "git commit …"`, a git alias that is a script, a commit inside `( … )` / `{ … }` or
+behind a variable, and `$(…)` or backticks anywhere in a committing command are rejected by the hook
+before it checks anything. The commit message goes as `-m "…"` or as `"$(cat <<'EOF' … EOF)"` with the
+delimiter in quotes. Stage with plain paths (`git add src/a.py tests/`): `-u`, `-A`, a glob or a path
+on the commit make the hook check everything modified and untracked, not less. A file staged in one
+version and different in the working tree stops the commit — stage or restore it first.
+
+A commit the hook could not check beforehand (made by a script, a merge, a cherry-pick, an amend) is
+checked right after it exists, from its content; findings come back as a blocking message naming the
+commit (19.1 applies, the fix is an amend).
 
 The `lint-types` check takes its commands from `## Tests` (`Linter/formatter`, `Typecheck command`) —
 an empty field = no such tool, so fill them in during task 1.1 together with the linter configuration.
+It runs only a known tool called directly (`ruff check`, `npx eslint .`, `cd backend && mypy app`), never
+a script or `npm run …`, and only once the human has confirmed the section at a start of Telesma: after
+you change `## Tests` the warning `config-unconfirmed` is expected until the next session — run the
+linter yourself (step 9) meanwhile and note it in the report.
 The `dead-entry` check warns about a symbol new in the phase that nothing leads to — it is the
 mechanical guard of `AC: entry`; the answer is wiring up the entry or removing the code, not an exception.
 
@@ -38,6 +52,9 @@ section 4. The same goes for `telesma/state/SECURITY_MAP.md` when the startup cr
    reached a commit, tell the human it has to be revoked — removing it from history is not enough.
 3. A wrong finding (false positive) → **TELESMA BLOCKED**: fingerprint, check, file, why it is not
    a problem. The human writes the exception into `telesma/state/CHECK_EXCEPTIONS.md`.
+4. "The check files differ from what the human approved" is not a finding in the code and not yours to
+   fix: **TELESMA BLOCKED** with the list. The human reviews it and approves it in a terminal. The same
+   goes for `check-crashed` and for "quality checks could not run" that repeats after one retry.
 
 You never get around a check: no changing the command so the hook does not recognise it, no
 committing with another tool, no editing `telesma/checks/`, `telesma/state/CHECK_EXCEPTIONS.md` or the
@@ -74,10 +91,15 @@ none of this yourself — and you **never post statuses by hand** (`gh api … s
 status must mean "the hook saw it", not "Telesma says so".
 
 - A red status saying "no check evidence for … commits" = some commit of the branch was made outside
-  the hook (by hand, with `--no-verify`, with another tool) or before the checks were enabled.
-  Fix: `git commit --amend --no-edit` as a plain Bash command (the hook runs the checks and assigns
-  the evidence), then `git push --force-with-lease` to your own branch. Never remove the status or ask
-  the human for an exception — this is not a finding in the code.
+  the hook (by hand, with another tool) or before the checks were enabled.
+  Fix: `git commit --amend --no-edit` as a plain Bash command. An amend is never taken on trust: right
+  after it the hook checks the **whole content** of the amended commit (not just what you staged) and
+  only then writes its evidence — findings come back as a blocking message, and 19.1 applies. For a
+  commit further down the branch, tell the human: the content has to be checked (`--point ci --since`)
+  and the branch rewritten. Then `git push --force-with-lease` to your own branch. Never remove the
+  status or ask the human for an exception — this is not a finding in the code.
+- A red status "blocking findings: <check>@<sha>" = a commit checked after the fact has findings. Fix
+  the cause and amend that commit; a secret that reached a commit has to be revoked — tell the human.
 - A red status "check did not run" = at some commit a check reported an error (tool missing, time
   limit). Tell the human — the operation went through without it.
 - After a push the hook tells you what it posted (or that it failed — e.g. no `gh`). A failed post

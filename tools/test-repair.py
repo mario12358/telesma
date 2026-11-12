@@ -15,6 +15,14 @@ INVARIANT 2 — the repair is idempotent: a second run does not change a single 
 
 It is also checked that files outside the repair's scope (DECISIONS.md, BACKLOG.md,
 PROJECT_CONTEXT.md) stay byte-identical.
+
+INVARIANT 3 — the repair never deletes what git does not know about, and never what it only
+resembles: an archived entry that was amended after its first commit is not a stump; a line is
+"already in the archive" only as a whole line, not as a fragment of another sentence.
+
+INVARIANT 4 — a project with nothing to repair is byte-identical after the FIRST run (LF and
+CRLF), a repaired CRLF file stays CRLF, a file that is not UTF-8 is diagnosed around and refused
+by `--fix` before any write, and `--fix` works with a PROJECT_CONTEXT.md it has no business opening.
 """
 import collections
 import re
@@ -220,8 +228,148 @@ def check(name, build):
         return ok
 
 
+def fix(t, *flags):
+    return subprocess.run([sys.executable, str(TOOL), str(t), *flags], capture_output=True, text=True)
+
+
+def state_bytes(t):
+    return {f.name: f.read_bytes() for f in (t / "telesma" / "state").glob("*")}
+
+
+def expect(cond, desc):
+    print(("  ✓ " if cond else "  ✗ ") + desc)
+    return bool(cond)
+
+
+def amended_archive_entry():
+    """An entry is committed, Claude appends a lesson (committed), rotation moves the block to
+    the archive, a person adds a line there by hand (never committed). The git version of the
+    entry is its FIRST one — shorter than what the archive holds."""
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d) / "project"
+        repo(t)
+        first = "- [2026-01-01] Task 1.1: the mock passed, production failed.\n"
+        write(t, **{"REPORT.md": "# R\n\n## Problem log\n\n" + first})
+        git(t, "add", "-A"); git(t, "commit", "-qm", "entry")
+        write(t, **{"REPORT.md": "# R\n\n## Problem log\n\n" + first
+                                 + "  LESSON_COMMITTED: never trust the mock.\n"})
+        git(t, "add", "-A"); git(t, "commit", "-qm", "lesson")
+        write(t, **{"REPORT.md": "# R\n\n## Problem log\n\n",
+                    "REPORT_ARCHIVE.md": "# A\n\n## Rotation 2026-02-01\n\n### Problem log\n\n" + first
+                                         + "  LESSON_COMMITTED: never trust the mock.\n"
+                                         + "  NOTE_BY_HAND: written in the archive, git never saw it.\n"})
+        git(t, "add", "telesma/state/REPORT.md"); git(t, "commit", "-qm", "rotation")
+        before = state_bytes(t)
+        r = fix(t, "--fix")
+        a = (t / "telesma/state/REPORT_ARCHIVE.md").read_text(encoding="utf-8")
+        return expect(r.returncode == 0 and "LESSON_COMMITTED" in a and "NOTE_BY_HAND" in a
+                      and state_bytes(t) == before and "stumps" not in r.stdout,
+                      "an archived entry amended after its first commit is not a stump: the lesson and "
+                      "the uncommitted line stay")
+
+
+def fragment_is_not_archived():
+    """Two lines git never saw, each a FRAGMENT of an unrelated archive sentence."""
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d) / "project"
+        repo(t)
+        write(t, **{"REPORT.md": "# R\n\n## Problem log\n\n- [2026-01-01] Task 1.1: first.\n",
+                    "REPORT_ARCHIVE.md": "# A\n\n### Problem log\n\n- [2025-12-01] Task 0.1: the deploy "
+                                         "key rotation is postponed until the second quarter.\n"})
+        git(t, "add", "-A"); git(t, "commit", "-qm", "state")
+        write(t, **{"REPORT.md": "# R\n\n## Problem log\n\nrotation is postponed\n\n"
+                                 "- [2026-01-01] Task 1.1: first.\n  key\n"})
+        before = state_bytes(t)
+        r = fix(t, "--fix")
+        text = (t / "telesma/state/REPORT.md").read_text(encoding="utf-8")
+        return expect(r.returncode == 0 and "rotation is postponed\n" in text and "  key\n" in text
+                      and state_bytes(t) == before,
+                      "a line is `already in the archive` only as a whole line — a fragment of another "
+                      "sentence is not removed")
+
+
+CLEAN_REPORT = ("# R\n\n## Task history\n\n### Phase 1\n\n| Task | Status |\n|---|---|\n| 1.1 a | ok |\n\n"
+                "## Problem log\n\n- [2026-01-01] Task 1.1: one.\n- [2026-01-02] Task 1.2: two.\n\n"
+                "## Notes\n\n```\na\n\n\n\nb\n```\n")
+
+
+def clean_project_untouched():
+    """Entries without a blank line between them, three blank lines inside a code block of
+    another section: nothing to repair, so not a byte may move — on the first run."""
+    ok = True
+    for name, nl in (("LF", "\n"), ("CRLF", "\r\n")):
+        with tempfile.TemporaryDirectory() as d:
+            t = Path(d) / "project"
+            repo(t)
+            r = t / "telesma" / "state"
+            (r / "REPORT.md").write_bytes(CLEAN_REPORT.replace("\n", nl).encode())
+            (r / "PLAN.md").write_bytes("### Phase 1: x\n\n- [x] Task 1.1: a\n".replace("\n", nl).encode())
+            git(t, "add", "-A"); git(t, "commit", "-qm", "state")
+            before = state_bytes(t)
+            out = fix(t, "--fix")
+            status = subprocess.run(["git", "-C", str(t), "status", "--porcelain"],
+                                    capture_output=True, text=True).stdout
+            ok &= expect("Nothing needed changing" in out.stdout and state_bytes(t) == before and not status,
+                         f"a clean project ({name}) is byte-identical after the first run, the tree stays clean")
+    return ok
+
+
+def crlf_repair_stays_crlf():
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d) / "project"
+        scenario_a(t)
+        r = t / "telesma" / "state"
+        for n in ("REPORT.md", "REPORT_ARCHIVE.md", "PLAN.md"):
+            (r / n).write_bytes((r / n).read_bytes().replace(b"\n", b"\r\n"))
+        git(t, "add", "-A"); git(t, "commit", "-qm", "a Windows checkout")
+        before = words(r)
+        out = fix(t, "--fix")
+        after = words(r)
+        lone = [n for n in ("REPORT.md", "REPORT_ARCHIVE.md", "PLAN.md")
+                if (r / n).read_bytes().count(b"\n") != (r / n).read_bytes().count(b"\r\n")]
+        text = (r / "REPORT.md").read_bytes().decode()
+        archive = (r / "REPORT_ARCHIVE.md").read_bytes().decode()
+        return expect("stumps completed" in out.stdout and "table rows" in out.stdout and not lone
+                      and "| 7.2 second |" in text and "Second line of the description" in archive
+                      and not {w for w, n in before.items() if after[w] < n},
+                      f"a CRLF project is repaired like an LF one and stays CRLF {lone}")
+
+
+def not_utf8():
+    with tempfile.TemporaryDirectory() as d:
+        t = Path(d) / "project"
+        scenario_a(t)
+        r = t / "telesma" / "state"
+        (r / "REPORT_ARCHIVE.md").write_bytes((r / "REPORT_ARCHIVE.md").read_bytes()
+                                              + "- [2026-01-05] za\u017c\u00f3\u0142\u0107\n".encode("iso-8859-2"))
+        before = state_bytes(t)
+        diag = fix(t)
+        out = fix(t, "--fix")
+        ok = expect(diag.returncode == 0 and "not valid UTF-8" in diag.stdout and "Traceback" not in diag.stderr,
+                    "diagnosis of a file that is not UTF-8: a notice, not a crash")
+        ok &= expect(out.returncode == 2 and "not valid UTF-8" in out.stderr and state_bytes(t) == before,
+                     "--fix refuses before the first write: not a byte changed in any file")
+        (r / "REPORT_ARCHIVE.md").write_bytes(before["REPORT_ARCHIVE.md"][:-20])
+        (r / "PROJECT_CONTEXT.md").write_bytes(b"## Current state\n\n\xb1\xe6\xea\n")
+        ctx = (r / "PROJECT_CONTEXT.md").read_bytes()
+        out = fix(t, "--fix")
+        ok &= expect(out.returncode == 0 and "stumps completed" in out.stdout
+                     and (r / "PROJECT_CONTEXT.md").read_bytes() == ctx,
+                     "--fix does not open PROJECT_CONTEXT.md: one it could not even read does not stop the repair")
+        return ok
+
+
+def no_state_directory():
+    with tempfile.TemporaryDirectory() as d:
+        out = fix(Path(d))
+        return expect(out.returncode == 2 and "No directory" in out.stderr and "Traceback" not in out.stderr,
+                      "a directory without telesma/state: a message and exit code 2, not a traceback")
+
+
 if __name__ == "__main__":
     print("Test tools/telesma-repair.py")
     results = [check("entries cut in half", scenario_a),
-               check("phase archived with pending work", scenario_b)]
+               check("phase archived with pending work", scenario_b),
+               amended_archive_entry(), fragment_is_not_archived(), clean_project_untouched(),
+               crlf_repair_stays_crlf(), not_utf8(), no_state_directory()]
     sys.exit(0 if all(results) else 1)

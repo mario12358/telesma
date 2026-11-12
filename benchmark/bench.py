@@ -18,8 +18,13 @@ so they measure what a user would see — including a mechanism that was built a
 The workspace lives outside the repository (~/.cache/telesma-bench), and the harness copies into it
 only `project/` and `telesma/changes/`.
 
-One run is an anecdote: the model is not deterministic. Compare series (`-n 3` and more)
-and look at the spread, not at a single number. Changing anything in `project/`, `telesma/changes/` or
+One run is an anecdote: the model is not deterministic. Compare series (`-n 3` is the minimum;
+`compare` marks a shorter series) and look at the spread, not at a single number.
+
+The judge is hidden by convention, not by a sandbox: the session under test runs as the same
+user, with python3, cat, grep and curl allowed, and `hidden/` sits in the checkout telesma.sh
+runs from (and in the public repository). Nothing detects a session that reads it — see
+"What the benchmark does not guarantee" in README.md. Changing anything in `project/`, `telesma/changes/` or
 `hidden/` changes the benchmark fingerprint — results with different fingerprints are not comparable.
 """
 import argparse
@@ -42,6 +47,7 @@ CACHE = Path.home() / ".cache" / "telesma-bench"
 TEST_COMMAND = "python3 -m unittest discover -s tests"
 PERMISSIONS = ("Bash(python3:*)", "Bash(python:*)", "Bash(mv:*)", "Bash(git mv:*)", "Bash(grep:*)",
                "Bash(curl:*)", "Bash(cat:*)", "Bash(kill:*)", "Bash(lsof:*)", "Bash(sleep:*)")
+MIN_RUNS = 3        # fewer runs in a series say nothing about a difference between two series
 OPEN_TASK = re.compile(r"^- \[ \]\s*\W*(?:Task|Test)\b", re.M)
 # The first real run (2026-09-19) exhausted the subscription's session limit halfway through stage B:
 # Telesma exited with code 1 after 4 seconds, and the result looked like "did not finish the plan".
@@ -201,6 +207,9 @@ def run(a):
     telesma = telesma_dir(a.telesma)
     version = re.search(r"^TELESMA_FORMAT=(\d+)", (telesma / "telesma.sh").read_text(encoding="utf-8"), re.M)
     label = a.label or f"v{version.group(1) if version else '?'}"
+    if a.n < MIN_RUNS:
+        print(f"note: -n {a.n} — a series shorter than {MIN_RUNS} runs is an anecdote; `compare` will "
+              f"mark it. Add runs with the same --label to complete the series.", flush=True)
     (HERE / "results").mkdir(exist_ok=True)
     for nr in range(1, a.n + 1):
         stamp = f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{label}-{nr}"
@@ -263,14 +272,18 @@ def compare(_):
     for (fingerprint, label, mode), rs in groups.items():
         last = [r["stages"][-1] for r in rs]
         interrupted = sum(any(s.get("interrupted_by_limit") for s in r["stages"]) for r in rs)
-        print(f"{label + '/' + mode:10} {len(rs):>2}  {spread([percent(r, "A") for r in rs]):>14}  "
-              f"{spread([percent(r, "B") for r in rs]):>14}  "
+        # (single quotes inside the replacement fields: Python older than 3.12 cannot reuse
+        # the quote of the f-string itself, and Telesma runs on 3.9)
+        print(f"{label + '/' + mode:10} {len(rs):>2}  {spread([percent(r, 'A') for r in rs]):>14}  "
+              f"{spread([percent(r, 'B') for r in rs]):>14}  "
               f"{spread([s['own_tests'].get('count') for s in last]):>13}  "
               f"{spread([r['minutes'] for r in rs]):>13}  "
               f"{spread([r['telemetry']['output_tokens'] / 1000 for r in rs]):>15}  "
               f"{spread([r['telemetry']['ac_entry'] for r in rs]):>10}  "
               f"{','.join(sorted({m for r in rs for m in r['telemetry']['models']}))}"
               + (f"   ⚠ {interrupted} interrupted by the limit (stage left out)" if interrupted else "")
+              + (f"   ⚠ {len(rs) - interrupted} complete run(s) — fewer than {MIN_RUNS}, not a series"
+                 if len(rs) - interrupted < MIN_RUNS else "")
               + ("" if fingerprint == now else f"   ⚠ different benchmark fingerprint ({fingerprint})"))
     print("\nFailed judge tests (in how many runs):")
     for (fingerprint, label, mode), rs in groups.items():

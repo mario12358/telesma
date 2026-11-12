@@ -20,12 +20,14 @@ time, before they reach history.
 |---|---|---|
 | `only` | block | `.only(`, `fit(`, `fdescribe(` in a JS/TS test file — switches off the rest of the suite |
 | `skip-without-reason` | block | `@pytest.mark.skip` / `skipif` without `reason=`, `@unittest.skip()` without text, `it.skip(` / `test.skip(` / `describe.skip(` / `xit(` / `xdescribe(` without a `// skip:` / `// reason:` comment on the same line or the line above, Go `t.Skip()` without an argument, Rust `#[ignore]` without `= "…"`, Java/Kotlin `@Disabled` / `@Ignore` without text |
+| (the same rule) | block | the same thing spelled differently: `@pytest.mark.xfail` without `reason=`, `@unittest.expectedFailure`, module-level `pytestmark = pytest.mark.skip` / `xfail` without `reason=`, `pytest.skip()` / `pytest.xfail()` / `self.skipTest()` / `raise SkipTest` in a test body without a text, `return` as the first statement of a Python test, `test.fixme(` / `it.failing(` — a `# skip: …` / `# reason: …` comment on the line or the line above counts as the reason where the API has no place for one |
+| `tests-removed` | block | fewer test functions than in the base version, counted over **all** test files of the change (py / js / go): tests moved between files are not removed; tests deleted, renamed so the runner no longer collects them (`test_add` → `_test_add`), or gone with a test file that had no module of the same name are. A module deleted together with its tests is cleanup and passes |
 | `skip-with-reason` | warn | the same constructs with a justification — a reminder that the suite is green without this test |
-| `test-deleted` | block | a test file deleted in this commit while the tested module (by name: `test_foo.py` ↔ `foo.py`, `Foo.test.tsx` ↔ `Foo.tsx`, `foo.spec.ts` ↔ `foo.ts`, `foo_test.go` ↔ `foo.go`, `FooTest.java` ↔ `Foo.java`) still exists in the repo; the module disappearing together with the test → cleanup, passes |
-| `test-without-assertion` | warn | a test function (`def test_…`, `it(`, `test(`, `func Test…`) without `assert` / `expect(` / `should` / `t.Error` / `t.Fatal` / `require.` / `pytest.raises` / `toThrow`; also an empty assertion: `assert True`, `assert 1`, `expect(true).toBe(true)`, `expect(1).toBe(1)` |
+| `test-deleted` | block | a test file deleted in this commit — or renamed to a name outside the test pattern (`tests/test_calc.py` → `attic/calc_old.txt`) — while the tested module (by name: `test_foo.py` ↔ `foo.py`, `Foo.test.tsx` ↔ `Foo.tsx`, `foo.spec.ts` ↔ `foo.ts`, `foo_test.go` ↔ `foo.go`, `FooTest.java` ↔ `Foo.java`) still exists in the repo; the module disappearing together with the test → cleanup, passes |
+| `test-without-assertion` | warn | a test function (`def test_…`, `it(`, `test(`, `func Test…`) without `assert` / `expect(` / `should` / `t.Error` / `t.Fatal` / `require.` / `pytest.raises` / `toThrow`; also an empty assertion: `assert True`, `assert 1`, `expect(true).toBe(true)`, `expect(1).toBe(1)`, both sides identical (`assert f(x) == f(x)`, `assert 3 == 3`). An assertion in a comment is not an assertion |
 | `code-without-test` | warn | the commit has a code file in a code directory and no test file at all — **one** finding per commit, fingerprint from the file list |
 | `test-pinned-to-code` | warn | a code ↔ test pair (by name) and **both** modified (status M); a line with test content was removed or changed in the test — if the test change follows from the implementation, not from the rule, the test guards the implementation. New code with a new test (A + A) is the norm; a test that only got new cases is too — changed imports, blank lines and comments do not count (an extended import gave a false warning on a production project) |
-| `fewer-assertions` | warn | in a modified test file the number of `assert` / `expect(` dropped compared to the base version |
+| `fewer-assertions` | warn | in a modified test file the number of `assert` / `expect(` (outside comments) dropped compared to the base version |
 
 **Test files** are recognised by the same rule as in `weakenings` (`tests/`, `__tests__/`, `spec/`,
 `e2e/`, `test_*`, `*.test.*`, `*.spec.*`, `*_test.*`). Rust `#[ignore]` is checked in every
@@ -52,8 +54,11 @@ and `code-without-test` always run.
 
 It does not run the tests and does not read their results — the suite does that. An asserting helper is
 recognised by name only (`self.check_…`, `self.verify_…`, `self.ensure_…`) — any other helper gives a false
-warning; hence `test-without-assertion` only warns. It does not
-recognise `pytest.skip()` called inside a test body (a skip conditional on the environment can be legitimate).
+warning; hence `test-without-assertion` only warns. `pytest.skip("…")` inside a test body with a text
+is a `skip-with-reason` warning (a skip conditional on the environment can be legitimate). It does not see
+tests switched off outside the test files: `collect_ignore` in `conftest.py`, `-k` / `--deselect` /
+`testPathIgnorePatterns` in the runner's configuration, a changed test command, a lowered coverage threshold,
+an edited CI workflow — nor a changed expected value or a mock of the unit under test.
 It does not treat `fit:` as a focus (an object key `{ fit: 'cover' }` in a fixture would give a false block).
 Code ↔ test pairing goes by file name, not by imports: a test `tests/test_api_flow.py`
 without a module `api_flow.py` has no pair and takes no part in `test-pinned-to-code` or `test-deleted`.

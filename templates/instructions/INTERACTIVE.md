@@ -167,7 +167,7 @@ When an item becomes a formal change of requirements/functionality (with an effe
    ```markdown
    - [ ] **Title** [→ telesma/changes/<slug>.md] — `P2` `chat`
    ```
-6. Commit together: `git add telesma/state/BACKLOG.md telesma/changes/<slug>.md && git commit -m "Telesma: promote BACKLOG → telesma/changes/<slug>"`
+6. Commit together: `<TASK_TOOL> commit --kind backlog -m "promote BACKLOG → telesma/changes/<slug>"`
 7. Tell the user: "Promoted. The next run in mode 1 will process the change through section 0.3."
 
 ### 13.3 Ad-hoc execution (from interactive mode)
@@ -177,7 +177,7 @@ The user may say "do item X from BACKLOG" in mode 10 or 11:
 1. Read the full text of the item
 2. Implement following the guidelines (general.md + the tech tags implied by the area)
 3. Test (command from `telesma/config.md`)
-4. Commit as `Telesma: <item title>` (if `Auto-commit: yes`)
+4. Commit with `<TASK_TOOL> commit --kind backlog -m "<item title>"` (if `Auto-commit: yes`)
 5. Mark the item `[x]` + the commit hash:
    ```markdown
    - [x] **Title** (abc1234) — `P2` `chat`
@@ -292,13 +292,21 @@ No `v*` tag at all → propose `v0.1.0`.
 (file name = tag name). It is created **before** the tag and becomes part of the tagged state —
 otherwise it describes a version it is not part of. Template and rules: **section 15.7**.
 
-**Step 2 — commit** the scenarios file (the tree has to be clean before the tag, condition 15.5).
+**Step 2 — commit** the scenarios file: `<TASK_TOOL> commit --kind release -m "test scenarios for
+vX.Y.Z"` (the tree has to be clean before the tag, condition 15.5).
 
-**Step 3 — the release version tag:**
+**Step 3 — the release version:**
 
 ```bash
-git tag -a vX.Y.Z -m "<2-4 sentences: what was added, who it matters to>"
+<TASK_TOOL> release vX.Y.Z -m "<2-4 sentences: what was added, who it matters to>"
 ```
+
+It checks the conditions of 15.5 (clean tree, a green full suite on this state — `suite --full` if
+code changed since the last one —, the scenarios file committed, no such tag yet, the `release`
+checks) and creates the annotated tag, never with `-f`, never pushed. This command **always asks the
+person** — on purpose: a hook turns it into a question even in `auto` mode, and refuses it where a
+question reaches nobody (`bypassPermissions`, `dontAsk`); then the proposal is all you do. The
+question is expected; do not look for a way around it (a plain `git tag` is refused too).
 
 Build the message from what **actually landed** since the previous tag:
 
@@ -328,6 +336,8 @@ git says what *landed* — for a release the latter is what counts.
   derived from git when the image is built, there is nothing to bump in the repo.
 
 ### 15.5 Blocking conditions — do not create the version, say why
+
+`release` refuses each of them with the reason; tell the person what it said.
 
 1. **The full suite is not green.**
 2. **`git status --porcelain` is not empty** — a tag on a dirty tree points at a state nobody can later

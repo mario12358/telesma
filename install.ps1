@@ -9,6 +9,8 @@
 # ASCII only: Windows PowerShell 5.1 reads a file without a BOM in the ANSI code page. The lines a
 # person reads come from templates/messages/<lang>.txt (fetched first, English when there is none).
 # Failures `return` from Install-Telesma instead of `exit`: under `| iex` exit closes the window.
+# Installed is the latest release (the newest vX.Y.Z tag on the branch); TELESMA_FOLLOW_BRANCH=1
+# installs the branch tip instead and makes the launcher's update follow the branch too.
 # Overrides (tests, forks): TELESMA_REPO (a URL or a local clone), TELESMA_BRANCH,
 # TELESMA_INSTALL_DIR, TELESMA_PROJECTS, TELESMA_DESKTOP.
 
@@ -115,6 +117,16 @@ function Test-Python3 {
     return ($LASTEXITCODE -eq 0 -and $out -eq 'True')
 }
 
+# What to install from the commit just fetched (FETCH_HEAD or HEAD): the newest release tag
+# reachable from it; no release yet, or TELESMA_FOLLOW_BRANCH set: that commit itself.
+function Get-InstallRef($from) {
+    if (-not [Environment]::GetEnvironmentVariable('TELESMA_FOLLOW_BRANCH')) {
+        $tag = & git -C $Dest describe --tags --abbrev=0 --match 'v*' $from 2>$null
+        if ($LASTEXITCODE -eq 0 -and $tag) { return "refs/tags/$tag" }
+    }
+    return $from
+}
+
 function Install-Telesma {
     Write-Host (msg inst.title '=== Telesma - installation ===') -ForegroundColor Green
     Write-Host (msg inst.intro 'Telesma builds programs with Claude Code. This installs what it needs and asks before each step.')
@@ -175,7 +187,7 @@ function Install-Telesma {
     # aside whole - nothing in it is lost - and Telesma is downloaded again.
     if (Test-Path (Join-Path $Dest '.git')) {
         & git -C $Dest remote set-url origin $Repo 2>$null
-        & git -C $Dest fetch -q origin $Branch 2>$null
+        & git -C $Dest fetch -q origin $Branch 'refs/tags/v*:refs/tags/v*' 2>$null
         $updated = ($LASTEXITCODE -eq 0)
         if ($updated) {
             & git -C $Dest checkout -q $Branch 2>$null
@@ -188,7 +200,7 @@ function Install-Telesma {
                 }
             }
         }
-        if ($updated) { & git -C $Dest merge -q --ff-only FETCH_HEAD 2>$null; $updated = ($LASTEXITCODE -eq 0) }
+        if ($updated) { & git -C $Dest merge -q --ff-only (Get-InstallRef 'FETCH_HEAD') 2>$null; $updated = ($LASTEXITCODE -eq 0) }
         if (-not $updated) {
             $aside = $Dest + '.old-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
             try { Move-Item -LiteralPath $Dest -Destination $aside -ErrorAction Stop } catch {
@@ -204,6 +216,8 @@ function Install-Telesma {
     } else {
         & git clone -q -c core.autocrlf=false --branch $Branch $Repo $Dest
         if ($LASTEXITCODE -ne 0) { Fail (msg inst.fail 'The installation did not finish - see the lines above, then run the installer again.'); return }
+        # a fresh clone sits on the branch tip: put the branch on the release (nothing local yet)
+        & git -C $Dest checkout -q -B $Branch (Get-InstallRef 'HEAD') 2>$null
         Ok (msg inst.cloned 'Telesma downloaded: %s' $Dest)
     }
     # The `telesma` command: a script for Git Bash, a .cmd for PowerShell and cmd that runs it through bash.exe

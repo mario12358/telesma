@@ -35,10 +35,28 @@ Without both fields only the quote rule runs (the validator at startup reports t
 The typechecker deliberately does not run at commit: `tsc` and `mypy` cannot sensibly do "only these
 files", and on a large project they exceed the commit budget (20 s for the whole module).
 
-**The hook never changes files.** `--fix` / `--write` are stripped from the command, formatters
-(`black`, `isort`, `prettier`, `cargo fmt`, `ruff format`) get `--check`.
+**The hook never changes files.** Autofix flags are stripped from the command (`--fix`, `--fix-only`,
+`--unsafe-fixes`, `--write`, `--apply`, `--apply-unsafe`, `--autocorrect`…, prettier `-w`, rubocop
+`-a` / `-A` / `-x`), formatters (`black`, `isort`, `prettier`, `cargo fmt`, `ruff format`) get `--check`.
 
-## Tools recognised by name in the command
+## The field is not a way to run a command
+
+`config.md` is a file the agent edits and a clone brings along, and this module runs inside a hook —
+outside the permission system. Two rules follow:
+
+- **Only a known tool, called directly.** The program name must be exactly one of the tools below
+  (`ruff`, `/opt/bin/ruff`, `node_modules/.bin/eslint`), optionally through `npx` / `pnpm exec` / `yarn` /
+  `bunx` / `uv run` / `poetry run` / `pipenv run` / `pdm run` / `hatch run` / `python -m`, and after a
+  `cd <directory inside the project> &&` prefix. `python3 tools/my_ruff.py`, `npm run lint`, a pipe, `;`,
+  `&&`, a redirect, `$…` or a `cd` that leaves the project are **not run** at any point — one
+  `linter-unknown` / `types-unknown` warning. No shell is ever started.
+- **Only a confirmed `## Tests` section.** The launcher keeps a per-machine record of the section the
+  person confirmed (`~/.config/telesma/trust/`). When the section differs — the agent just filled it in,
+  a pull changed it — nothing is run and one `config-unconfirmed` warning says so; the next start of
+  `telesma.sh` confirms it. Run by hand or in CI (`telesma-checks.py --point …`) the runner vouches for
+  the section: whoever runs that runs the project's tools knowingly.
+
+## Tools recognised by their program name
 
 | Tool | Files | Output format |
 |---|---|---|
@@ -50,10 +68,9 @@ files", and on a large project they exceed the commit budget (20 s for the whole
 | `shellcheck` | `.sh .bash` | `-f json` |
 | `mypy`, `pyright`, `tsc` (types) | — | mypy text, pyright `--outputjson`, tsc `file(l,c): error TSxxxx` |
 
-Unknown tool: at phase / CI it is run as it stands and read with the text parser
-(`file:line…`); at commit it is skipped with one `linter-unknown` warning — it is unknown
-which files to pass it. A compound command (pipe, `;`, `&&` other than a `cd X &&` prefix) is
-treated the same way. The `cd X &&` prefix works: file paths are recomputed relative to `X`.
+Also as typecheckers: `basedpyright`, `vue-tsc`, `svelte-check`, `go vet` / `go build`, `cargo check`,
+`deno check`. An unknown tool or a compound command (pipe, `;`, `&&` other than a `cd X &&` prefix) is
+not run — see above. The `cd X &&` prefix works: file paths are recomputed relative to `X`.
 
 **Several commands in one field** — a project with a backend and a frontend writes each one separately, with its own
 `cd`: `` `cd backend && ruff check app tests` · `cd frontend && npx eslint src` `` (commands
@@ -72,7 +89,8 @@ When no file is left after the language filter (a commit of `.md` files only), t
 | `linter/<code>` | by code | ruff/flake8: `E9*`, `F*`, `B*`, syntax error → block; `E`, `W`, `I`, `D`, `N`, `UP`… → warn. eslint `severity: 2` / fatal, pylint `error`/`fatal`, biome `error`, shellcheck `error`, rubocop `error`/`fatal`, clippy `error` → block; the rest warn |
 | `linter/format` | warn | a file to reformat (black / isort / prettier / cargo fmt) |
 | `types/<code>` | **block** | mypy `error … [code]`, tsc `error TSxxxx`, pyright `error`; pyright `warning` warns, `note` skipped |
-| `linter-unknown` | warn | tool not recognised — skipped at commit |
+| `linter-unknown`, `types-unknown` | warn | not a known tool called directly — not run at any point |
+| `config-unconfirmed` | warn | `## Tests` differs from the section confirmed on this machine — linter and typechecker not run until the next start |
 | `linter-unavailable`, `types-unavailable` | warn | the command points at something that does not exist (code 127 / missing file) — the field is optional, so not code 3 |
 | `linter-failed`, `types-failed` | warn | exit code ≠ 0, output not parseable — first 3 lines of output (≤ 300 characters) |
 | `linter-timeout`, `types-timeout` | warn | limit exceeded — the operation passed without the tool |

@@ -22,10 +22,11 @@ config_field() {
 set_field() {
     local section="$1" label="$2" value="$3"
     python3 - "$CONFIG_FILE" "$section" "$label" "$value" <<'PYSET'
+import os
 import sys
 from pathlib import Path
 p, section, label, value = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-t = p.read_text(encoding="utf-8").split("\n")
+t = p.read_text(encoding="utf-8", errors="replace").split("\n")
 w = False
 for i, l in enumerate(t):
     if l.startswith("## "):
@@ -35,7 +36,9 @@ for i, l in enumerate(t):
         break
 else:
     sys.exit(1)
-p.write_text("\n".join(t), encoding="utf-8")
+tmp = p.with_name(f".telesma-{os.getpid()}.tmp")       # whole file or nothing
+tmp.write_text("\n".join(t), encoding="utf-8")
+os.replace(str(tmp), str(p))
 PYSET
 }
 
@@ -50,7 +53,7 @@ add_permissions() {
         [[ -z "$rule" ]] && continue
         grep -Fq -- "- $rule" "$CONFIG_FILE" && continue
         awk -v r="  - $rule" '{ print } /^- \*\*Allowed commands\*\*:/ && !d { print r; d = 1 }' \
-            "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            "$CONFIG_FILE" > "$CONFIG_FILE.tmp.$$" && mv "$CONFIG_FILE.tmp.$$" "$CONFIG_FILE"
         added=$((added + 1))
     done < "$file"
     (( added > 0 )) && echo -e "  ${GREEN}✓${NC} permissions: added $added rules to 'Allowed commands'"

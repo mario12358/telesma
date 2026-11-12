@@ -42,12 +42,32 @@ Evidence and PR status (`PR status: yes`, repository integration):
   hence "local" in the name. After a rebase the SHA changes; the evidence is found by
   `git patch-id`, because the content of the change stayed the same.
 
+What the hook cannot see beforehand, it checks afterwards: a commit made in a form it could not
+read (a script, a subshell, a merge, a cherry-pick) or an amend gets the commit-point checks run
+on its CONTENT in PostToolUse; findings come back as blocking context and the evidence says so.
+An internal error of the hook stops a commit / tag instead of letting it through.
+
+Integrity: hashes of the check modules, the exceptions file and the `## Checks` section are kept
+in `.git/telesma-checks/baseline.json`. A difference that did not come through an edit the human
+was asked about stops the next commit / tag until the human approves it (`--approve`).
+
 Modes:
   --pretooluse            hook: JSON on stdin; Bash → points from the git command,
                           Edit/Write → protection of the check files
-  --posttooluse           hook: after `git commit` evidence → SHA, after `git push` PR status
+  --posttooluse           hook: after `git commit` evidence → SHA, unseen commits verified,
+                          after `git push` PR status; after an approved Edit/Write the baseline follows
   --point P [--since REF] by hand / in CI; exit code 1 when something blocks
-  --validate              E:/W: lines for the config validator in telesma.sh
+  --files-commit          tools/telesma-task.py (`done`, `commit`): the commit-point checks on exactly
+                          the files named on stdin (NUL-separated), integrity first; the result waits
+                          as pending evidence; exit code 1 when something blocks
+  --record-commit         tools/telesma-task.py, right after its commit: pending evidence → the new SHA,
+                          and HEAD is marked as seen (the commit was checked before it was made)
+  --validate [DIR]        E:/W: lines for the config validator in telesma.sh
+  --baseline [DIR] [--templates DIR] [--config-section]
+                          launcher, at start: create the integrity baseline when missing; record
+                          module files identical to the delivered templates; with --config-section
+                          (right after the launcher's own wizard wrote it) also the ## Checks section
+  --approve [DIR]         the human, in a terminal: approve the current state of the check files
 """
 import datetime
 import hashlib
@@ -55,8 +75,16 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='backslashreplace')
+    except (AttributeError, ValueError):
+        pass
 
 POINTS = ('commit', 'phase', 'release', 'ci')
 DIRECTORY = 'telesma/checks'
@@ -74,6 +102,33 @@ EVIDENCE = 'telesma-checks'          # directory in .git/ (git rev-parse --git-p
 PENDING = 'pending.json'
 MAX_STATUS_DESCRIPTION = 140       # GitHub's limit for a status description
 YES = ('yes', 'true')
+BASELINE = 'baseline.json'         # integrity baseline of the check files (in .git/telesma-checks/)
+APPROVALS = 'approvals.json'       # edits the human was asked about, waiting for PostToolUse
+SEEN_HEAD = 'seen-head'            # HEAD at the previous PostToolUse — what moved since then is verified
+POST_BUDGET = 270                  # seconds for verifying commits after the fact (hook limit: 300)
+MAX_VERIFIED = 10                  # commits verified after the fact in one go
+# Overrides of service addresses, the cache directory and the gh binary exist for the self-tests.
+# They are honoured only together with this flag: a variable alone must not move a check elsewhere.
+TEST_FLAG = 'TELESMA_CHECKS_TEST'
+
+
+def test_mode():
+    return os.environ.get(TEST_FLAG) == '1'
+
+
+class GitError(Exception):
+    """git did not answer where the answer decides what gets checked — an unknown scope is not an
+    empty scope, so the operation is refused instead of passing unchecked."""
+
+
+def read_text(path):
+    """File content, or None. Undecodable bytes are replaced: one stray byte in config.md must not
+    switch the checks off."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 # --- Configuration ----------------------------------------------------------------
@@ -84,10 +139,8 @@ def strip_comments(t):
 
 def load_config(root):
     """{'enabled': bool, 'checks': {name: {field: value}}} — the ## Checks section."""
-    try:
-        with open(os.path.join(root, CONFIG), encoding='utf-8') as f:
-            text = f.read()
-    except OSError:
+    text = read_text(os.path.join(root, CONFIG))
+    if text is None:
         return {'enabled': False, 'checks': {}}
     m = re.search(r'^## Checks[ \t]*\n(.*?)(?=^## |\Z)', text, re.M | re.S)
     if not m:
@@ -111,10 +164,8 @@ def load_config(root):
 
 def section_fields(root, section):
     """{field: value} from the config's `## <section>` (without comments); {} when missing."""
-    try:
-        with open(os.path.join(root, CONFIG), encoding='utf-8') as f:
-            text = f.read()
-    except OSError:
+    text = read_text(os.path.join(root, CONFIG))
+    if text is None:
         return {}
     m = re.search(r'^## ' + re.escape(section) + r'[ \t]*\n(.*?)(?=^## |\Z)', text, re.M | re.S)
     if not m:
@@ -136,10 +187,8 @@ def pr_status_enabled(root):
 def load_module(root, name):
     """CHECK.md frontmatter, or None when the module does not exist."""
     path = os.path.join(root, DIRECTORY, name, 'CHECK.md')
-    try:
-        with open(path, encoding='utf-8') as f:
-            text = f.read()
-    except OSError:
+    text = read_text(path)
+    if text is None:
         return None
     m = re.match(r'^---\n(.*?)\n---', text, re.S)
     meta = {}
@@ -190,6 +239,10 @@ def validate(root):
         if STATUS_CONTEXT not in (integ.get('Required checks') or ''):
             out.append(f'W:## Integrations → Required checks: "{STATUS_CONTEXT}" is missing — the judge will merge '
                        f'a PR without check evidence; add this name (the wizard does it on its own)')
+    if evidence_dir(root):
+        for x in integrity_drift(root):
+            out.append(f'W:## Checks: differs from the approved state: {x} — commits and tags stop until you '
+                       f'approve it in a terminal: python3 {DIRECTORY}/telesma-checks.py --approve')
     for name, cfg_fields in cfg['checks'].items():
         u = settings(root, name, cfg_fields)
         if u is None:
@@ -233,10 +286,39 @@ def validate(root):
 
 def git(root, *args):
     try:
-        r = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', *args], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
+
+
+def git_z(root, *args):
+    """Paths from a NUL-separated listing (the caller passes `-z`). Names are taken as git stores
+    them — no quoting, so a non-ASCII name or one with a quote is a path like any other.
+    Raises GitError when git fails."""
+    try:
+        r = subprocess.run(['git', '-C', root, *args], capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GitError(f'git {args[0]}: {type(e).__name__}')
+    if r.returncode != 0:
+        raise GitError(f'git {args[0]} exited with {r.returncode}')
+    return [p for p in r.stdout.decode('utf-8', 'surrogateescape').split('\0') if p]
+
+
+# A path the line protocol of the modules (one path per line on stdin) cannot carry: a line break
+# of any kind, a control character, whitespace at either end, bytes that are not UTF-8.
+UNSAFE_PATH = re.compile(r'[\x00-\x1f\x7f\x85\u2028\u2029]|^\s|\s$')
+
+
+def unsafe_path(p):
+    if UNSAFE_PATH.search(p):
+        return True
+    try:
+        p.encode('utf-8')
+    except UnicodeEncodeError:
+        return True
+    return False
 
 
 def lines(s):
@@ -248,9 +330,12 @@ def sha(root, ref):
     return r.strip() if r else ''
 
 
+def gh_binary():
+    return (os.environ.get('TELESMA_GH') if test_mode() else None) or 'gh'
+
+
 def gh_available():
-    import shutil
-    return bool(os.environ.get('TELESMA_GH') or shutil.which('gh'))
+    return bool(shutil.which(gh_binary()) or os.path.isfile(gh_binary()))
 
 
 # --- Evidence per commit ---------------------------------------------------------------
@@ -292,34 +377,86 @@ def checks_summary(root, point, log, errors):
     cfg = load_config(root)
     configured = [n for n, p in cfg['checks'].items()
                   if (u := settings(root, n, p)) and point in u['when']]
+    rank = {'clean': 0, 'warn': 1, 'error': 2, 'block': 3}
     checks = {}
     for w in log:
         k = checks.setdefault(w['check'], {'decision': 'clean', 'warnings': 0, 'exceptions': 0})
         d = w.get('decision')
-        if d == 'error':
-            k['decision'] = 'error'
-            k['message'] = w.get('message', '')
-        elif d == 'warn':
-            k['warnings'] += 1
-            if k['decision'] == 'clean':
-                k['decision'] = 'warn'
-        elif d == 'exception':
+        if d == 'exception':
             k['exceptions'] += 1
+            continue
+        if d == 'warn':
+            k['warnings'] += 1
+        elif d == 'block':
+            k['blocks'] = k.get('blocks', 0) + 1
+        elif d == 'error':
+            k['message'] = w.get('message', '')
+        if rank.get(d, 0) > rank[k['decision']]:
+            k['decision'] = d
     for n in configured:
         checks.setdefault(n, {'decision': 'error', 'warnings': 0, 'exceptions': 0, 'message': 'not run'})
     return {'point': point, 'checks': checks, 'configured': configured}
 
 
-def save_pending(root, log, errors):
-    """PreToolUse before a commit: the check result waits for the SHA that is about to exist."""
+def blob_hashes(root, files):
+    """{path: blob id} of the files as they stand in the working tree — what the checks read. The
+    evidence is later given only to a commit that holds exactly these blobs."""
+    present = [p for p in files if os.path.isfile(os.path.join(root, p))]
+    if not present:
+        return {}
+    try:
+        r = subprocess.run(['git', '-C', root, 'hash-object', '--stdin-paths'], cwd=root,
+                           input='\n'.join(present) + '\n', capture_output=True, encoding='utf-8',
+                           errors='surrogateescape', timeout=60)
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return {}
+    ids = r.stdout.split()
+    return dict(zip(present, ids)) if r.returncode == 0 and len(ids) == len(present) else {}
+
+
+def commit_parents(root, commit):
+    r = git(root, 'rev-list', '--parents', '-n', '1', commit)
+    return r.split()[1:] if r else []
+
+
+def commit_blobs(root, commit):
+    """{path: blob id} of what the commit adds or changes against its parent (nothing for a
+    deletion); None for a merge or when git does not answer."""
+    if len(commit_parents(root, commit)) > 1:
+        return None
+    try:
+        raw = git_z(root, 'diff-tree', '-r', '-z', '--no-renames', '--root', '--no-commit-id', commit)
+    except GitError:
+        return None
+    out = {}
+    for i in range(0, len(raw) - 1, 2):
+        meta = raw[i].split()
+        if len(meta) >= 5 and meta[4][:1] != 'D':
+            out[raw[i + 1]] = meta[3]
+    return out
+
+
+def save_pending(root, log, errors, files):
+    """PreToolUse before a commit: the check result waits for the SHA that is about to exist,
+    together with the blob ids of the files the checks read."""
     d = evidence_dir(root)
     if not d:
         return
     head = sha(root, 'HEAD')
     data = checks_summary(root, 'commit', log, errors)
     data.update({'head': head, 'parent': sha(root, 'HEAD~1') if head else '',
+                 'files': blob_hashes(root, files),
                  'ts': datetime.datetime.now().isoformat(timespec='seconds')})
     save_json(os.path.join(d, PENDING), data)
+
+
+def drop_pending(root):
+    d = evidence_dir(root)
+    if d:
+        try:
+            os.remove(os.path.join(d, PENDING))
+        except OSError:
+            pass
 
 
 def patch_id(root, commit):
@@ -328,14 +465,16 @@ def patch_id(root, commit):
                            capture_output=True, text=True, timeout=30)
         b = subprocess.run(['git', '-C', root, 'patch-id', '--stable'], input=a.stdout,
                            capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return ''
     return b.stdout.split()[0] if b.stdout.split() else ''
 
 
 def evidence_after_commit(root, cmd):
-    """PostToolUse after `git commit`: pending evidence → file <sha>.json, if the new HEAD
-    grew out of the HEAD the hook saw (or out of its parent with --amend)."""
+    """PostToolUse after `git commit`: pending evidence → file <sha>.json — only when the new
+    commit holds exactly the blobs the checks read. Anything else in it (an amend carries the
+    whole earlier commit, a pathspec commit, a file changed in between) was not seen by the
+    checks; such a commit gets its evidence from `verify_unseen`, which checks its content."""
     d = evidence_dir(root)
     if not d:
         return None
@@ -345,17 +484,21 @@ def evidence_after_commit(root, cmd):
     new = sha(root, 'HEAD')
     if not new or new == pending.get('head'):
         return None                      # the commit did not happen — the evidence keeps waiting
-    parent = sha(root, 'HEAD~1')
+    drop_pending(root)                   # HEAD moved: this result belongs to this moment or to nothing
+    parents = commit_parents(root, new)
+    if len(parents) > 1:
+        return None
+    parent = parents[0] if parents else ''
     amend = bool(re.search(r'--amend\b', cmd))
-    if not (parent == pending.get('head') or (amend and parent == pending.get('parent'))):
+    if not (parent == (pending.get('head') or '') or (amend and parent == (pending.get('parent') or ''))):
         return None                      # HEAD changed some other way (checkout, pull) — not this commit
+    blobs = commit_blobs(root, new)
+    read = pending.get('files') or {}
+    if blobs is None or any(read.get(p) != h for p, h in blobs.items()):
+        return None
     evidence = {'sha': new, 'parent': parent, 'patch_id': patch_id(root, new), 'ts': pending.get('ts'),
                 'checks': pending.get('checks', {}), 'configured': pending.get('configured', [])}
     save_json(os.path.join(d, new + '.json'), evidence)
-    try:
-        os.remove(os.path.join(d, PENDING))
-    except OSError:
-        pass
     return evidence
 
 
@@ -368,7 +511,7 @@ def commit_evidence(root, d, commit):
     if not pid:
         return None
     for name in os.listdir(d):
-        if not name.endswith('.json') or name == PENDING:
+        if not re.match(r'^[0-9a-f]{40,64}\.json$', name):
             continue
         e = load_json(os.path.join(d, name))
         if e and e.get('patch_id') == pid:
@@ -376,6 +519,121 @@ def commit_evidence(root, d, commit):
             save_json(os.path.join(d, commit + '.json'), e)
             return e
     return None
+
+
+# --- Commits the hook did not see beforehand -------------------------------------------------
+
+# Reflog subjects of operations that create commits. A checkout or a reset moves HEAD without
+# creating anything — verifying every commit of a branch just switched to would be noise.
+CREATES_COMMITS = ('commit', 'merge', 'cherry-pick', 'revert', 'rebase', 'am', 'pull')
+
+
+def snapshot_check(root, commit, limit):
+    """Runs the commit-point checks on the CONTENT of a commit: a temporary worktree at the
+    commit, HEAD moved back to its first parent — the state "about to be committed", read from
+    git objects, not from the working tree. Returns (evidence, blocking entries)."""
+    parents = commit_parents(root, commit)
+    tmp = tempfile.mkdtemp(prefix='telesma-verify-')
+    wt = os.path.join(tmp, 'w')
+
+    def g(*args, cwd=root):
+        return subprocess.run(['git', '-C', cwd, *args], capture_output=True, timeout=120)
+    try:
+        if g('worktree', 'add', '--detach', '--quiet', wt, commit).returncode != 0:
+            raise GitError('git worktree add failed')
+        moved = g('reset', '--soft', parents[0], cwd=wt) if parents \
+            else g('checkout', '--quiet', '--orphan', 'telesma-verify-' + commit[:12], cwd=wt)
+        if moved.returncode != 0:
+            raise GitError('cannot move the verification worktree to the parent')
+        files = None
+        if len(parents) > 1:
+            # a merge: only what differs from EVERY parent (conflict resolutions, changes made in
+            # the merge itself) — the rest was checked in the commits being merged
+            files = [p for p in git_z(root, 'diff-tree', '-r', '-z', '-c', '--name-only', '--no-commit-id', commit)
+                     if os.path.isfile(os.path.join(wt, p))]
+        b, w, e, lg = run_point(root, 'commit', commit_plan={}, files_root=wt, files=files, budget=limit)
+    finally:
+        g('worktree', 'remove', '--force', wt)
+        shutil.rmtree(tmp, ignore_errors=True)
+        g('worktree', 'prune')
+    summary = checks_summary(root, 'commit', lg, e)
+    evidence = {'sha': commit, 'parent': parents[0] if parents else '', 'patch_id': patch_id(root, commit),
+                'ts': datetime.datetime.now().isoformat(timespec='seconds'), 'verified': 'after the commit',
+                'checks': summary['checks'], 'configured': summary['configured']}
+    return evidence, b
+
+
+def verify_unseen(root):
+    """PostToolUse after any Bash command: commits that appeared since the previous command and
+    have no evidence (made in a form the hook could not read: a script, a subshell, a merge, a
+    cherry-pick, an amend) get their content checked now. Returns text for Claude when something
+    blocks or could not be verified, else None. A commit that stays unverified stays without
+    evidence — and missing evidence is red."""
+    d = evidence_dir(root)
+    head = sha(root, 'HEAD')
+    if not d or not head:
+        return None
+    path = os.path.join(d, SEEN_HEAD)
+    seen = (read_text(path) or '').strip()
+
+    def remember():
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(head + '\n')
+        except OSError:
+            pass
+    if not seen or seen == head:
+        if not seen:
+            remember()
+        return None
+    subject = (git(root, 'reflog', '-1', '--format=%gs', 'HEAD') or '').strip()
+    if not subject.startswith(CREATES_COMMITS):
+        remember()
+        return None
+    listing = git(root, 'rev-list', '--reverse', head, '--not', seen, '--remotes') if sha(root, seen) else head
+    commits, carried = [], []
+    for c in lines(listing):
+        e = commit_evidence(root, d, c)
+        if not e:
+            commits.append(c)
+        elif any(k.get('decision') == 'block' for k in (e.get('checks') or {}).values()):
+            carried.append(c)             # the same change under a new SHA (amend without a fix, rebase)
+    start = datetime.datetime.now()
+    blocking, unverified = [], []
+    for c in commits:
+        left = POST_BUDGET - (datetime.datetime.now() - start).total_seconds()
+        if commits.index(c) >= MAX_VERIFIED or left < 20:
+            unverified.append(c)
+            continue
+        try:
+            evidence, b = snapshot_check(root, c, left)
+        except (GitError, OSError, subprocess.TimeoutExpired):
+            unverified.append(c)
+            continue
+        save_json(os.path.join(d, c + '.json'), evidence)
+        if b:
+            blocking.append((c, b))
+    remember()
+    if not blocking and not unverified and not carried:
+        return None
+    text = 'Telesma - quality checks, after the fact:'
+    if carried:
+        text += (f'\ncommit(s) {", ".join(c[:7] for c in carried[:5])} still carry the blocking findings of the '
+                 f'change they were made from - a new SHA does not clear them ({LOG} has the list).')
+    for c, b in blocking:
+        text += (f'\ncommit {c[:7]} was not checked before it was made (a command shape the hook cannot read, '
+                 f'an amend, a merge, another tool). Its content was checked now - {len(b)} blocking:\n'
+                 + describe(b))
+    if blocking or carried:
+        text += ('\nThe commit already exists and its status is red. Fix the cause and amend it with a plain '
+                 '`git commit --amend --no-edit` (the amended commit is checked again as a whole). A secret that '
+                 'reached a commit has to be revoked - tell the human. If a finding is wrong: TELESMA BLOCKED '
+                 f'with the fingerprint - the human writes the exception into {EXCEPTIONS}.')
+    if unverified:
+        text += (f'\n{len(unverified)} commit(s) could not be verified here ({", ".join(c[:7] for c in unverified[:5])}) '
+                 f'- they have no check evidence and the PR status stays red. Run '
+                 f'`python3 {DIRECTORY}/telesma-checks.py --point ci --since {seen[:12]}` and tell the human.')
+    return text
 
 
 # --- PR status ---------------------------------------------------------------------------
@@ -434,7 +692,7 @@ def last_audit(root):
 
 def collect_status(root, d, commits):
     """(state, description) of the status for a list of branch commits (oldest first)."""
-    no_evidence, not_run, checks, warnings, ts = [], [], set(), 0, ''
+    no_evidence, not_run, blocked, checks, warnings, ts = [], [], [], set(), 0, ''
     for c in commits:
         e = commit_evidence(root, d, c)
         if not e:
@@ -446,11 +704,16 @@ def collect_status(root, d, commits):
             warnings += k.get('warnings', 0)
             if k.get('decision') == 'error':
                 not_run.append(f'{n}@{c[:7]}')
+            elif k.get('decision') == 'block':
+                blocked.append(f'{n}@{c[:7]}')
     audit = last_audit(root)
     a_txt = f' · OSV audit {audit[0]} {audit[1]}' if audit else ''
     if no_evidence:
         desc = (f'no check evidence for {len(no_evidence)} of {len(commits)} commits '
                 f'({", ".join(no_evidence[:3])}{"…" if len(no_evidence) > 3 else ""}) — commit outside the hook')
+        return 'failure', desc[:MAX_STATUS_DESCRIPTION]
+    if blocked:
+        desc = f'blocking findings: {", ".join(blocked[:3])}{"…" if len(blocked) > 3 else ""} — commit made outside the hook'
         return 'failure', desc[:MAX_STATUS_DESCRIPTION]
     if not_run:
         desc = f'check did not run: {", ".join(not_run[:3])}{"…" if len(not_run) > 3 else ""}'
@@ -467,7 +730,7 @@ def collect_status(root, d, commits):
 
 def post_status(root, repo, commit, state, desc):
     """POST /repos/{repo}/statuses/{sha} via gh (token from `gh auth login`). Returns an error or None."""
-    gh = os.environ.get('TELESMA_GH') or 'gh'
+    gh = gh_binary()
     try:
         r = subprocess.run([gh, 'api', f'repos/{repo}/statuses/{commit}', '-f', f'state={state}',
                             '-f', f'context={STATUS_CONTEXT}', '-f', f'description={desc}', '--silent'],
@@ -526,34 +789,72 @@ def last_tag(root, pattern):
     return t.strip() if t else None
 
 
+def plan_paths(root, plan):
+    """(files, directories, wide) from the `git add` arguments of the commit plan. An argument that
+    is not a file or a directory under the project root at hook time (a path relative to another
+    directory, a file that does not exist yet) makes the scope wide instead of being dropped."""
+    files, dirs, wide = [], [], bool(plan.get('wide'))
+    for sc in plan.get('added', []):
+        full = os.path.normpath(os.path.join(root, sc))
+        rel = os.path.relpath(full, root)
+        if rel.startswith('..') or os.path.isabs(sc):
+            wide = True
+        elif os.path.isdir(full):
+            dirs.append(rel)
+        elif os.path.isfile(full):
+            files.append(rel)
+        else:
+            wide = True
+    return files, dirs, wide
+
+
 def scope_files(root, point, scope, commit_plan=None, since=None):
-    """List of (relative) paths to check."""
+    """List of (relative) paths to check. Raises GitError when git does not answer.
+
+    At commit the list is never narrower than what the command can commit: whenever the plan
+    cannot be read exactly (a flag, a glob, a pathspec, a command that did not parse) the scope
+    is everything modified plus everything untracked."""
     if scope == 'all':
-        return lines(git(root, 'ls-files'))
+        return git_z(root, 'ls-files', '-z')
     if point == 'commit':
         p = commit_plan or {}
-        found = set(lines(git(root, 'diff', '--cached', '--name-only', '--diff-filter=ACMR')))
-        if p.get('all_tracked'):
-            found |= set(lines(git(root, 'diff', '--name-only', '--diff-filter=ACMR', 'HEAD')))
-        for sc in p.get('added', []):
-            if sc in ('.', '-A', '--all', ':/'):
-                found |= set(lines(git(root, 'diff', '--name-only', '--diff-filter=ACMR', 'HEAD')))
-                found |= set(lines(git(root, 'ls-files', '--others', '--exclude-standard')))
-                continue
-            full = os.path.join(root, sc)
-            if os.path.isdir(full):
-                found |= set(lines(git(root, 'ls-files', '--modified', '--others',
-                                       '--exclude-standard', '--', sc)))
-            elif os.path.isfile(full):
-                found.add(os.path.relpath(full, root))
+        has_head = bool(sha(root, 'HEAD'))
+        found = set(git_z(root, 'diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'))
+        files, dirs, wide = plan_paths(root, p)
+        if (p.get('all_tracked') or wide) and has_head:
+            found |= set(git_z(root, 'diff', '--name-only', '--diff-filter=ACMR', '-z', 'HEAD'))
+        if wide:
+            found |= set(git_z(root, 'ls-files', '--modified', '--others', '--exclude-standard', '-z'))
+        for sc in dirs:
+            found |= set(git_z(root, 'ls-files', '--modified', '--others', '--exclude-standard', '-z', '--', sc))
+            if p.get('force'):
+                found |= set(git_z(root, 'ls-files', '--others', '-z', '--', sc))
+        found |= set(files)
         return sorted(found)
     if point == 'phase':
         since = since or last_tag(root, PHASE_TAG + '*')
     elif point == 'release':
         since = since or last_tag(root, 'v[0-9]*')
     if not since:
-        return lines(git(root, 'ls-files'))
-    return lines(git(root, 'diff', '--name-only', '--diff-filter=ACMR', f'{since}...HEAD'))
+        return git_z(root, 'ls-files', '-z')
+    return git_z(root, 'diff', '--name-only', '--diff-filter=ACMR', '-z', f'{since}...HEAD')
+
+
+def staged_mismatch(root, plan):
+    """Paths staged in one version while the working tree holds another, and which this command
+    does not stage again. The checks read the working tree; for such a path they would read
+    something else than what gets committed."""
+    staged = set(git_z(root, 'diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'))
+    if not staged:
+        return []
+    differs = staged & set(git_z(root, 'diff', '--name-only', '-z'))
+    if not differs or plan.get('readd_all'):
+        return []
+    files, dirs, _ = plan_paths(root, plan)
+    covered = set(files)
+    return sorted(p for p in differs
+                  if p not in covered and not any(p == d or p.startswith(d.rstrip('/') + '/') for d in dirs if d != '.')
+                  and '.' not in dirs)
 
 
 # Framework files in the project, not project code: the judge hook in .claude/hooks/ is updated
@@ -561,14 +862,20 @@ def scope_files(root, point, scope, commit_plan=None, since=None):
 SKIPPED_DIRS = (DIRECTORY + '/', '.claude/')
 
 
-def filter_files(root, files):
+def filter_files(root, files, everything=False):
+    """`everything` (a module with `filter: none` — secrets): only the check modules themselves
+    are left out; no size limit, no name skips, `.claude/` included. A secret is a secret in a
+    lockfile, in a minified bundle and in a 3 MB dump."""
     out = []
     for p in files:
-        if p.startswith(SKIPPED_DIRS) or SKIPPED.search(p):
+        if unsafe_path(p) or p.startswith(DIRECTORY + '/'):
             continue
         full = os.path.join(root, p)
         try:
-            if not os.path.isfile(full) or os.path.getsize(full) > MAX_BYTES:
+            if not os.path.isfile(full):
+                continue
+            if not everything and (p.startswith(SKIPPED_DIRS) or SKIPPED.search(p)
+                                   or os.path.getsize(full) > MAX_BYTES):
                 continue
         except OSError:
             continue
@@ -612,27 +919,34 @@ def tool_path():
     return os.pathsep.join(parts)
 
 
-def run_check(root, u, point, files, budget, since=None):
-    """Returns (findings, error or None)."""
+def run_check(root, u, point, files, budget, since=None, files_root=None, vouched=False):
+    """Returns (findings, error or None, crashed). `crashed` = the module broke (an exit code other
+    than 0 and 3): that is not "tool missing", so it is not waved through."""
     run = u['module'].get('run')
     if not run:
-        return [], 'module without a "run" field'
+        return [], 'module without a "run" field', False
     limit = min(u['limit'] or DEFAULT_LIMIT[point], max(budget, 1))
-    env = {**os.environ, 'TELESMA_POINT': point, 'TELESMA_ROOT': root, 'PATH': tool_path()}
+    env = {**os.environ, 'TELESMA_POINT': point, 'TELESMA_ROOT': files_root or root, 'TELESMA_PROJECT': root,
+           'PATH': tool_path(), 'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1'}
+    # Only the runner says whether the config's commands are vouched for (by hand / CI); a variable
+    # inherited from the environment must not.
+    env.pop('TELESMA_CONFIG_VOUCHED', None)
+    if vouched:
+        env['TELESMA_CONFIG_VOUCHED'] = '1'
     if since:
         env['TELESMA_SINCE'] = since      # reference point from `--since` (CI) — modules computing "new since…" need it
     try:
         r = subprocess.run(shlex.split(run), cwd=u['module']['dir'], env=env,
-                           input='\n'.join(files) + '\n', capture_output=True, text=True,
-                           timeout=limit)
+                           input='\n'.join(files) + '\n', capture_output=True, encoding='utf-8',
+                           errors='replace', timeout=limit)
     except subprocess.TimeoutExpired:
-        return [], f'time limit exceeded ({limit} s)'
+        return [], f'time limit exceeded ({limit} s)', False
     except OSError as e:
-        return [], f'cannot run: {e}'
+        return [], f'cannot run: {e}', False
     if r.returncode == 3:
-        return [], (r.stderr.strip().splitlines() or ['required tool missing'])[0]
+        return [], (r.stderr.strip().splitlines() or ['required tool missing'])[0], False
     if r.returncode != 0:
-        return [], f'exit {r.returncode}: ' + ' '.join(r.stderr.strip().splitlines()[-2:])
+        return [], f'exit {r.returncode}: ' + ' '.join(r.stderr.strip().splitlines()[-2:])[:300], True
     out = []
     for line in r.stdout.splitlines():
         try:
@@ -641,7 +955,7 @@ def run_check(root, u, point, files, budget, since=None):
             continue
         if isinstance(z, dict) and z.get('file') is not None:
             out.append(z)
-    return out, None
+    return out, None, False
 
 
 def write_log(root, entries):
@@ -657,49 +971,86 @@ def write_log(root, entries):
         pass    # the log must never block work
 
 
-def run_point(root, point, commit_plan=None, since=None):
-    """Runs the checks assigned to the point. Returns (blocking, warnings, errors, log)."""
+def run_point(root, point, commit_plan=None, since=None, files_root=None, files=None, budget=None, vouched=False):
+    """Runs the checks assigned to the point. Returns (blocking, warnings, errors, log).
+
+    `files_root` = where the files are read from when it is not the project itself (a snapshot of
+    a commit); the config, the exceptions, the modules and the log always belong to `root`.
+    `files` = an explicit list instead of the computed scope. Raises GitError when the scope
+    cannot be read."""
     cfg = load_config(root)
     if not cfg['enabled']:
         return [], [], [], []
+    froot = files_root or root
     exceptions = load_exceptions(root)
     ts = datetime.datetime.now().isoformat(timespec='seconds')
-    head = (git(root, 'rev-parse', '--short', 'HEAD') or '').strip()
+    head = (git(froot, 'rev-parse', '--short', 'HEAD') or '').strip()
     block, warn, errors, log = [], [], [], []
-    budget = 570 if point != 'commit' else 120   # the hook has 600 s; margin for the rest
+    if budget is None:
+        budget = 570 if point != 'commit' else 120   # the hook has 600 s; margin for the rest
     start = datetime.datetime.now()
+    scopes = {}
+
+    def scope_of(kind):
+        if kind not in scopes:
+            scopes[kind] = list(files) if files is not None and kind != 'all' \
+                else scope_files(froot, point, kind, commit_plan, since)
+        return scopes[kind]
+
+    def record(name, z, on_failure):
+        severity = z.get('severity') or on_failure
+        if on_failure == 'warn':
+            severity = 'warn'          # the config can only soften a module, never harden it
+        fp = fingerprint(name, z)
+        entry = {'ts': ts, 'point': point, 'head': head, 'check': name,
+                 'rule': z.get('rule', ''), 'file': z.get('file', ''),
+                 'line': z.get('line'), 'message': z.get('message', ''), 'fingerprint': fp}
+        if fp in exceptions:
+            entry['decision'] = 'exception'
+        elif severity == 'block':
+            entry['decision'] = 'block'
+            block.append(entry)
+        else:
+            entry['decision'] = 'warn'
+            warn.append(entry)
+        log.append(entry)
+
+    reported_unsafe = False
     for name, cfg_fields in cfg['checks'].items():
         u = settings(root, name, cfg_fields)
         if u is None or point not in u['when']:
             continue
-        files = filter_files(root, scope_files(root, point, u['scope'], commit_plan, since))
+        raw = scope_of(u['scope'])
+        if not reported_unsafe:
+            # once per run: a path the modules cannot be given is not a path that goes unchecked
+            reported_unsafe = True
+            for p in raw:
+                if unsafe_path(p):
+                    record('runner', {'rule': 'unsafe-path', 'file': ascii(p)[1:-1], 'severity': 'block',
+                                      'message': 'a file name with a control character, a line break, whitespace '
+                                                 'at either end or bytes that are not UTF-8 cannot be handed to '
+                                                 'the checks - rename the file'}, 'block')
+        selected = filter_files(froot, raw, everything=u['module'].get('filter') == 'none')
         used = (datetime.datetime.now() - start).total_seconds()
-        found, error = run_check(root, u, point, files, budget - used, since=since)
+        found, error, crashed = run_check(root, u, point, selected, budget - used, since=since, files_root=froot,
+                                          vouched=vouched)
+        if crashed:
+            # A module that broke did not check anything. The finding has a fingerprint like any
+            # other, so the human can let it through — the author of the commit cannot.
+            record(name, {'rule': 'check-crashed', 'file': f'{DIRECTORY}/{name}', 'severity': 'block',
+                          'file_fingerprint': False, 'content_fingerprint': 'check-crashed',
+                          'message': f'the check broke and checked nothing ({error})'}, u['on_failure'])
+            continue
         if error:
             errors.append(f'{name}: {error}')
             log.append({'ts': ts, 'point': point, 'head': head, 'check': name,
                         'decision': 'error', 'message': error})
             continue
         for z in found:
-            severity = z.get('severity') or u['on_failure']
-            if u['on_failure'] == 'warn':
-                severity = 'warn'          # the config can only soften a module, never harden it
-            fp = fingerprint(name, z)
-            entry = {'ts': ts, 'point': point, 'head': head, 'check': name,
-                     'rule': z.get('rule', ''), 'file': z.get('file', ''),
-                     'line': z.get('line'), 'message': z.get('message', ''), 'fingerprint': fp}
-            if fp in exceptions:
-                entry['decision'] = 'exception'
-            elif severity == 'block':
-                entry['decision'] = 'block'
-                block.append(entry)
-            else:
-                entry['decision'] = 'warn'
-                warn.append(entry)
-            log.append(entry)
+            record(name, z, u['on_failure'])
         if not found:
             log.append({'ts': ts, 'point': point, 'head': head, 'check': name,
-                        'decision': 'clean', 'files': len(files)})
+                        'decision': 'clean', 'files': len(selected)})
     write_log(root, log)
     return block, warn, errors, log
 
@@ -717,11 +1068,17 @@ def describe(entries, limit=25):
 
 # --- Command parsing -------------------------------------------------------------------
 
-GIT_OPTIONS_WITH_ARGUMENT = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path'}
+GIT_OPTIONS_WITH_ARGUMENT = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env'}
+# The body of a heredoc with a quoted delimiter is text, not shell: nothing in it is expanded.
+# It is cut out before parsing, so an apostrophe or a quote in a commit message cannot make the
+# whole command unreadable (and with it the list of files `git add` stages).
+HEREDOC_QUOTED = re.compile(r"(<<-?\s*(['\"])(\w+)\2[^\n]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)", re.S)
+HEREDOC_MESSAGE = re.compile(r"\$\(\s*cat\s+<<-?\s*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
 
 
 def command_members(cmd):
     """List of members (token lists) separated by &&, ||, ;, |, newline."""
+    cmd = HEREDOC_QUOTED.sub(lambda m: m.group(1), cmd)
     try:
         lex = shlex.shlex(cmd.replace('\n', ' ; '), posix=True, punctuation_chars=';&|')
         lex.whitespace_split = True
@@ -741,11 +1098,43 @@ def command_members(cmd):
     return out
 
 
-def git_subcommand(tokens):
-    """(subcommand, arguments, directory from -C) for a `git …` member, or None."""
+def live_substitution(cmd):
+    """Whether the command contains something the shell RUNS while expanding it: `$(…)`, backticks,
+    `<(…)` — outside single quotes and outside the one inert form, a message read from a heredoc
+    with a quoted delimiter (`$(cat <<'EOF' … EOF)`)."""
+    s = HEREDOC_MESSAGE.sub(' MESSAGE ', cmd)
+    s = HEREDOC_QUOTED.sub(lambda m: m.group(1), s)
+    quote, i = None, 0
+    while i < len(s):
+        c = s[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == '\\':
+            i += 2
+            continue
+        elif c == "'" and quote is None:
+            quote = "'"
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == '`' or (c == '$' and s[i + 1:i + 2] == '('):
+            return True
+        elif quote is None and c in '<>' and s[i + 1:i + 2] == '(':
+            return True
+        i += 1
+    return False
+
+
+def skip_assignments(tokens):
     i = 0
     while i < len(tokens) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[i]):
         i += 1                                  # VAR=x git …
+    return i
+
+
+def git_subcommand(tokens):
+    """(subcommand, arguments, directory from -C) for a `git …` member, or None."""
+    i = skip_assignments(tokens)
     if i >= len(tokens) or os.path.basename(tokens[i]) != 'git':
         return None
     i += 1
@@ -762,6 +1151,16 @@ def git_subcommand(tokens):
     return tokens[i], tokens[i + 1:], directory
 
 
+def inline_alias(tokens):
+    """`git -c alias.z=commit z …` — an alias defined in the command itself."""
+    i = skip_assignments(tokens)
+    if i >= len(tokens) or os.path.basename(tokens[i]) != 'git':
+        return False
+    rest = tokens[i + 1:]
+    return any(t in ('-c', '--config-env') and k + 1 < len(rest) and rest[k + 1].lower().startswith('alias.')
+               or re.match(r'^(-c|--config-env=)alias\.', t, re.I) for k, t in enumerate(rest))
+
+
 VERSION = re.compile(r'^v\d+\.\d+\.\d+')
 # Members that may stand BEFORE a commit in the same command: they change at most the
 # index, not the content of files. Anything else (printf >>, sed -i, python, npm) writes to
@@ -772,9 +1171,17 @@ GIT_BEFORE_COMMIT = {'add', 'rm', 'mv', 'status', 'diff', 'log', 'show'}
 # a redirect or an option that executes a command (`find -exec`, `-delete`) is still rejected.
 READ_BEFORE_COMMIT = {'grep', 'egrep', 'fgrep', 'rg', 'ls', 'cat', 'head', 'tail', 'wc', 'find', 'echo', 'test', '['}
 WRITE_OPTIONS = {'-exec', '-execdir', '-delete', '-ok', '-okdir', '-fprint', '-fprintf', '-fls'}
+NEUTRAL = {'cd', 'pushd', 'popd', 'true', ':'}
+# Operations that create commits. A member that mentions git together with one of these words
+# but is not itself a plain `git …` member (a subshell, a brace group, `!`, a variable in the
+# command position, an interpreter one-liner) cannot be read — it is refused, not waved through.
+CREATING = r'(?:commit|tag|merge|cherry-pick|rebase|revert|am|pull)'
+GIT_CREATING = re.compile(r'(?<![\w.-])git(?![\w.-])[^\n]*?(?<![\w-])' + CREATING + r'(?![\w-])')
+WORD_CREATING = re.compile(r'(?<![\w-])' + CREATING + r'(?![\w-])')
 
 
 def read_only(tokens):
+    tokens = tokens[skip_assignments(tokens):]
     if not tokens or os.path.basename(tokens[0]) not in READ_BEFORE_COMMIT:
         return False
     return not any('>' in t or t in WRITE_OPTIONS for t in tokens)
@@ -788,7 +1195,7 @@ def git_aliases(root):
     """{alias: expansion} from the git configuration — `git ci` is a commit too."""
     try:
         r = subprocess.run(['git', '-C', root, 'config', '--get-regexp', r'^alias\.'],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, encoding='utf-8', errors='replace', timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return {}
     out = {}
@@ -808,7 +1215,7 @@ def subcommand(tokens, aliases):
     exp = (aliases or {}).get(sub)
     if exp:
         if exp.startswith('!'):
-            return ('!shell' if re.search(r'\b(commit|tag)\b', exp) else sub), args, d
+            return ('!shell' if WORD_CREATING.search(exp) else sub), args, d
         try:
             t = shlex.split(exp)
         except ValueError:
@@ -852,7 +1259,9 @@ def order_problem(cmd, aliases=None):
     if members is None:
         m = re.search(r'\bgit\b[^;&|\n]*\b(commit|tag)\b', cmd)
         if not m:
-            return None
+            return 'unseen' if GIT_CREATING.search(cmd) else None
+        if live_substitution(cmd):
+            return 'substitution'
         prefix = re.sub(r'[\s;&|]+$', '', cmd[:m.start()])
         members = command_members(prefix) if prefix.strip() else []
         if members is None:
@@ -860,26 +1269,39 @@ def order_problem(cmd, aliases=None):
         before = members
     else:
         for tokens in members:
-            i = 0
-            while i < len(tokens) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', tokens[i]):
-                i += 1
-            if i < len(tokens) and os.path.basename(tokens[i]) in WRAPPERS \
-                    and re.search(r'\bgit\b.*\b(commit|tag)\b', ' '.join(tokens[i + 1:])):
+            i = skip_assignments(tokens)
+            if i >= len(tokens) or tokens[i] in NEUTRAL:
+                continue
+            text = ' '.join(tokens[i:])
+            if os.path.basename(tokens[i]) in WRAPPERS and GIT_CREATING.search(' '.join(tokens[i + 1:])):
                 return 'wrapper'
-            pk = subcommand(tokens, aliases)
-            if pk and pk[0] == '!shell':
+            if inline_alias(tokens):
                 return 'alias'
+            pk = subcommand(tokens, aliases)
+            if pk:
+                if pk[0] == '!shell':
+                    return 'alias'
+                continue
+            if read_only(tokens):
+                continue
+            if GIT_CREATING.search(text) or (tokens[i][:1] in '$`' and WORD_CREATING.search(text)):
+                return 'unseen'
         # EVERY target, not just the first: `git commit && git tag telesma/phase-N` tags a commit
         # the phase check never saw (at hook time HEAD was still the previous one)
         targets = [k for k, t in enumerate(members) if member_target(t, aliases)]
         if not targets:
             return None
+        if live_substitution(cmd):
+            return 'substitution'
         before = members[:targets[-1]]
     for tokens in before:
-        if tokens and tokens[0] in ('cd', 'pushd', 'true', ':'):
+        i = skip_assignments(tokens)
+        if i >= len(tokens) or tokens[i] in NEUTRAL:
             continue
         pk = subcommand(tokens, aliases)
         if pk and pk[0] in GIT_BEFORE_COMMIT:
+            if any(a.startswith('--output') for a in pk[1]):
+                return 'output'            # `git diff --output=file` writes a file
             continue
         if read_only(tokens):
             continue
@@ -887,39 +1309,114 @@ def order_problem(cmd, aliases=None):
     return None
 
 
+# Options of `git commit` whose value is the next argument (a short one may end a cluster: `-am`)
+COMMIT_VALUE_LONG = {'--message', '--file', '--reuse-message', '--reedit-message', '--author', '--date',
+                     '--fixup', '--squash', '--template', '--cleanup', '--trailer', '--pathspec-from-file'}
+COMMIT_VALUE_SHORT = 'mFCct'
+ADD_EVERYTHING = {'-A', '--all', '-u', '--update', '--no-ignore-removal'}
+
+
+def add_arguments(args, plan):
+    """`git add` arguments into the plan. A plain path is remembered; anything the hook cannot
+    turn into an exact list of files (a flag, a glob, pathspec magic, a variable) makes the scope wide."""
+    for a in args:
+        if a == '--':
+            continue
+        if a in ADD_EVERYTHING:
+            plan['wide'] = plan['readd_all'] = True
+        elif a in ('-f', '--force'):
+            plan['force'] = True
+        elif a in ('-v', '--verbose', '-n', '--dry-run'):
+            continue
+        elif a.startswith('-'):
+            plan['wide'] = True
+        elif a in ('.', './', ':/'):
+            plan['wide'] = plan['readd_all'] = True
+        elif a.startswith(':') or re.search(r'[*?\[\]{}$`~]', a):
+            plan['wide'] = True
+        else:
+            plan['added'].append(a)
+
+
+def commit_arguments(args, plan):
+    """`git commit` arguments into the plan: -a, --amend, and any pathspec (wide scope)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == '--':
+            if i < len(args):
+                plan['wide'] = True
+            break
+        if a.startswith('--'):
+            name = a.split('=', 1)[0]
+            if name == '--all':
+                plan['all_tracked'] = True
+            elif name == '--amend':
+                plan['amend'] = True
+            elif name in ('--include', '--only', '--patch', '--interactive', '--pathspec-from-file'):
+                plan['wide'] = True
+            if name in COMMIT_VALUE_LONG and '=' not in a:
+                i += 1
+        elif a.startswith('-') and len(a) > 1:
+            if a[1] in 'S':                      # -S[<keyid>]: the value is attached
+                continue
+            for k, ch in enumerate(a[1:], 1):
+                if ch == 'a':
+                    plan['all_tracked'] = True
+                elif ch in 'iop':
+                    plan['wide'] = True
+                if ch in COMMIT_VALUE_SHORT:
+                    if k == len(a) - 1:
+                        i += 1                   # the value is the next argument
+                    break                        # the rest of the cluster is the value
+        else:
+            plan['wide'] = True                  # a pathspec: `git commit -m x file.py`
+    if plan.get('all_tracked'):
+        plan['readd_all'] = True
+
+
+def new_plan():
+    return {'added': [], 'all_tracked': False, 'wide': False, 'readd_all': False, 'force': False, 'amend': False}
+
+
 def points_from_command(cmd, aliases=None):
     """{point: plan} — what this command will do to the repository. Commit plan: files
     added in the same command (`git add a b && git commit` — at hook time nothing is in
-    the index yet)."""
+    the index yet), and whether the list is exact (`wide` = it is not: check everything modified)."""
     members = command_members(cmd)
     if members is None:
-        # Unparseable (heredoc, unclosed quote) — a coarse regex, without the add plan.
+        # Unparseable (unclosed quote) — a coarse regex. What `git add` stages is unknown, so
+        # the commit scope is everything modified and untracked.
         p = {}
         if re.search(r'\bgit\b[^;&|\n]*\bcommit\b', cmd):
-            p['commit'] = {'added': [], 'all_tracked': bool(re.search(r'\bcommit\b[^;&|\n]*\s-(a|-all)\b', cmd))}
+            p['commit'] = dict(new_plan(), wide=True, unparsed=True, amend=bool(re.search(r'--amend\b', cmd)),
+                               all_tracked=bool(re.search(r'\bcommit\b[^;&|\n]*\s-(a|-all)\b', cmd)))
         if re.search(r'\bgit\b[^;&|\n]*\btag\b[^;&|\n]*\b' + re.escape(PHASE_TAG), cmd):
             p['phase'] = {}
         if re.search(r'\bgit\b[^;&|\n]*\btag\b[^;&|\n]*\sv\d+\.\d+\.\d+', cmd):
             p['release'] = {}
         return p
-    added, points = [], {}
+    plan, points = new_plan(), {}
     for tokens in members:
+        i = skip_assignments(tokens)
+        if i < len(tokens) and tokens[i] in ('cd', 'pushd', 'popd'):
+            plan['wide'] = True                  # paths after a `cd` are not relative to the project root
+            continue
         pk = subcommand(tokens, aliases)
         if not pk:
             continue
-        sub, args, _d = pk
+        sub, args, directory = pk
+        if directory and sub in ('add', 'commit'):
+            plan['wide'] = True
         if sub == 'add':
-            for a in args:
-                if a in ('-A', '--all'):
-                    added.append('-A')
-                elif a == '--':
-                    continue
-                elif not a.startswith('-'):
-                    added.append(a)
-        elif sub == 'commit':
-            everything = any(a in ('-a', '--all') or (re.match(r'^-[a-zA-Z]*a[a-zA-Z]*$', a) and not a.startswith('--'))
-                             for a in args if a not in ('-m', '--amend'))
-            points['commit'] = {'added': list(added), 'all_tracked': everything}
+            add_arguments(args, plan)
+        elif sub in ('commit', '!shell'):
+            if sub == '!shell':
+                plan['wide'] = True
+            else:
+                commit_arguments(args, plan)
+            points['commit'] = dict(plan, added=list(plan['added']))
         elif sub == 'tag':
             names = tag_names(args)
             if any(n.startswith(PHASE_TAG) for n in names):
@@ -931,12 +1428,29 @@ def points_from_command(cmd, aliases=None):
 
 # --- Protection of the check files ------------------------------------------------------
 
-def protected(root, path):
+EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
+
+
+def project_relative(root, path):
+    """The path relative to the project root with symlinks resolved, `/` as the separator and in
+    lower case — or None when it lies outside. Lower case on purpose: on a case-insensitive file
+    system (macOS, Windows) `Telesma/State/check_exceptions.md` IS the exceptions file."""
     if not path:
+        return None
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    a = os.path.realpath(full).replace('\\', '/').lower()
+    r = os.path.realpath(root).replace('\\', '/').lower().rstrip('/')
+    if a == r:
+        return ''
+    return a[len(r) + 1:] if a.startswith(r + '/') else None
+
+
+def protected(root, path):
+    rel = project_relative(root, path)
+    if rel is None:
         return False
-    full = os.path.normpath(os.path.join(root, path)) if not os.path.isabs(path) else os.path.normpath(path)
-    rel = os.path.relpath(full, root)
-    return rel == EXCEPTIONS or rel == DIRECTORY or rel.startswith(DIRECTORY + os.sep)
+    return (rel == EXCEPTIONS.lower() or rel == DIRECTORY or rel.startswith(DIRECTORY + '/')
+            or rel.startswith('.git/' + EVIDENCE + '/'))
 
 
 def checks_section(text):
@@ -944,66 +1458,358 @@ def checks_section(text):
     return m.group(0) if m else ''
 
 
-def touches_config(root, tool, tool_input):
-    """Whether an edit of telesma/config.md changes the ## Checks section."""
-    path = tool_input.get('file_path') or ''
-    if os.path.normpath(os.path.join(root, path)) != os.path.normpath(os.path.join(root, CONFIG)):
-        return False
-    try:
-        with open(os.path.join(root, CONFIG), encoding='utf-8') as f:
-            current = f.read()
-    except OSError:
-        return False
-    sec = checks_section(current)
+def content_after(current, tool, tool_input):
+    """The file content the tool call would leave behind, or None when it cannot be computed
+    (the old text is not there — the call fails on its own)."""
     if tool == 'Write':
-        return checks_section(tool_input.get('content', '')) != sec
-    edits = tool_input.get('edits') or [tool_input]
-    for e in edits:
-        old = e.get('old_string') or ''
-        if old and old in sec:
+        return tool_input.get('content', '')
+    text = current or ''
+    for e in (tool_input.get('edits') or [tool_input]):
+        old, new = e.get('old_string') or '', e.get('new_string') or ''
+        if not old:
+            text = new if not text else text
+            continue
+        if old not in text:
+            return None
+        text = text.replace(old, new) if e.get('replace_all') else text.replace(old, new, 1)
+    return text
+
+
+def touches_config(root, tool, tool_input):
+    """Whether an edit of telesma/config.md changes the ## Checks section: the edit is applied
+    in memory and the section compared before and after — where the old text starts or ends
+    does not matter."""
+    if project_relative(root, tool_input.get('file_path') or '') != CONFIG.lower():
+        return False
+    current = read_text(os.path.join(root, CONFIG))
+    if current is None:
+        return False
+    after = content_after(current, tool, tool_input)
+    return after is not None and checks_section(after) != checks_section(current)
+
+
+PROTECTED_MENTION = re.compile(r'telesma/checks(?![\w-])|CHECK_EXCEPTIONS|telesma-checks/', re.I)
+BASH_WRITE = re.compile(r'>|\btee\b|\bsed\s+(-[a-zA-Z]*i|--in-place)|\b(mv|cp|rm|truncate|install)\b|\bperl\s+-[a-zA-Z]*i')
+WRITE_COMMANDS = {'tee', 'mv', 'cp', 'rm', 'truncate', 'install', 'ln', 'chmod', 'chown', 'dd', 'patch',
+                  'touch', 'rsync', 'unlink', 'shred'}
+INTERPRETER = re.compile(r'^(python[\d.]*|node|deno|bun|ruby|perl|php|sh|bash|zsh|dash|awk|gawk|osascript)$')
+GIT_PATH_WRITES = {'checkout', 'restore', 'apply', 'stash', 'reset', 'clean', 'rm', 'mv'}
+REDIRECT_TO_PROTECTED = re.compile(r'>>?\|?\s*\S*(?:telesma/checks(?![\w-])|CHECK_EXCEPTIONS|telesma-checks/)', re.I)
+
+
+def bash_touches_protected(cmd):
+    """Whether a Bash command writes to the check files, as far as a command can be read: a
+    redirect INTO them, a writing command or an interpreter one-liner that names them, a git
+    operation that rewrites them. Reading them (also with `2>/dev/null`) does not ask. What a
+    command hides from this reading is caught by the integrity baseline at the next commit."""
+    if not PROTECTED_MENTION.search(cmd):
+        return False
+    if re.search(r'telesma-checks\.py[^\n;&|]*--(approve|baseline)\b', cmd):
+        return True
+    members = command_members(cmd)
+    if members is None:
+        return bool(BASH_WRITE.search(cmd))
+    inside = False                              # after `cd telesma/checks` relative names count
+    for tokens in members:
+        i = skip_assignments(tokens)
+        if i >= len(tokens):
+            continue
+        word, text = os.path.basename(tokens[i]), ' '.join(tokens[i:])
+        mention = bool(PROTECTED_MENTION.search(text))
+        if word in ('cd', 'pushd'):
+            inside = inside or mention
+            continue
+        if REDIRECT_TO_PROTECTED.search(text) or (inside and re.search(r'(^|\s)\d*>>?', text)
+                                                  and not re.search(r'>>?\s*/dev/null', text)):
             return True
-        if '## Checks' in (e.get('new_string') or '') or '## Checks' in old:
+        if not (mention or inside):
+            continue
+        if word in WRITE_COMMANDS:
+            return True
+        if word in ('sed', 'perl') and any(re.match(r'^(-[a-zA-Z]*i|--in-place)', t) for t in tokens[i + 1:]):
+            return True
+        if INTERPRETER.match(word) and any(t in ('-c', '-e', '--eval', '-') for t in tokens[i + 1:]):
+            return True
+        pk = git_subcommand(tokens)
+        if pk and pk[0] in GIT_PATH_WRITES:
             return True
     return False
 
 
-BASH_WRITE = re.compile(r'>|\btee\b|\bsed\s+(-[a-zA-Z]*i|--in-place)|\b(mv|cp|rm|truncate|install)\b|\bperl\s+-[a-zA-Z]*i')
+# --- Integrity of the check files ---------------------------------------------------------
+#
+# A Bash command can write to a file in ways no reading of the command reveals. So the check
+# modules, the exceptions file and the ## Checks section are also compared with a baseline of
+# hashes kept in .git/telesma-checks/ (this machine's data, never committed). A difference that
+# did not come through an edit the human was asked about stops the next commit / tag until the
+# human approves it in a terminal (`--approve`) or the launcher records delivered modules.
+
+def file_hash(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ''
 
 
-def bash_touches_protected(cmd):
-    if not re.search(re.escape(DIRECTORY) + r'/|CHECK_EXCEPTIONS', cmd):
-        return False
-    return bool(BASH_WRITE.search(cmd))
+def text_hash(t):
+    return hashlib.sha256((t or '').encode('utf-8', 'replace')).hexdigest()
+
+
+def integrity_state(root):
+    modules = {}
+    base = os.path.join(root, DIRECTORY)
+    for dp, dns, fns in os.walk(base):
+        dns[:] = sorted(d for d in dns if d != '__pycache__')
+        for fn in sorted(fns):
+            if fn.endswith(('.pyc', '.pyo')) or fn == '.DS_Store':
+                continue
+            full = os.path.join(dp, fn)
+            modules[os.path.relpath(full, root).replace(os.sep, '/')] = file_hash(full)
+    return {'modules': modules,
+            'exceptions': file_hash(os.path.join(root, EXCEPTIONS)),
+            'checks_section': text_hash(checks_section(read_text(os.path.join(root, CONFIG)) or ''))}
+
+
+def baseline_file(root):
+    d = evidence_dir(root)
+    return os.path.join(d, BASELINE) if d else None
+
+
+def load_baseline(root):
+    p = baseline_file(root)
+    b = load_json(p) if p else None
+    return b if isinstance(b, dict) and isinstance(b.get('modules'), dict) else None
+
+
+def integrity_drift(root):
+    """[description] of what differs from the baseline; one entry when there is no baseline."""
+    base = load_baseline(root)
+    if base is None:
+        return [f'no integrity baseline for the check files (.git/{EVIDENCE}/{BASELINE})']
+    now = integrity_state(root)
+    out = []
+    for p in sorted(set(now['modules']) | set(base['modules'])):
+        a, b = base['modules'].get(p), now['modules'].get(p)
+        if a != b:
+            out.append(f'{p} ({"added" if a is None else "removed" if b is None else "changed"})')
+    if now['exceptions'] != base.get('exceptions', ''):
+        out.append(f'{EXCEPTIONS} (changed)')
+    if now['checks_section'] != base.get('checks_section', ''):
+        out.append(f'{CONFIG} -> ## Checks (changed)')
+    return out
+
+
+def write_baseline(root, state=None):
+    p = baseline_file(root)
+    return bool(p) and save_json(p, state or integrity_state(root))
+
+
+def integrity_text(drift):
+    return ('Telesma - quality checks: the check files differ from what the human approved:\n'
+            + '\n'.join(f'  - {x}' for x in drift[:20])
+            + (f'\n  ... and {len(drift) - 20} more' if len(drift) > 20 else '')
+            + '\nThe operation is stopped until the human looks at it. This is not a finding in the code and '
+              'not something to fix or to get around: report TELESMA BLOCKED with this list. The human reviews '
+              f'the difference and approves it in a terminal: python3 {DIRECTORY}/telesma-checks.py --approve')
+
+
+def baseline_key(root, path):
+    """Which baseline entry a protected path belongs to: ('modules', rel) | ('exceptions',) | ('checks_section',)."""
+    rel = project_relative(root, path)
+    if rel is None:
+        return None
+    if rel == EXCEPTIONS.lower():
+        return ('exceptions',)
+    if rel == CONFIG.lower():
+        return ('checks_section',)
+    if rel.startswith(DIRECTORY + '/'):
+        full = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
+        return ('modules', os.path.relpath(full, os.path.realpath(root)).replace(os.sep, '/'))
+    return None
+
+
+def baseline_get(base, key):
+    return (base.get('modules') or {}).get(key[1]) if key[0] == 'modules' else base.get(key[0], '')
+
+
+def baseline_set(base, key, value):
+    if key[0] == 'modules':
+        if value:
+            base['modules'][key[1]] = value
+        else:
+            base['modules'].pop(key[1], None)
+    else:
+        base[key[0]] = value
+
+
+def integrity_state_entry(root, key):
+    if key[0] == 'exceptions':
+        return file_hash(os.path.join(root, EXCEPTIONS))
+    if key[0] == 'checks_section':
+        return text_hash(checks_section(read_text(os.path.join(root, CONFIG)) or ''))
+    return file_hash(os.path.join(root, key[1]))
+
+
+def remember_asked_edit(root, tool, tool_input):
+    """PreToolUse, right before the hook asks the human about an edit of a protected file: what
+    the file will hold if the human agrees. PostToolUse runs only when the edit was carried out;
+    if the file then holds exactly this, the baseline follows. An edit on top of a file that had
+    already drifted is not recorded — the earlier change was never shown to anybody."""
+    path = tool_input.get('file_path') or ''
+    key = baseline_key(root, path)
+    base = load_baseline(root)
+    d = evidence_dir(root)
+    if not key or base is None or not d or tool not in ('Edit', 'Write', 'MultiEdit'):
+        return
+    if baseline_get(base, key) != integrity_state_entry(root, key):
+        return
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    after = content_after(read_text(full), tool, tool_input)
+    if after is None:
+        return
+    expected = text_hash(checks_section(after)) if key[0] == 'checks_section' \
+        else hashlib.sha256(after.encode('utf-8')).hexdigest()
+    asked = load_json(os.path.join(d, APPROVALS)) or []
+    asked = [x for x in asked if isinstance(x, dict)][-19:] + [{'key': list(key), 'expected': expected}]
+    save_json(os.path.join(d, APPROVALS), asked)
+
+
+def baseline_after_edit(root, tool_input):
+    """PostToolUse of Edit/Write: an edit the human was asked about and that left exactly the
+    announced content moves the baseline."""
+    key = baseline_key(root, tool_input.get('file_path') or '')
+    d = evidence_dir(root)
+    base = load_baseline(root)
+    if not key or not d or base is None:
+        return
+    asked = load_json(os.path.join(d, APPROVALS)) or []
+    now = integrity_state_entry(root, key)
+    hit = [x for x in asked if isinstance(x, dict) and x.get('key') == list(key) and x.get('expected') == now]
+    if not hit:
+        return
+    baseline_set(base, key, now)
+    write_baseline(root, base)
+    save_json(os.path.join(d, APPROVALS), [x for x in asked if x not in hit])
+
+
+def mode_baseline(root, templates, config_section=False):
+    """Launcher, at every start, after it has synced the delivered modules: creates the baseline
+    when there is none; otherwise records only module files identical to the delivered template —
+    a file the launcher itself just wrote. Everything else that differs stays a difference.
+    `--config-section`: also record the current `## Checks` section — for the launcher right after
+    its own wizard wrote it (the person chose those values in the terminal a moment ago)."""
+    base = load_baseline(root)
+    now = integrity_state(root)
+    # From here on every commit that appears is one the hook has to account for: without a
+    # remembered HEAD the first PostToolUse of the session would only take note of it.
+    d, head = evidence_dir(root), sha(root, 'HEAD')
+    if d and head and not os.path.exists(os.path.join(d, SEEN_HEAD)):
+        try:
+            with open(os.path.join(d, SEEN_HEAD), 'w', encoding='utf-8') as f:
+                f.write(head + '\n')
+        except OSError:
+            pass
+    if base is not None and config_section and base.get('checks_section') != now['checks_section']:
+        base['checks_section'] = now['checks_section']
+        write_baseline(root, base)
+    if base is None:
+        ok = write_baseline(root, now)
+        print('integrity baseline created' if ok else 'integrity baseline: no git repository yet')
+        return 0
+    changed = False
+    if templates and os.path.isdir(templates):
+        for rel, h in now['modules'].items():
+            delivered = file_hash(os.path.join(templates, os.path.relpath(rel, DIRECTORY)))
+            if delivered and delivered == h and base['modules'].get(rel) != h:
+                base['modules'][rel] = h
+                changed = True
+    if changed:
+        write_baseline(root, base)
+    for x in integrity_drift(root):
+        print('differs: ' + x)
+    return 0
+
+
+def mode_approve(root):
+    """The human, in a terminal: shows what differs and records the current state as approved."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        sys.stderr.write('--approve records what the HUMAN has reviewed: run it yourself in a terminal '
+                         '(it needs a terminal on stdin and stdout).\n')
+        return 2
+    drift = integrity_drift(root)
+    if not drift:
+        print('Nothing differs from the approved state.')
+        return 0
+    print('Differs from the approved state:')
+    for x in drift:
+        print('  - ' + x)
+    try:
+        answer = input('Approve all of the above? [y/N] ').strip().lower()
+    except EOFError:
+        answer = ''
+    if answer not in ('y', 'yes'):
+        print('Nothing recorded.')
+        return 1
+    if not write_baseline(root):
+        print('Cannot write the baseline (no git repository?).')
+        return 1
+    print('Approved.')
+    return 0
 
 
 # --- Hook ---------------------------------------------------------------------------------
 
 def respond(decision, reason):
+    # ensure_ascii: the answer must survive any console code page — a deny lost to an encoding
+    # error is an operation let through
     print(json.dumps({'hookSpecificOutput': {
         'hookEventName': 'PreToolUse',
         'permissionDecision': decision,
         'permissionDecisionReason': reason,
-    }}, ensure_ascii=False))
+    }}))
     sys.exit(0)
 
 
-def mode_pretooluse():
-    try:
-        data = json.load(sys.stdin)
-    except ValueError:
-        sys.exit(0)
+SHAPE_REASONS = {
+    'order': 'something that can change files stands before the commit/tag in the same command — '
+             'the check reads files BEFORE the command runs and would check the state from before the change',
+    'wrapper': 'a git operation that creates commits is run through another command (bash -c, xargs, env…) — '
+               'the check cannot see what exactly will be committed',
+    'alias': 'a git alias that is a shell script or is defined in the command itself (-c alias.…) calls '
+             'commit/tag — it cannot be checked',
+    'unseen': 'git commit/tag/merge/… stands where the hook cannot read it (a subshell, a brace group, `!`, '
+              'a variable instead of `git`, an interpreter one-liner)',
+    'substitution': 'the command contains `$(…)`, backticks or `<(…)`, which run before the commit — after '
+                    'the check has read the files. A commit message goes as -m "…" or as '
+                    '"$(cat <<\'EOF\' … EOF)" with the delimiter in quotes',
+    'output': '`--output` before the commit writes a file after the check has read the files',
+    'force': '`git add -f` together with a glob, a flag or a path that does not exist yet — the hook cannot '
+             'list ignored files that way; name the files',
+}
+
+
+def shape_denial(problem):
+    respond('deny', f'Telesma — quality checks: {SHAPE_REASONS[problem]}. Split it: first the file change '
+                    f'as a separate command, then just `git add <files> && git commit …` (a tag — also '
+                    f'as a separate command, after the commit). This is not a finding in the code, only the shape of the command.')
+
+
+def pretooluse(data):
     root = os.environ.get('CLAUDE_PROJECT_DIR') or data.get('cwd') or os.getcwd()
     if not load_config(root)['enabled']:
         sys.exit(0)
     tool = data.get('tool_name', '')
     tool_input = data.get('tool_input') or {}
 
-    if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+    if tool in EDIT_TOOLS:
         path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
         if protected(root, path):
-            respond('ask', 'Telesma: write to quality-check files (modules / exceptions) — '
+            remember_asked_edit(root, tool, tool_input)
+            respond('ask', 'Telesma: write to quality-check files (modules / exceptions / evidence) — '
                            'the decision belongs to the human, not to the author of the code')
         if touches_config(root, tool, tool_input):
+            remember_asked_edit(root, tool, tool_input)
             respond('ask', 'Telesma: change to the ## Checks section of telesma/config.md — the decision belongs to the human')
         sys.exit(0)
 
@@ -1011,24 +1817,37 @@ def mode_pretooluse():
         sys.exit(0)
     cmd = tool_input.get('command') or ''
     if bash_touches_protected(cmd):
-        respond('ask', 'Telesma: the command changes quality-check files (modules / exceptions) — '
+        respond('ask', 'Telesma: the command changes quality-check files (modules / exceptions / evidence) — '
                        'the decision belongs to the human')
     aliases = git_aliases(root)
     problem = order_problem(cmd, aliases)
     if problem:
-        reasons = {
-            'order': 'something that can change files stands before the commit/tag in the same command — '
-                     'the check reads files BEFORE the command runs and would check the state from before the change',
-            'wrapper': 'git commit/tag run through another command (bash -c, xargs, env…) — '
-                       'the check cannot see what exactly will be committed',
-            'alias': 'a git alias that is a shell script calls commit/tag — it cannot be checked',
-        }
-        respond('deny', f'Telesma — quality checks: {reasons[problem]}. Split it: first the file change '
-                        f'as a separate command, then just `git add <files> && git commit …` (a tag — also '
-                        f'as a separate command, after the commit). This is not a finding in the code, only the shape of the command.')
+        shape_denial(problem)
     points = points_from_command(cmd, aliases)
     if not points:
         sys.exit(0)
+
+    if load_baseline(root) is None and evidence_dir(root) and not (git(root, 'rev-list', '-n', '1', '--all') or '').strip():
+        # A repository without a single commit (created during this session, after the launcher
+        # ran): there is no earlier approved state to differ from. With history, a missing
+        # baseline is a difference like any other.
+        write_baseline(root)
+    drift = integrity_drift(root)
+    if drift:
+        respond('deny', integrity_text(drift))
+    plan = points.get('commit')
+    if plan is not None:
+        _, _, wide = plan_paths(root, plan)
+        if plan.get('force') and wide:
+            shape_denial('force')
+        mismatch = staged_mismatch(root, plan)
+        if mismatch:
+            listed = ', '.join(ascii(p)[1:-1] for p in mismatch[:8]) + (' ...' if len(mismatch) > 8 else '')
+            respond('deny', 'Telesma - quality checks: staged in one version, different in the working tree: '
+                            f'{listed}. The checks read the working tree, so they would not see what gets '
+                            'committed. Stage the current version (`git add <file>`) or restore it '
+                            '(`git restore <file>`) as a separate command, then commit. This is not a finding '
+                            'in the code, only the state of the index.')
 
     all_block, all_warn, all_errors, commit_log = [], [], [], None
     for point in ('commit', 'phase', 'release'):
@@ -1039,8 +1858,12 @@ def mode_pretooluse():
             all_errors += [f'{point}/{x}' for x in e]
             if point == 'commit':
                 commit_log = (lg, e)
-    if not all_block and commit_log is not None:
-        save_pending(root, *commit_log)   # the commit is about to exist — the evidence waits for its SHA
+    if commit_log is not None:
+        if all_block:
+            drop_pending(root)            # a result from an earlier attempt must not wait for this commit
+        else:
+            # the commit is about to exist — the evidence waits for its SHA
+            save_pending(root, *commit_log, scope_files(root, 'commit', 'changed', plan))
     if all_block:
         text = (f'Telesma — quality checks stopped this operation ({len(all_block)} blocking):\n'
                 + describe(all_block) +
@@ -1065,8 +1888,33 @@ def mode_pretooluse():
         print(json.dumps({'hookSpecificOutput': {
             'hookEventName': 'PreToolUse',
             'additionalContext': text.strip(),
-        }}, ensure_ascii=False))
+        }}))
     sys.exit(0)
+
+
+# A git operation that creates a commit or a tag, however the command is shaped — used only to
+# decide whether an internal error of the hook has to stop the operation.
+GIT_OPERATION = re.compile(r'(?<![\w.-])git(?![\w.-])[^\n]*?(?<![\w-])(?:commit|tag)(?![\w-])')
+
+
+def mode_pretooluse():
+    try:
+        data = json.load(sys.stdin)
+    except ValueError:
+        sys.exit(0)
+    try:
+        pretooluse(data)
+    except SystemExit:
+        raise
+    except Exception as e:                  # noqa: BLE001 — the hook must end with a decision
+        cmd = (data.get('tool_input') or {}).get('command') or '' if isinstance(data, dict) else ''
+        if isinstance(data, dict) and data.get('tool_name') == 'Bash' and GIT_OPERATION.search(cmd):
+            detail = ascii(str(e))[1:-1][:200]
+            respond('deny', 'Telesma - quality checks could not run (internal error of the hook: '
+                            f'{type(e).__name__}: {detail}). A commit / tag is not let through unchecked. '
+                            'This is not a finding in the code: retry once; if it repeats, report TELESMA BLOCKED '
+                            'with this message.')
+        sys.exit(0)
 
 
 def mode_posttooluse():
@@ -1075,15 +1923,33 @@ def mode_posttooluse():
     except ValueError:
         sys.exit(0)
     root = os.environ.get('CLAUDE_PROJECT_DIR') or data.get('cwd') or os.getcwd()
-    if data.get('tool_name') != 'Bash' or not load_config(root)['enabled']:
+    if not load_config(root)['enabled']:
+        sys.exit(0)
+    tool = data.get('tool_name')
+    if tool in EDIT_TOOLS:
+        try:
+            baseline_after_edit(root, data.get('tool_input') or {})
+        except Exception:                   # noqa: BLE001 — a missed baseline update shows up as a difference
+            pass
+        sys.exit(0)
+    if tool != 'Bash':
         sys.exit(0)
     cmd = (data.get('tool_input') or {}).get('command') or ''
-    if 'commit' in points_from_command(cmd, git_aliases(root)):
-        evidence_after_commit(root, cmd)
+    blocking = None
+    try:
+        if 'commit' in points_from_command(cmd, git_aliases(root)):
+            evidence_after_commit(root, cmd)
+        blocking = verify_unseen(root)
+    except Exception as e:                  # noqa: BLE001
+        blocking = ('Telesma - quality checks: commits made by this command could not be verified '
+                    f'({type(e).__name__}) - they have no check evidence; tell the human.')
     text = status_after_push(root, cmd)
-    if text:
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse',
-                                                 'additionalContext': text}}, ensure_ascii=False))
+    out = {}
+    if blocking:
+        out.update({'decision': 'block', 'reason': blocking})
+    if text or blocking:
+        out['hookSpecificOutput'] = {'hookEventName': 'PostToolUse', 'additionalContext': text or blocking}
+        print(json.dumps(out))
     sys.exit(0)
 
 
@@ -1092,7 +1958,11 @@ def mode_point(point, since):
     if not load_config(root)['enabled']:
         print('Checks disabled (## Checks → Enabled: no).')
         return 0
-    b, w, e, _ = run_point(root, point, since=since)
+    try:
+        b, w, e, _ = run_point(root, point, since=since, vouched=True)
+    except GitError as err:
+        print(f'CHECK ERROR: {err} - the scope could not be read, nothing was checked')
+        return 1
     if b:
         print(f'BLOCK ({len(b)}):\n' + describe(b, 200))
     if w:
@@ -1104,6 +1974,65 @@ def mode_point(point, since):
     return 1 if (b or e) else 0
 
 
+def mode_files_commit():
+    """`done` / `commit` of tools/telesma-task.py: the script, not the model, chose the files and
+    will commit exactly them — so the checks read exactly them, and nothing has to be guessed from
+    the shape of a git command."""
+    root = os.getcwd()
+    if not load_config(root)['enabled']:
+        print('Checks disabled (## Checks → Enabled: no).')
+        return 0
+    raw = sys.stdin.buffer.read().decode('utf-8', 'surrogateescape')
+    files = [p for p in raw.split('\0') if p]
+    if load_baseline(root) is None and evidence_dir(root) and not (git(root, 'rev-list', '-n', '1', '--all') or '').strip():
+        write_baseline(root)
+    drift = integrity_drift(root)
+    if drift:
+        print('BLOCK (integrity):\n' + integrity_text(drift))
+        return 1
+    try:
+        b, w, e, log = run_point(root, 'commit', files=files)
+    except GitError as err:
+        print(f'CHECK ERROR: {err} - the scope could not be read, nothing was checked')
+        return 1
+    if b:
+        drop_pending(root)
+        print(f'BLOCK ({len(b)}):\n' + describe(b, 200))
+    else:
+        save_pending(root, log, e, files)
+    if w:
+        print(f'WARN ({len(w)}):\n' + describe(w, 50))
+    for x in e:
+        print(f'CHECK DID NOT RUN: {x}')
+    if not (b or w or e):
+        print('Checks (commit): clean.')
+    return 1 if b else 0
+
+
+def mode_record_commit():
+    root = os.getcwd()
+    if not load_config(root)['enabled']:
+        return 0
+    evidence = evidence_after_commit(root, '')
+    d = evidence_dir(root)
+    head = sha(root, 'HEAD')
+    # Only a commit that holds exactly what was checked is marked as seen; anything else stays
+    # for the after-the-fact verification of the next PostToolUse.
+    if evidence and d and head:
+        try:
+            with open(os.path.join(d, SEEN_HEAD), 'w', encoding='utf-8') as f:
+                f.write(head + '\n')
+        except OSError:
+            pass
+    print('evidence recorded' if evidence else 'no evidence (the commit differs from what was checked)')
+    return 0 if evidence else 1
+
+
+def argument_after(argv, flag, default=None):
+    i = argv.index(flag)
+    return argv[i + 1] if i + 1 < len(argv) and not argv[i + 1].startswith('--') else default
+
+
 def main(argv):
     if '--pretooluse' in argv:
         mode_pretooluse()
@@ -1112,17 +2041,24 @@ def main(argv):
         mode_posttooluse()
         return 0
     if '--validate' in argv:
-        root = argv[argv.index('--validate') + 1] if len(argv) > argv.index('--validate') + 1 else os.getcwd()
-        print('\n'.join(validate(root)))
+        print('\n'.join(validate(argument_after(argv, '--validate', os.getcwd()))))
         return 0
+    if '--baseline' in argv:
+        return mode_baseline(argument_after(argv, '--baseline', os.getcwd()),
+                             argument_after(argv, '--templates') if '--templates' in argv else None,
+                             config_section='--config-section' in argv)
+    if '--approve' in argv:
+        return mode_approve(argument_after(argv, '--approve', os.getcwd()))
+    if '--files-commit' in argv:
+        return mode_files_commit()
+    if '--record-commit' in argv:
+        return mode_record_commit()
     if '--point' in argv:
-        i = argv.index('--point')
-        point = argv[i + 1] if i + 1 < len(argv) else ''
+        point = argument_after(argv, '--point', '')
         if point not in POINTS:
             sys.stderr.write(f'--point: one of {", ".join(POINTS)}\n')
             return 2
-        since = argv[argv.index('--since') + 1] if '--since' in argv and argv.index('--since') + 1 < len(argv) else None
-        return mode_point(point, since)
+        return mode_point(point, argument_after(argv, '--since') if '--since' in argv else None)
     sys.stderr.write(__doc__)
     return 2
 

@@ -98,7 +98,7 @@ missing blocks from the template; the merge at startup respects removed blocks.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Auto-commit` | `yes` | Commit after each completed task (specific files only, never `git add -A`). |
+| `Auto-commit` | `yes` | Commit after each completed task. Done by `telesma-task.py done`, never by the agent: the files `git status` shows minus `Ignore on commit`, after the tests and checks ran on exactly them. |
 | `Auto-push` | `no` | Telesma never pushes unless a repository integration is active (then: task branches only). |
 | `Branch strategy` | `none (commit to the current branch)` | Branching convention. |
 | `Ignore on commit` | `.env`, `*.log`, `node_modules/`, `telesma/artifacts/`, `telesma/state/PERMISSIONS.jsonl`, `telesma/state/CHECKS.jsonl`, … | Patterns never committed. Keep each pattern in backticks — Markdown linters turn bare `*.log` or `__pycache__` into emphasis and silently break the list. |
@@ -162,6 +162,10 @@ Opt-in screenshots and recordings ([WORKFLOW.md § 7](WORKFLOW.md#7-visual-artif
 | Key | Default | Meaning |
 |---|---|---|
 | `Max tries per task` | `3` | Tries before `TELESMA BLOCKED`. Later tries widen the context (neighbouring spec sections, the whole file, the problem log). |
+| `Max refusals per task` | `5` | Hard stop counted by the task tool: this many refused `done` for one task end the session with `TELESMA BLOCKED`. `none` = no limit. |
+| `Max attempts per task` | `3` | How many times `next` may hand out the same task without a finished `done` (a restart, a compaction, a lost session) before the script stops. `none` = no limit. |
+| `Max tasks per session` | `none` | After this many finished tasks `next` hands out nothing and writes `telesma/state/BLOCKED.md`. |
+| `Max hours per session` | `none` | The same, counted in hours since the launcher started the session. Limits are read once, at the start; the next start shows the reason and asks you whether to go on. |
 | `Report progress` | `yes` | Kept for compatibility; currently not read by the launcher or the instructions. |
 | `Rotate state files` | `yes` | Move older entries of REPORT.md, PROJECT_CONTEXT.md and PLAN.md into `*_ARCHIVE.md` at every start ([STATE_FILES.md](STATE_FILES.md#state-file-rotation)). `no` turns all rotation off. |
 | `Plan phases in file` | `5` | How many of the latest fully completed phases stay in PLAN.md in full; only applies above 100 KB of plan. `none` = never touch PLAN.md; `0` = archive every completed phase. |
@@ -176,6 +180,28 @@ itself, and auto-compaction is handled by keeping state files current after ever
 |---|---|---|
 | `Extra directories` | empty | Directories outside the repository Claude may access without prompts. See [below](#working-directories). |
 | `Auto-sync directories` | `yes` | Directories added to `.claude/settings.local.json` outside this file come back into it at startup. |
+
+### `## Sandbox`
+
+Claude Code's built-in sandbox under every Bash command (macOS, Linux, WSL2; native Windows runs
+without it). Telesma writes it into `.claude/settings.local.json` at every start, after the
+permission mode is final. Questions and the permission judge stay as they are: the sandbox is a
+layer under them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Enabled` | `yes` for a config the launcher creates when the sandbox is available; `no` in a project migrated from before format 22 | `no` \| `yes` \| `required` (Claude Code does not start when the sandbox cannot run). |
+| `Allowed hosts` | — | Extra hosts, one per line (`- api.example.com`, `- *.internal.example.com`). The stack's registries (PyPI, npm, crates.io, Maven, pub.dev …), the checks' services and, with the GitHub integration, GitHub's hosts are added by Telesma. In the autonomous modes (1, 4) any other host is refused; in a chat Claude Code asks you. |
+| `Writable paths` | — | Directories outside the project a command may write to (`- ~/.cache/my-tool`). The project, the `## Working directories`, the temporary directory and the stack's package caches are writable already. |
+| `Excluded commands` | — | Commands that run outside the sandbox (`- docker compose *` — Docker does not work inside it). Each one is a hole: it runs with all your rights. |
+
+Fixed, whatever the section says: a refused command is never retried outside the sandbox, a
+sandboxed command is not auto-approved because it is sandboxed, and `~/.ssh`, `~/.aws`, `~/.gnupg`,
+`~/.netrc`, Docker, Kubernetes and cloud CLI credentials are not readable (`~/.config/gh` stays
+readable with the GitHub integration). Keys you add to the `sandbox` block of
+`settings.local.json` yourself are kept. The section is under the trust gate: `Allowed hosts`,
+`Writable paths` and `Excluded commands` loosen it, so a cloned project's values are shown to you
+before they apply. What to do when a command is refused: [TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-command-was-refused-by-the-sandbox).
 
 ### `## Auto-approval`
 
@@ -207,8 +233,8 @@ you host. Off by default — nothing leaves your machine. Details: [TELEMETRY.md
 | Key | Default | Meaning |
 |---|---|---|
 | `Send` | `no` | `yes` = this project may be reported. For the shared hub each person must also opt in on their machine. |
-| `Endpoint` | `none` | `shared` = the shared Telesma hub; `https://…` = your own server. |
-| `API key` | `env:TELESMA_HUB_TOKEN` | Own server only. A reference (`env:`, `file:`, `cmd:`, `auto`), never a literal. |
+| `Endpoint` | `none` | `shared` = the shared Telesma hub; `https://…` = your own server (`http://` only for localhost). An own server is used only after this section was confirmed on the machine ([trust gate](#trust-gate-configmd-on-this-machine)). |
+| `API key` | `env:TELESMA_HUB_TOKEN` | Own server only. A reference (`env:`, `file:`, `cmd:`), never a literal; read only after this section was confirmed on the machine. |
 | `Scope` | `full` | Shared hub only: `metrics` = this project sends numbers only, for everyone. Can narrow a person's choice, never widen it. |
 | `Project label` | empty | Readable project name; empty = directory name (own server) or project hash (shared hub). |
 
@@ -218,7 +244,7 @@ Synced both ways with `.claude/settings.local.json` ([below](#permissions-sync-a
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Mode` | `acceptEdits` | `default` (asks about every tool), `acceptEdits` (Edit/Write auto-accepted, Bash asks), `bypassPermissions` (no prompts — risky), `plan`. |
+| `Mode` | `acceptEdits` | One of Claude Code's modes — anything else stops the start: `default` (asks about every tool), `acceptEdits` (Edit/Write auto-accepted, Bash asks), `plan`, `auto`, `dontAsk`, `bypassPermissions` (no prompts — risky; you type the word in a terminal to accept it, `TELESMA_TRUST_CONFIG` is not enough). |
 | `Auto-sync new permissions` | `yes` | "Allow always" answers given during a session are merged back here at the next start. |
 | `Generalize permissions` | `yes` | Exact approved commands from safe families are promoted to prefix patterns. |
 | `Allowed commands` | test runners, `mkdir`, `ls`, safe git, `WebFetch(domain:claude.ai)` | Allow rules. |
@@ -297,21 +323,60 @@ answers to `settings.local.json`; the next start merges them back into `config.m
 The problem this solves: Claude Code stores "allow always" as **exact** commands
 (`Bash(npm test -- --coverage)`), so every variation prompts again and stalls the autonomous loop.
 
-**Generalization** (`Generalize permissions: yes`): an approved command from a curated list of safe
-families is promoted at startup to a prefix pattern — approving `docker compose up -d postgres`
-gives `Bash(docker compose:*)`, approving `uv run pytest -x` gives `Bash(uv run:*)`. Exact entries
-covered by a pattern are removed. The families cover test runners and linters (pytest, jest, vitest,
-ruff, eslint, tsc, playwright, detox, …), builds and package managers (npm/yarn/pnpm
-install|run|test, pip, uv, poetry, cargo, go, docker compose|build), safe git (status, diff, log,
-show, add, commit, tag, describe, fetch) and file tools (ls, mkdir, grep, find, …).
+**Generalization** (`Generalize permissions: yes`): an approved command from a curated list of
+families is promoted at startup to a prefix pattern — approving `pytest -k cart` gives
+`Bash(pytest:*)`, approving `npm run build -- --watch` gives `Bash(npm run:*)`. Exact entries
+covered by a pattern are removed. The families are the ones whose every variation reads, or builds
+and tests the project: test runners, linters and typecheckers (pytest, jest, vitest, ruff, eslint,
+tsc, playwright, detox, …), builds and package managers (npm/yarn/pnpm install|run|test, pip
+install, uv sync|add, poetry install|add, cargo build|test|check, go build|test, docker build),
+read-only git (status, diff, log, show, describe, fetch) and reading tools (ls, mkdir, cat,
+grep, …).
 
-**Never generalized**: `rm`, `sudo`, `curl`/`wget`, `git push`, `git reset`, `docker run` and anything
-outside the list — they stay exact, and each new variation needs your approval. `Denied commands`
-always wins over `Allowed commands`.
+**Never generalized**: interpreters and runners of arbitrary code (`python`, `node`, `npx`, `make`,
+`uv run`, `poetry run`, `go run`, `cargo run`, `npm exec`, `docker compose`), tools one flag away
+from destroying data (`find`, `xargs`, `sed`, `awk`, `mv`, `cp`, `git stash`, `git tag`,
+`git branch`), `rm`, `sudo`, `curl`/`wget`, `git push`, `git reset`, `docker run` and anything
+outside the list — they stay exact, and each new variation needs your approval. A wildcard for one
+of them is yours to write into `Allowed commands` (the setup wizard writes the stack's own, such as
+`Bash(python3:*)` for Python). `Denied commands` always wins over `Allowed commands`.
+
+The default list has no rule for `git add`, `git commit`, tags, pushes or `gh pr create`: since
+state format 21 the task tool does those and the "code only" hook refuses them from the agent, so a
+rule would be dead weight. Format 23 removes such rules from older projects, from `config.md` and
+from `settings.local.json`.
+
+A `settings.local.json` that is not valid JSON is never replaced silently: it is kept as
+`settings.local.json.bak`, a warning names it, and a new file is written from `config.md`.
 
 The launcher also writes hook entries for the permission judge and the quality checks into the same
 file when those are enabled, and removes them when they are disabled. Your own keys in
 `settings.local.json` are preserved.
+
+## Trust gate: config.md on this machine
+
+`telesma/config.md` is committed, so it arrives with a clone or a pull request — and it holds
+values that run on the machine that starts the project: the test commands (the adoption baseline
+runs one without a session), the permission mode and the allow rules, the judge's and the
+telemetry's endpoint and key command, extra directories, the integrations. Telesma keeps one
+record per project per machine, outside the repository
+(`~/.config/telesma/trust/<hash of the project path>.json`), with a hash of the field lines of
+`## Tests`, `## Integrations`, `## Working directories`, `## Auto-approval`, `## Telemetry` and
+`## Permissions`. Comments and other sections do not count.
+
+- A section that is new on this machine or changed since you confirmed it is **shown at the start,
+  in a terminal, and confirmed once** (`[y/N]`, the default is no) before anything reads it. "No"
+  stops the start; nothing is synced, run or sent.
+- A config the launcher creates itself (the first start, `--new`, `--adopt`) and the launcher's own
+  later writes (the setup wizard, the config merge, permissions written back from
+  `settings.local.json`) need no question.
+- Without a terminal the start stops with one line. For CI and scripts: `TELESMA_TRUST_CONFIG=yes`
+  accepts the config as it is — except `Mode: bypassPermissions`, which a person types.
+- The telemetry collector (own server) and the permission judge (`cmd:`/`file:` keys, a remote
+  endpoint) read the same record and stay off for a section nobody confirmed here.
+
+After a `git pull` that changed one of these sections the next start asks again and shows only the
+sections that changed.
 
 ## Commit and PR footer
 
@@ -357,6 +422,16 @@ same either way.
 | `--integrations` | Run only the integrations wizard on an existing project; writes only `telesma/config.md`. |
 | `--sync-specky` | With `Tracker: specky`: a short Claude session that turns Specky changes into files in `telesma/changes/`. No loop. |
 | `-h`, `--help` | Show help. |
+
+Environment variables: `TELESMA_TRUST_CONFIG=yes` (accept `config.md` without a terminal, see the
+[trust gate](#trust-gate-configmd-on-this-machine)), `TELESMA_NO_UPDATE_CHECK=1` (no look at the
+remote at the start), `TELESMA_FOLLOW_BRANCH=1` (the update and the installers follow the branch
+tip instead of the latest release tag — for developers of Telesma and forks; a clone that does not
+sit exactly on a release tag follows its branch for the "behind" notice anyway).
+
+Only one launcher runs on a project at a time: a second start stops and names the process that
+holds `telesma/state/.telesma-lock/` (a lock left by a closed window is taken over). A project
+whose `telesma/state/.telesma-version` is newer than this Telesma is refused — update Telesma.
 
 Behaviour by mode:
 

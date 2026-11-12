@@ -41,9 +41,15 @@ is marked with one wildcard marker: `telesma: red-team * /registrar/* — csrf` 
 `ALL`, a path ending in `/*` = every route under the prefix). A wildcard declares more than a
 single line — all the more reason the test must actually go through every route on the list.
 
+**A marker counts only when** it names a route or a prefix with a concrete beginning (`* /*` or a bare
+`*` covers nothing — one such comment used to satisfy every route for good) **and** it stands in a test
+or right above one: a test definition (`def test…`, `it(` / `test(`, `func Test…`, `@Test`, `#[test]`)
+within the 40 lines below it, or above it in the same file. A marker that does not count is reported.
+
 | Rule | Severity | What |
 |---|---|---|
 | `red-team-missing` | **block** | a protected route changed in the phase lacks one of the required cases. The message is ready task text: the route, the missing cases, the marker line to write |
+| `red-team-marker-invalid` | warn | a marker that does not count (see above) — the route it meant stays uncovered |
 | `red-team-undecided` | warn | routes changed in the phase with the role `?` in the map — not covered until the role is decided |
 
 **The first phase after the map is created only warns** (the map is absent at the reference

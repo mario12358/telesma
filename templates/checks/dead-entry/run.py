@@ -98,7 +98,8 @@ def emit(**z):
 
 def git(root, *args, limit=30):
     try:
-        r = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True, timeout=limit)
+        r = subprocess.run(['git', '-C', root, '-c', 'core.quotepath=off', *args], capture_output=True,
+                           encoding='utf-8', errors='replace', timeout=limit)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -408,7 +409,7 @@ def main():
         files = (git(root, 'ls-files') or '').splitlines()
         return check(root, [p for p in files if p.strip()])
     point = os.environ.get('TELESMA_POINT', 'phase')
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     if not files:
         return 0
     since = reference_point(root, point)
@@ -545,7 +546,7 @@ def main():
              file_fingerprint=False,
              message=f'+{len(rest)} more symbols without an entry ({found}) — full list: '
                      f'python3 telesma/checks/telesma-checks.py --point phase',
-             content_fingerprint='counter')
+             content_fingerprint=fingerprint('more|' + '|'.join(z['content_fingerprint'] for z in rest)))
     return 0
 
 

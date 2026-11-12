@@ -12,10 +12,19 @@ entry instead of the whole block and therefore cut entries in half. The source o
 history: an entry is restored from the commit in which it appeared (at that point its
 neighbour had not been rotated yet, so nothing had been glued onto it). Without a git
 repository content repair is impossible — only the diagnosis remains.
+
+What the repair may touch: `--fix` opens REPORT.md, REPORT_ARCHIVE.md, PLAN.md and
+PLAN_ARCHIVE.md and nothing else. The diagnosis alone (no `--fix`) also READS
+PROJECT_CONTEXT.md, for its notices. A file is written only when its content changes, through
+a temporary file and a rename, in the line endings it had; a text is replaced by the git
+version only when every line of it is found in what replaces it or, as a whole line, in the
+archive — git does not know what was written after the last commit.
 """
 import argparse
 import datetime
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +46,33 @@ BOUNDARIES = ((".** ", ". ", "! ", "? "), ("; ", " — "), (": ", ") "))
 
 
 # --- shared -----------------------------------------------------------------
+NEWLINE = {}        # path → the line ending the file had when it was read
+
+
+def load(path, strict=True):
+    """Lines of a file, without their line endings. A file that uses CRLF throughout is read
+    as such and written back as such; anything else is split on LF and keeps its bytes.
+    `strict=False` (diagnosis) replaces bytes that are not UTF-8 instead of failing."""
+    text = path.read_bytes().decode("utf-8", "strict" if strict else "replace")
+    crlf = "\r\n" in text and text.count("\r\n") == text.count("\n")
+    NEWLINE[path] = "\r\n" if crlf else "\n"
+    return (text.replace("\r\n", "\n") if crlf else text).split("\n")
+
+
+def save(path, lines):
+    """Writes only when the content differs — a run that repairs nothing changes no byte and
+    no mtime — and atomically: a crash leaves the old file, never half of the new one."""
+    data = NEWLINE.get(path, "\n").join(lines).encode("utf-8")
+    if path.is_file() and path.read_bytes() == data:
+        return False
+    tmp = path.with_name(path.name + ".telesma-repair.tmp")
+    tmp.write_bytes(data)
+    if path.is_file():
+        shutil.copymode(str(path), str(tmp))
+    os.replace(str(tmp), str(path))
+    return True
+
+
 def section(t, title):
     i = next((k for k, l in enumerate(t) if l.strip() == title), None)
     if i is None:
@@ -80,13 +116,24 @@ def paragraphs(t, i, j):
 
 
 # --- diagnosis --------------------------------------------------------------
-def diagnose(state):
-    """[(severity, message)] — severity 'damage' goes to repair, 'notice' is for information only."""
+def diagnose(state, context=True):
+    """[(severity, message)] — severity 'damage' goes to repair, 'notice' is for information only.
+    `context=False` (under `--fix`) leaves PROJECT_CONTEXT.md unopened: the repair's scope is
+    the report, the plan and their archives."""
     out = []
     report, arch = state / "REPORT.md", state / "REPORT_ARCHIVE.md"
 
+    for f in (report, arch, state / "PLAN.md", state / "PLAN_ARCHIVE.md"):
+        if f.is_file():
+            try:
+                f.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as e:
+                out.append(("notice", f"{f.name} is not valid UTF-8 (byte {e.start}) — the "
+                                      f"diagnosis reads around it, --repair will not touch the "
+                                      f"file; save it as UTF-8"))
+
     if report.is_file():
-        t = report.read_text(encoding="utf-8").split("\n")
+        t = load(report, strict=False)
         s = section(t, "## Problem log")
         if s:
             par = paragraphs(t, *s)
@@ -119,7 +166,7 @@ def diagnose(state):
 
     plan_arch = state / "PLAN_ARCHIVE.md"
     if plan_arch.is_file():
-        pend = [k + 1 for k, l in enumerate(plan_arch.read_text(encoding="utf-8").split("\n"))
+        pend = [k + 1 for k, l in enumerate(load(plan_arch, strict=False))
                 if l.startswith("- [ ]")]
         if pend:
             out.append(("damage", f"{len(pend)} unfinished tasks `- [ ]` in PLAN_ARCHIVE.md "
@@ -128,7 +175,7 @@ def diagnose(state):
 
     plan = state / "PLAN.md"
     if plan.is_file():
-        t = plan.read_text(encoding="utf-8").split("\n")
+        t = load(plan, strict=False)
         long_ = [k + 1 for k, l in enumerate(t) if TASK.match(l) and len(l) > TASK_LIMIT]
         if long_:
             out.append(("damage", f"{len(long_)} tasks longer than {TASK_LIMIT} characters "
@@ -150,8 +197,8 @@ def diagnose(state):
                                   f"mechanically."))
 
     ctx = state / "PROJECT_CONTEXT.md"
-    if ctx.is_file():
-        t = ctx.read_text(encoding="utf-8").split("\n")
+    if context and ctx.is_file():
+        t = load(ctx, strict=False)
         if any(l.strip() == "## Known pitfalls" for l in t):
             out.append(("notice", "PROJECT_CONTEXT.md has both `## Known pitfalls` and `## Known "
                                   "problems and solutions` — one job in two places, and only the "
@@ -173,7 +220,7 @@ def diagnose(state):
 
     for name, threshold in THRESHOLDS_KB.items():
         f = state / name
-        if f.is_file():
+        if f.is_file() and (context or name != "PROJECT_CONTEXT.md"):
             kb = f.stat().st_size / 1024
             if kb > threshold:
                 out.append(("notice", f"{name} weighs {kb:.0f} KB (threshold {threshold} KB) — "
@@ -188,11 +235,12 @@ def versions_from_git(repo):
     {subsection header: longest block} for Task history (rows are added legitimately)."""
     shas = subprocess.run(["git", "-C", str(repo), "log", "--format=%H", "--", "telesma/state/REPORT.md"],
                           capture_output=True, text=True).stdout.split()
+    # History is read as UTF-8 whatever the locale says; a CRLF version compares as LF lines.
     log, hist = {}, {}
     for s in reversed(shas):                     # oldest first
         txt = subprocess.run(["git", "-C", str(repo), "show", f"{s}:telesma/state/REPORT.md"],
-                             capture_output=True, text=True).stdout
-        t = txt.split("\n")
+                             capture_output=True).stdout.decode("utf-8", "replace")
+        t = txt.replace("\r\n", "\n").split("\n")
         for title, target, start in (("## Problem log", log, lambda l: OPEN.match(l.lstrip())),
                                      ("## Task history", hist, lambda l: l.startswith("### "))):
             s_ = section(t, title)
@@ -215,13 +263,17 @@ def repair_report(state, log, hist, in_archive=""):
     - Task history: we ADD table rows missing from a subsection. Nothing is removed — prose
       under the table and anything written later stays untouched.
     - Problem log: we replace a block with the git version only when EVERY disappearing line
-      is already in the archive. Otherwise the block stays as it is.
+      is already in the archive — as a whole line, not as a fragment of some other sentence.
+      Otherwise the block stays as it is.
+
+    A section in which nothing is restored or removed is not rewritten at all.
     """
     changes = []
     report = state / "REPORT.md"
     if not report.is_file():
         return changes
-    t = report.read_text(encoding="utf-8").split("\n")
+    t = load(report)
+    archived = {l.strip() for l in in_archive.replace("\r\n", "\n").split("\n") if l.strip()}
 
     # --- Task history: add missing table rows ---
     s_ = section(t, "## Task history")
@@ -267,7 +319,7 @@ def repair_report(state, log, hist, in_archive=""):
                 old = t[k:replace[k]]
                 lost = [l for l in old if l.strip() and l not in (canon or "").split("\n")]
                 if canon and canon.rstrip() != "\n".join(old).rstrip() \
-                        and all(l.strip() in in_archive for l in lost):
+                        and all(l.strip() in archived for l in lost):
                     new_lines += canon.split("\n")
                     restored += 1
                     removed += len(lost)
@@ -281,16 +333,18 @@ def repair_report(state, log, hist, in_archive=""):
             # A line outside any entry is an orphan of an entry whose first line the old
             # rotation took away. We remove it ONLY when its text is already in the archive.
             if (t[k].strip() and not t[k].lstrip().startswith(("<!--", "|", "#"))
-                    and t[k].strip() in in_archive):
+                    and t[k].strip() in archived):
                 removed += 1
                 continue
             new_lines.append(t[k])
         if restored or removed:
             changes.append(f"Problem log: {restored} entries restored from history, "
                            f"{removed} orphaned lines removed")
-        t = t[:i] + new_lines + t[j:]
+            # Blank lines are tidied in the rewritten section only — the rest of the file
+            # (a code block with three empty lines, say) is not the repair's to reformat.
+            t = t[:i] + squeeze_blanks(new_lines) + t[j:]
 
-    report.write_text("\n".join(squeeze_blanks(t)), encoding="utf-8")
+    save(report, t)
     return changes
 
 
@@ -300,7 +354,7 @@ def repair_archive(state, log):
     arch = state / "REPORT_ARCHIVE.md"
     if not arch.is_file():
         return []
-    a = arch.read_text(encoding="utf-8").split("\n")
+    a = load(arch)
     bounds = [k for k, l in enumerate(a)
               if l.startswith(("### ", "## ")) or (l.strip() and OPEN.match(l.strip()))]
     in_log, healed, out, skip = False, 0, [], set()
@@ -316,7 +370,12 @@ def repair_archive(state, log):
             while end - 1 > k and not a[end - 1].strip():
                 end -= 1
             canon, old = log.get(l.strip()), "\n".join(a[k:end])
-            if canon and canon.rstrip() != old.rstrip():
+            # A stump is a PART of the entry as git first saw it. A block with a line the git
+            # version does not have is not a stump: somebody (Claude with a lesson, a person by
+            # hand, perhaps never committed) wrote more — replacing it would delete that.
+            kept = {x.strip() for x in (canon or "").split("\n")}
+            if canon and canon.rstrip() != old.rstrip() \
+                    and all(x.strip() in kept for x in a[k:end] if x.strip()):
                 out += canon.split("\n")
                 healed += 1
                 skip |= set(range(k, end))
@@ -328,7 +387,7 @@ def repair_archive(state, log):
             "Stumps in `### Problem log` blocks completed with full text from git history.",
             "Reason: the rotation from before version 6 archived the first line of an entry "
             "instead of the block.", ""]
-    arch.write_text("\n".join(out), encoding="utf-8")
+    save(arch, out)
     return [f"REPORT_ARCHIVE.md: {healed} stumps completed with full text"]
 
 
@@ -346,7 +405,7 @@ def restore_phases(state):
     plan, arch = state / "PLAN.md", state / "PLAN_ARCHIVE.md"
     if not (plan.is_file() and arch.is_file()):
         return []
-    a = arch.read_text(encoding="utf-8").split("\n")
+    a = load(arch)
     starts = [k for k, l in enumerate(a) if PHASE.match(l)]
     candidates = []
     for n, k in enumerate(starts):
@@ -359,7 +418,7 @@ def restore_phases(state):
     if not candidates:
         return []
 
-    t = plan.read_text(encoding="utf-8").split("\n")
+    t = load(plan)
     restored, skipped, taken = [], [], set()
     for pid, k, e in candidates:
         stub = next((m for m, l in enumerate(t)
@@ -378,7 +437,7 @@ def restore_phases(state):
         return [f"PLAN_ARCHIVE.md: phases {', '.join(skipped)} have unfinished tasks, "
                 f"but PLAN.md has no stub for them — restore them by hand"] if skipped else []
 
-    plan.write_text("\n".join(t), encoding="utf-8")
+    save(plan, t)
     drop = {i for pid, k, e in candidates if pid in taken for i in range(k, e)}
     marker = {k: pid for pid, k, e in candidates if pid in taken}
     out = []
@@ -389,7 +448,7 @@ def restore_phases(state):
                        f"so it must not have been archived.")
         if i not in drop:
             out.append(l)
-    arch.write_text("\n".join(out), encoding="utf-8")
+    save(arch, out)
     msgs = [f"PLAN.md: phases with unfinished work restored from the archive: {', '.join(restored)}"]
     if skipped:
         msgs.append(f"PLAN_ARCHIVE.md: phases {', '.join(skipped)} have no stub in the plan — "
@@ -416,7 +475,7 @@ def move_notes(state, repo):
     plan, report = state / "PLAN.md", state / "REPORT.md"
     if not (plan.is_file() and report.is_file()):
         return []
-    t = plan.read_text(encoding="utf-8").split("\n")
+    t = load(plan)
     phase, notes = "?", []
     for i, l in enumerate(t):
         m = PHASE.match(l)
@@ -431,7 +490,7 @@ def move_notes(state, repo):
         return ["PLAN.md: notes posing as tasks left alone — not every one can be dated "
                 "from git history (the date drives the entry's rotation in REPORT.md)"]
 
-    r = report.read_text(encoding="utf-8").split("\n")
+    r = load(report)
     s = section(r, "## Task history")
     if not s:
         return ["REPORT.md: no `## Task history` section — the notes stay in PLAN.md"]
@@ -457,17 +516,21 @@ def move_notes(state, repo):
             new_sections += ["", f"### Phase {f} — implementation notes moved from PLAN.md "
                                  f"({g['date']})", ""] + lines
     out = []
+
+    def add(chunk):
+        # an inserted chunk opens with a blank line; no third one in a row where two stand
+        skip = chunk[:1] == [""] and len(out) >= 2 and not out[-1].strip() and not out[-2].strip()
+        out.extend(chunk[1:] if skip else chunk)
     for k, l in enumerate(r):
         if k in inserts:
-            out += inserts[k]
+            add(inserts[k])
         if k == j:
-            out += new_sections + [""]
+            add(new_sections + [""])
         out.append(l)
     if j >= len(r):
-        out += new_sections
-    report.write_text("\n".join(squeeze_blanks(out)), encoding="utf-8")
-    plan.write_text("\n".join(l for k, l in enumerate(t) if k not in {i for i, _, _ in notes}),
-                    encoding="utf-8")
+        add(new_sections)
+    save(report, out)
+    save(plan, [l for k, l in enumerate(t) if k not in {i for i, _, _ in notes}])
     return [f"PLAN.md → REPORT.md: {len(notes)} notes posing as tasks moved "
             f"to `## Task history` ({len(groups)} phases)"]
 
@@ -506,7 +569,7 @@ def repair_plan(state):
     plan = state / "PLAN.md"
     if not plan.is_file():
         return []
-    t = plan.read_text(encoding="utf-8").split("\n")
+    t = load(plan)
     phase, notes, new, extracted, wrapped = "?", [], [], 0, 0
     for line in t:
         m = re.match(r"^### Phase ([\w.]+)", line)
@@ -535,16 +598,21 @@ def repair_plan(state):
         wrapped += 1
     if not (extracted or wrapped):
         return []
-    plan.write_text("\n".join(new), encoding="utf-8")
     if notes:
-        with (state / "PLAN_ARCHIVE.md").open("a", encoding="utf-8") as f:
-            f.write(f"\n## Implementation notes moved from PLAN.md "
-                    f"({datetime.date.today().isoformat()})\n\n"
-                    "Appended as `<!-- … -->` to task lines: the plan carried a record of HOW\n"
-                    "the work went, not just its scope, and took it into every session's prompt.\n"
-                    "Text unchanged.\n\n")
-            for phase, tid, note in notes:
-                f.write(f"- **Phase {phase}, task {tid}**: {note}\n")
+        # The archive first: if the run dies between the two writes, the notes exist twice
+        # rather than nowhere.
+        arch = state / "PLAN_ARCHIVE.md"
+        a = load(arch) if arch.is_file() else []
+        if a and not a[-1].strip():
+            a.pop()                     # the file's final newline; put back below
+        a += (["", ""] if a else []) + [
+            f"## Implementation notes moved from PLAN.md ({datetime.date.today().isoformat()})", "",
+            "Appended as `<!-- … -->` to task lines: the plan carried a record of HOW",
+            "the work went, not just its scope, and took it into every session's prompt.",
+            "Text unchanged.", ""]
+        a += [f"- **Phase {phase}, task {tid}**: {note}" for phase, tid, note in notes] + [""]
+        save(arch, a)
+    save(plan, new)
     return [f"PLAN.md: {extracted} `<!-- -->` notes → PLAN_ARCHIVE.md, "
             f"{wrapped} tasks broken into continuation lines"]
 
@@ -557,14 +625,26 @@ def main():
     project = Path(a.project).expanduser().resolve()
     state = project / "telesma" / "state"
     if not state.is_dir():
-        print(f"No directory {telesma}", file=sys.stderr)
+        print(f"No directory {state}", file=sys.stderr)
         return 2
 
-    findings = diagnose(state)
+    findings = diagnose(state, context=not a.fix)
     if not a.fix:
         for severity, msg in findings:
             print(f"{severity}\t{msg}")
         return 0
+
+    # A file that is not UTF-8 cannot be rewritten without guessing its bytes: refuse the whole
+    # repair before the first write, rather than repair half of the state.
+    for name in ("REPORT.md", "REPORT_ARCHIVE.md", "PLAN.md", "PLAN_ARCHIVE.md"):
+        f = state / name
+        if f.is_file():
+            try:
+                f.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as e:
+                print(f"telesma/state/{name} is not valid UTF-8 (byte {e.start}) — nothing was "
+                      f"changed. Save the file as UTF-8 and run the repair again.", file=sys.stderr)
+                return 2
 
     is_git = (project / ".git").exists()
     changes = []
@@ -574,8 +654,7 @@ def main():
         # report (the condition for removal is that the text already exists somewhere).
         changes += repair_archive(state, log)
         a = state / "REPORT_ARCHIVE.md"
-        changes += repair_report(state, log, hist,
-                                 a.read_text(encoding="utf-8") if a.is_file() else "")
+        changes += repair_report(state, log, hist, "\n".join(load(a)) if a.is_file() else "")
     else:
         print("⚠ This is not a git repository — entries cut in half cannot be restored. "
               "Repairing PLAN.md only.")
@@ -585,7 +664,7 @@ def main():
         changes += move_notes(state, project)
     print("\n".join(f"  ✓ {c}" for c in changes) if changes else
           "Nothing needed changing — the state files are consistent.")
-    left = [m for s, m in diagnose(state) if s == "damage"]
+    left = [m for s, m in diagnose(state, context=False) if s == "damage"]
     if left:
         print("\nLeft for a human to decide (cannot be repaired mechanically):")
         print("\n".join(f"  • {m}" for m in left))

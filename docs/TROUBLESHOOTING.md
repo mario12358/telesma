@@ -55,6 +55,35 @@ of the phase.
 Start again with `telesma.sh /path/to/project -i`. Telesma reads `telesma/state/QUESTIONS.md` and resumes from
 the first unanswered item.
 
+## The start asks to accept the project's settings, or stops with "nobody here has confirmed them"
+
+`telesma/config.md` came with the project or changed (a pull, an edit, the session itself) in a
+section that runs commands, sets permissions or names an endpoint. In a terminal Telesma shows the
+values and asks once; read them — a test command or an allow rule you do not recognise is the
+reason this question exists. Without a terminal (CI) set `TELESMA_TRUST_CONFIG=yes` for a config
+you trust. Telemetry to your own server and a judge key from `cmd:`/`file:` stay off until the
+section is confirmed on the machine. Details:
+[CONFIGURATION.md](CONFIGURATION.md#trust-gate-configmd-on-this-machine).
+
+## "Telesma is already running on this project"
+
+A second launcher on the same project would overwrite the first one's files. Close the other one;
+if none is running (a window was closed hard and the process named in the message is gone, the
+lock is taken over by itself; otherwise delete `telesma/state/.telesma-lock/`).
+
+## "This project was last run by a newer Telesma" / the version file "does not hold a format number"
+
+Update Telesma (`git -C <telesma> pull --ff-only`) for the first. The second means
+`telesma/state/.telesma-version` is empty, damaged or carries a merge conflict: put back the number
+from `git log -p -- telesma/state/.telesma-version`.
+
+## "Files that supervise the session differ from every version Telesma has delivered"
+
+`.claude/hooks/telesma-permission-judge.py` or a file in `telesma/checks/` is neither the current
+template nor an earlier one. Your own edit: the line is a reminder, shown at every start. Not your
+edit: compare with `templates/` in the Telesma clone and copy the file back — nothing is restored
+automatically.
+
 ## Startup reports config errors
 
 `Test command` or `Full suite command` is missing or still a `[…]` placeholder. Fill them in
@@ -92,6 +121,32 @@ and may be edited at any time.
 Links in `telesma/spec/ux_ui/LINKS.md` must be shared (public or share links); Telesma cannot fetch a private
 artifact. The launcher warns about unreachable links at startup, and a task that needs one blocks.
 
+## A command was refused by the sandbox
+
+With `## Sandbox → Enabled: yes` a Bash command may write only inside the project (plus the
+`## Working directories`, the temporary directory and the stack's caches) and reach only the
+stack's registries and the hosts you list. A refusal shows up as "Operation not permitted",
+"Read-only file system", or a connection the proxy refused. Claude does not retry it outside the
+sandbox; in an autonomous run it reports `TELESMA BLOCKED` with the command.
+
+- A host the build needs → `Allowed hosts` (`- api.example.com`).
+- A cache or tool directory outside the project → `Writable paths` (`- ~/.cache/my-tool`).
+- A tool that cannot run sandboxed (Docker, some simulators) → `Excluded commands`
+  (`- docker compose *`). It then runs with all your rights.
+- A test that writes into your home directory (an installer test, shell config) → better fixed in
+  the test: a temporary `HOME` keeps it inside the sandbox and away from your real files.
+- `Enabled: no` turns it off for the project.
+
+These fields are under the trust gate, so the next start shows the change and asks once. A host
+or cache your stack always needs and Telesma did not add is worth an issue.
+
+## The task tool refused `done`
+
+The refusal says why and what to run: failing tests, 0 tests run, a quality-check finding, an
+unconfirmed `## Tests` section on this machine, a task that is not the reserved one. PLAN.md and
+REPORT.md are left as they were. After `Max refusals per task` refusals for one task the session
+stops with `TELESMA BLOCKED`; the next start shows the reason and asks whether to go on.
+
 ## A quality check stopped a commit
 
 Read the list: check, `file:line`, message, fingerprint. A real problem is fixed by Claude, which
@@ -104,18 +159,20 @@ refused. Write first, then commit in a separate command. Details: [CHECKS.md](CH
 
 ## The `Telesma: checks (local)` status on a PR is red
 
-"No evidence for … commits" means a commit was made outside the hook (by hand, with `--no-verify`, or
-before the checks were enabled). Claude fixes it with `git commit --amend --no-edit` as a plain command
-and `git push --force-with-lease` to its own task branch. "A check did not run" means a tool was
+"No evidence for … commits" means a commit was made outside the task tool and the hook (by hand, with
+`--no-verify`, or before the checks were enabled). The agent cannot rewrite history, so this one is
+yours: on the task branch, `git commit --amend --no-edit` and `git push --force-with-lease`. "A check did not run" means a tool was
 missing or a time limit was hit on some commit — the operation went through without that check.
 
 ## A release version is not offered or not created
 
 Telesma proposes a release only when there are commits since the last `v*` tag and the last full suite
-was green. Tagging is refused on a red suite, a dirty working tree (often uncommitted
-`telesma/state/*_ARCHIVE.md` files from rotation — commit them), an existing tag of the same name, or, with
-checks enabled, an open `telesma: weakening` marker. After tagging, remember that tags are not pushed by
-a plain `git push`: run `git push origin vX.Y.Z`.
+was green. `telesma-task.py release` refuses without a green full suite recorded on this machine for
+this state (`suite --full`), on a dirty working tree (often uncommitted `telesma/state/*_ARCHIVE.md`
+files from rotation — commit them), without the committed scenarios file, on an existing tag of the
+same name, or, with checks enabled, on an open `telesma: weakening` marker. It always asks you, and it
+is refused in `bypassPermissions` and `dontAsk`, where a question reaches nobody. After tagging,
+remember that tags are not pushed by a plain `git push`: run `git push origin vX.Y.Z`.
 
 ## A PR was merged on a red check, or a release tag was pushed by Telesma
 

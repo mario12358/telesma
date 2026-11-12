@@ -102,8 +102,12 @@ done
 # 5. Required checks — job names from the workflows as a hint
 HINT=""
 if ls "$PROJECT_DIR"/.github/workflows/*.yml &> /dev/null; then
-    HINT=$(grep -h -E '^\s{2}[A-Za-z0-9_-]+:\s*$' "$PROJECT_DIR"/.github/workflows/*.yml 2>/dev/null \
-           | sed -E 's/^\s*//; s/:\s*$//' | grep -v -E '^(on|jobs|env|permissions|concurrency|defaults)$' | sort -u | paste -sd ',' - | sed 's/,/, /g')
+    # Only the keys directly under `jobs:` — `push:` under `on:` is indented the same way and is
+    # not a check. [[:space:]], not \s: the sed and awk of macOS do not know it.
+    HINT=$(awk '/^jobs:[[:space:]]*(#.*)?$/ { j = 1; next }
+                /^[^[:space:]#]/ { j = 0 }
+                j && /^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/ { sub(/^  /, ""); sub(/:.*$/, ""); print }' \
+               "$PROJECT_DIR"/.github/workflows/*.yml 2>/dev/null | sort -u | paste -sd ',' - | sed 's/,/, /g')
 fi
 CHECKS=$(config_field Integrations "Required checks"); [[ "$CHECKS" == "none" ]] && CHECKS=""
 CHECKS=$(ask_value "Required checks (comma-separated names; empty = none)" "${CHECKS:-$HINT}")

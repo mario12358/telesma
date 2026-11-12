@@ -9,6 +9,8 @@
 # Every installation asks first. Running it again keeps what is there and updates Telesma.
 # The script arrives on stdin, so every answer is read from /dev/tty. Its lines come from
 # templates/messages/<lang>.txt (fetched before the clone, English when there is none).
+# Installed is the latest release (the newest vX.Y.Z tag on the branch); TELESMA_FOLLOW_BRANCH=1
+# installs the branch tip instead and makes the launcher's update follow the branch too.
 # Overrides (tests, forks): TELESMA_REPO (a URL or a local clone), TELESMA_BRANCH,
 # TELESMA_INSTALL_DIR, TELESMA_PROJECTS, TELESMA_DESKTOP, TELESMA_APPS.
 
@@ -57,6 +59,15 @@ ask() {
 step() { echo ""; echo -e "${GREEN}$1${NC}"; }
 fail() { echo -e "${RED}$1${NC}"; exit 1; }
 
+# What to install from the commit just fetched ($1: FETCH_HEAD or HEAD): the newest release tag
+# (vX.Y.Z) reachable from it — a release is what was announced, not whatever the branch holds past
+# it. No release yet, or TELESMA_FOLLOW_BRANCH=1 (developers, forks): that commit itself.
+install_ref() {
+    local tag=""
+    [[ -n "${TELESMA_FOLLOW_BRANCH:-}" ]] || tag=$(git -C "$DEST" describe --tags --abbrev=0 --match 'v*' "$1" 2>/dev/null || true)
+    if [[ -n "$tag" ]]; then echo "refs/tags/$tag"; else echo "$1"; fi
+}
+
 if ! { true < /dev/tty; } 2>/dev/null; then
     echo "The Telesma installer asks before it installs anything: run it in a Terminal window."
     exit 1
@@ -87,7 +98,13 @@ main() {
         ask "  $(msg inst.ok 'Go ahead?')" || fail "$(msg inst.stop 'Stopped. Run the installer again when you are ready.')"
         xcode-select --install > /dev/null 2>&1 || true
         echo -e "  $(msg inst.git.wait 'Click «Install» in that window and wait — this window carries on when it is done.')"
-        until git --version > /dev/null 2>&1; do sleep 5; done
+        # not forever: a cancelled system window would leave this one waiting with nothing to say
+        local waited=0
+        until git --version > /dev/null 2>&1; do
+            sleep 5
+            waited=$((waited + 5))
+            (( waited < 1800 )) || fail "  $(msg inst.git.timeout 'The command line tools did not arrive. Run %s yourself, then the installer again.' 'xcode-select --install')"
+        done
         echo -e "  ✓ $(git --version)"
     else
         fail "  $(msg inst.git.other 'Install git and python3 with your system package manager (e.g. %s), then run the installer again.' 'sudo apt install git python3')"
@@ -103,11 +120,13 @@ main() {
     # The source and branch asked for, not the ones of the last run (another TELESMA_REPO/BRANCH).
     # A clone that cannot get there (another history, files git does not know, edits) is moved
     # aside whole — nothing in it is lost — and Telesma is downloaded again.
-    if [[ -d "$DEST/.git" ]] && ! { git -C "$DEST" remote set-url origin "$REPO" && git -C "$DEST" fetch -q origin "$BRANCH" \
+    # The release tags come with the fetch; the clone moves to the newest one (install_ref).
+    if [[ -d "$DEST/.git" ]] && ! { git -C "$DEST" remote set-url origin "$REPO" \
+            && git -C "$DEST" fetch -q origin "$BRANCH" 'refs/tags/v*:refs/tags/v*' \
             && { git -C "$DEST" checkout -q "$BRANCH" 2>/dev/null \
                  || { ! git -C "$DEST" show-ref --verify --quiet "refs/heads/$BRANCH" \
                       && git -C "$DEST" checkout -q -b "$BRANCH" FETCH_HEAD; }; } \
-            && git -C "$DEST" merge -q --ff-only FETCH_HEAD; } 2>/dev/null; then
+            && git -C "$DEST" merge -q --ff-only "$(install_ref FETCH_HEAD)"; } 2>/dev/null; then
         local aside
         aside="$DEST.old-$(date +%Y%m%d-%H%M%S)"
         mv "$DEST" "$aside" || fail "  $(msg inst.pull 'Telesma in %s could not be updated (changed by hand?).' "$DEST")"
@@ -119,6 +138,8 @@ main() {
         fail "  $(msg inst.exists '%s already exists and is not Telesma — move it away and run the installer again.' "$DEST")"
     else
         git clone -q --branch "$BRANCH" "$REPO" "$DEST"
+        # a fresh clone sits on the branch tip: put the branch on the release (nothing local yet)
+        git -C "$DEST" checkout -q -B "$BRANCH" "$(install_ref HEAD)"
         echo -e "  ✓ $(msg inst.cloned 'Telesma downloaded: %s' "$DEST")"
     fi
     # The `telesma` command for the terminal, next to where Claude Code's installer puts `claude`

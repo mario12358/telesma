@@ -1,127 +1,93 @@
 ## 17. Integration: git repository (GitHub)
 
-Active because `telesma/config.md` → `## Integrations` has `Repository: github`. This section **overrides**
-the indicated steps of sections 1, 3, 4 and 9 — the rest of CORE applies unchanged. Fields of the `## Integrations` section:
+Active because `telesma/config.md` → `## Integrations` has `Repository: github`. Fields of the section:
 `Repo`, `Merge` (auto | agent | manual), `Required checks`, `Open PR limit`, `Wait for merge`,
 `Max fixes per PR`, `Branch prefix`.
 
 The definition of "task done" changes to: **PR merged into main**. Opening a PR is not the end of
-the task. In the plan you record the state "PR open, waiting" with the tag `(pr: #<n>)` on the task line, next to
-the `[ ]` checkbox; after the merge the checkbox becomes `[x]`, the tag stays (audit + telemetry).
+the task. The whole GitHub side is done by the task tool (`TASK_TOOL`) — you never run `git push`,
+`git checkout`/`pull` on main, `gh pr create`, `gh pr merge`, `gh pr edit` or `gh api` yourself (a
+hook refuses them). Reading is yours: `gh pr view`, `gh pr checks`, `gh run view --log-failed`.
 
-### 17.1 Start of an iteration — reconciling PR state (BEFORE step 2 of section 1)
+### 17.1 What `next` does first — reconciling PR state
 
-Once per iteration, with one call:
+Before it hands out anything, `next` fetches, reads `gh pr list` and goes back to main as GitHub has
+it. Then, for every task with a PR (it finds them by the PR title `Telesma: Task N.M: …`):
 
-```bash
-git fetch origin
-gh pr list --state all --limit 100 --json number,state,headRefName,baseRefName,mergedAt,statusCheckRollup
-```
+| PR state | What the script does |
+|----------|----------------------|
+| `MERGED` | ticks the task, writes its `Task history` row (commit = the squash on main, `(#n)`), adds `(pr: #n)` to the task line — in the tree on main; they are committed by the state PR at the end of the phase (17.3) |
+| `OPEN`, required checks green, `Merge: agent` | merges it by squash — a chained successor is re-pointed to main **first** and the predecessor merged without `--delete-branch`, then the successor is rebased onto the new main and pushed with `--force-with-lease` (17.5) |
+| `OPEN`, a required check red | hands it out as `TELESMA PR FIX` before anything new (17.4) |
+| `OPEN`, pending / `Merge: manual` / `auto` | counts toward the limit; at `Open PR limit` → `TELESMA WAITING` (17.6) |
+| `CLOSED` without a merge | `TELESMA BLOCKED` — someone closed the PR by hand; no second PR for that task |
 
-For every task with `(pr: #n)` in PLAN.md:
+A required check that is missing counts as pending, never as green. Without `Required checks`
+any red check is red and anything running is pending.
 
-| PR state | What you do |
-|----------|-------------|
-| `MERGED` | `[ ]` → `[x]` in PLAN.md, a row in REPORT.md (Task history: commit = the squash on main). When other open PRs had `base` = this PR's branch → **17.5 rebase**. When it was the phase's last `[ ]` → **phase regression on main** (17.3, the paragraph on tags). |
-| `OPEN`, required check red | **Takes precedence** over any new task → 17.4. |
-| `OPEN`, checks green/pending | Counts toward the limit. `Merge: agent` and all required ones green → merge now (17.3 step 5). `Merge: manual` → waits for a human. |
-| `CLOSED` without merge | **TELESMA BLOCKED** — someone closed the PR by hand; do not guess why, do not open a new one. |
+### 17.2 Choosing a task — what `next` hands out
 
-After reconciling: `git checkout main && git pull --ff-only origin main`. Every new branch starts
-from the current main.
+- An independent task first: a task whose `(requires: X.Y)` has an open PR is unfinished. Only when
+  nothing independent is left, a **chain**: `next` says `Chain` and the branch starts from X.Y's
+  branch; its PR is based on that branch until X.Y is merged.
+- The task's branch `<Branch prefix><id>-<slug>` is created by `next`, off main or off the
+  predecessor's branch. One branch = one task. Stay on it until `done`.
+- Nothing to start while PRs wait: `next` watches the checks for up to `Wait for merge` (at most
+  8 minutes) and tells you to run it again.
 
-### 17.2 Choosing a task — limit and dependencies (steps 2-3 of section 1)
+### 17.3 Finishing a task — `done` on the task branch
 
-- Count `[ ]` with `(pr:)` = Telesma's open PRs. When ≥ `Open PR limit` and none of them is red
-  → **TELESMA WAITING** (17.6). Do not open another PR.
-- A task with `(requires: X.Y)`, where X.Y has `(pr:)` and `[ ]` (unmerged): treat it as an **unfinished**
-  dependency — take an independent task first. Only when no independent one is left:
-  a chain — a branch off X.Y's branch, `gh pr create --base <X.Y's branch>`. Note in REPORT.md that the PR is
-  chained (after X.Y is merged it has to be re-pointed — 17.5).
+`done` runs the tests and the checks, commits the task's work on its branch, pushes it and opens the
+PR — title = the commit subject (with the task id), body = the commit body with the trailers and the
+footer. A trailer the project needs goes in `--trailer` (with the Specky integration every PR body
+carries one: `Specky-Req: <id>@<hash7>`, or `Specky-Req: none` for a PR with no requirement behind
+it — a connected repository marks a PR without any trailer red). With `Merge: auto` it enables
+GitHub's auto-merge (squash). It does **not** tick the task and does not touch the state files of
+the branch: the tick, the `(pr: #n)` and the history row come from GitHub at the merge — parallel
+PRs editing neighbouring plan lines would collide at every merge.
 
-### 17.3 Finishing a task (INSTEAD OF step 12 of section 1)
+The phase regression runs **on main**, after all of the phase's tasks are merged: `next` says
+`TELESMA SUITE DUE`, `suite` runs the full suite on main, writes `**Regression after Phase N (date)
+— …**`, tags the phase on green and opens one **state PR** (`Telesma: state after Phase N`) with the
+ticks, the rows and the run; the next reconciliation merges it like any other. A red result on main
+is a regression with priority (section 2), also when the branch was green — squash and the merge
+order can assemble the code differently from how it sat on the branch. A full-suite run on a task
+branch is a `Preliminary run`, never tagged. Section 15 (releases) happens on main, after the state
+PR is merged.
 
-1. Branch: `git checkout -b <Branch prefix><id>-<slug>` (off main, or off the predecessor's branch — 17.2).
-   Slug: 2-4 ASCII words, hyphens. One branch = one task; never commit a task to main.
-2. Commit per section 4 (specific files; PLAN.md gets the `(pr:)` tag only after step 4 — so you commit PLAN.md
-   and REPORT.md in a **second** commit on the same branch, or with `--amend` before the push;
-   the simplest: `gh pr create` first, then add the tag, `git commit --amend --no-edit`, push).
-   Practical order: commit the code → push → PR → tag in the plan → amend → `git push --force-with-lease`.
-3. `git push -u origin <branch>`.
-4. `gh pr create --title "<commit subject>" --body "<commit body, with trailers>"` — title = the commit
-   subject (with the task id), body = the full commit body. The squash onto main takes the PR's title and body, so
-   trailers (e.g. `Specky-Req:`) must be in the body, otherwise they will not reach main. With the Specky
-   integration every PR body carries a trailer — `Specky-Req: <id>@<hash7>` or `Specky-Req: none` for a PR
-   with no requirement behind it (a connected repository marks a PR without any trailer red). PR number →
-   the tag `(pr: #n)` on the task line in PLAN.md.
-5. Merge per the `Merge` field:
-   - `auto`: `gh pr merge <n> --auto --squash --delete-branch`, then `gh pr checks <n> --watch`
-     with the `Wait for merge` time limit (one Bash call with a timeout; not a loop).
-   - `agent`: `gh pr checks <n> --watch --fail-fast` (limit `Wait for merge`) **as its own Bash call,
-     without a pipe** — `gh pr checks … | tail && gh pr merge …` hides the exit code of the checks and
-     merges on red. Read the result, and only when every one of the `Required checks` is green →
-     `gh pr merge <n> --squash --delete-branch` in a separate command. The permission hook checks
-     the checks once more itself and refuses a merge with a red, pending or missing required check —
-     a refusal despite "green" means some required check is **absent** (did not run); do not ask the
-     human for permission, check the workflow instead.
-   - `manual`: nothing — the PR waits for a human.
-6. Outcome: merged → `[x]` in the plan, REPORT.md, `git checkout main && git pull --ff-only`.
-   Not merged once `Wait for merge` has passed → the task stays `[ ]` with `(pr:)`, you move on to
-   the next one (17.2). A red check while waiting → 17.4.
+Every other commit (`commit --kind …`, `changes-done`) goes through its own branch and PR too —
+nothing lands on main directly. `next` waits for a `changes` or `regression` PR before it goes on:
+main does not hold it until it is merged.
 
-   `--delete-branch` in both modes **only when no open PR is based on this branch**
-   (`gh pr list --base <branch>` empty) — otherwise 17.5.
+### 17.4 Red required check — `TELESMA PR FIX`
 
-Phase tags (`telesma/phase-<ID>`), the full suite after a phase and section 15 (releases) are done on **main**
-after all of the phase's tasks are merged — not on a task branch. A full-suite run on a branch is
-**not** a phase regression: you record it in REPORT.md as
-`**Preliminary run after Phase N (date) — GREEN (branch <name>)**` and do not tag. The phase regression
-happens in 17.1, in the first iteration in which all of the phase's tasks are `[x]`: the full suite on
-main → the entry `**Regression after Phase N (date) — …**` → tag. A red result on main is a regression
-with priority (section 2), also when the preliminary run was green — squash and the merge order
-can assemble the code differently from how it sat on the branch.
+A fix **on the same branch**, never a new PR for the same task. `next` checks the branch out and says
+which check is red:
 
-### 17.4 Red required check
-
-A fix **on the same branch**, never a new PR for the same task:
-
-1. `gh pr checks <n>` + the job log (`gh run view --log-failed` when needed) → diagnosis.
+1. `gh pr checks <n>` + the job log (`gh run view --log-failed`) → diagnosis.
    The "Specky contract check" red → Specky's comment on the PR says exactly what: an outdated
    requirement hash (read the requirement again — section 18), a red criterion test, an open
    issue in Specky (that is the human's — TELESMA BLOCKED with a link).
-2. Fix it, tests locally, commit on the branch, `git push origin <branch>`. Back to 17.3 step 5.
-3. Counter: `Max fixes per PR` (separate from `Max tries per task`). Exhausted → TELESMA BLOCKED
-   with a link to the PR and the last diagnosis.
-4. An entry in REPORT.md → Problem log, opener: `[date] [check] PR #<n> — <check>: <cause>`.
+2. Fix it, an entry in REPORT.md → Problem log, opener: `[date] [check] PR #<n> — <check>: <cause>`.
    The `[check]` prefix is fixed — telemetry counts regressions caught by CI by it.
+3. `done` — it commits and pushes the fix to the same PR. `next` reads the checks again.
+4. `Max fixes per PR` fixes for one PR → the script stops with TELESMA BLOCKED and the PR's link.
 
-### 17.5 Branch chain — merging from the bottom, the successor re-pointed BEFORE the predecessor's merge
+### 17.5 Branch chain
 
-Merge always by squash (one commit = one task on main; release notes and
-telemetry stand on that). Squash changes the SHA, so a chained branch **must** be re-pointed, otherwise the PR
-shows the predecessor's diff and Specky sees foreign trailers. A PR whose base branch disappeared
-is **closed** by GitHub — it does not re-point it by itself (that is how PR #84 got closed in the reference project after
-`gh pr merge #83 --delete-branch`). So the order is fixed, one PR at a time from the bottom of the chain:
-
-```bash
-gh pr edit <successor> --base main                              # 1. FIRST the successor's new base
-gh pr merge <predecessor> --squash                              # 2. merge the predecessor WITHOUT --delete-branch
-git fetch origin
-git rebase --onto origin/main <predecessor-branch> <my-branch>  # 3. rebase the successor
-git push --force-with-lease origin <my-branch>
-```
-
-You delete the branches at the end, when the whole chain is on main (`git push origin --delete` asks
-the human — leave it to them, or use `gh pr merge --delete-branch` on the last PR of the chain).
-Do not delete the predecessor's local branch before the rebase (it is needed as the cut point); afterwards
-`git branch -d`. After every step `gh pr view <successor> --json state,baseRefName` — the state must be
-`OPEN`, the base `main`. `--force-with-lease` **only** on your own task branch; bare `--force` never.
-`gh pr edit` may be used only in the form `--base main` — the permission judge lets only that one through.
+Merge is always by squash (one commit = one task on main). Squash changes the SHA, so a chained
+branch has to be re-pointed and rebased; a PR whose base branch disappears is **closed** by GitHub.
+The script keeps the order — successor re-pointed to main, predecessor merged without
+`--delete-branch`, successor rebased onto the new main and pushed with `--force-with-lease` — one
+PR at a time from the bottom. What stays yours is a **rebase conflict**: `next` says
+`TELESMA REBASE CONFLICT` with the files; resolve the conflict markers in those files (edit only, no
+git commands) and run `next` again — it stages them, continues the rebase and pushes.
 
 ### 17.6 TELESMA WAITING — PR limit reached
 
-This is not an error and not a blocker: the loop did everything it could without a merge. Write `telesma/state/WAITING.md`
-(the script shows it at the next start; delete the file in 17.1 once the PRs are reconciled) and end the session:
+Not an error and not a blocker: the loop did everything it could without a merge. `next` writes
+`telesma/state/WAITING.md` (the launcher shows it at the next start; the next reconciliation removes
+it). Report it and end the session:
 
 ```
 TELESMA WAITING
@@ -132,12 +98,9 @@ Merge: <auto|agent|manual>. Nothing is broken. Run again after a merge.
 
 ### 17.7 What you do NOT do
 
-- You do not push to main or to someone else's branch; you do not use a refspec with `:` (`branch:main`).
-- No `gh pr merge` without `--squash`; no `--admin`; in `auto` mode you do not merge by hand.
-- You do not close PRs (`gh pr close`) and do not open a second PR for a task that has `(pr:)`.
-- You do not delete branches with `-D`; no `git reset --hard` on a branch with unmerged work.
-- No `--delete-branch` on a PR that another open PR is based on — GitHub will close the successor.
-- You do not record a run from a branch as "Regression after Phase" and do not tag a phase before the full
-  suite on main.
-- You do not check `[x]` before the merge — "tests green on my side" is not "merged".
-- Section 9 (TELESMA COMPLETE) only when **all** tasks are `[x]`, i.e. merged.
+- No git or gh writes yourself: no push, no merge, no `gh pr create/edit/close`, no `gh api` with
+  a method or fields — the hook refuses them and names the task-tool command.
+- You do not check `[x]` — the merge does, through the script.
+- You do not open a second PR for a task, and you do not record a run from a branch as "Regression
+  after Phase".
+- Section 9 (TELESMA COMPLETE) comes from `next`, only when **all** tasks are merged.

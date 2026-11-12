@@ -78,7 +78,7 @@ def prepare(tmp, plan, cfg):
 
 
 def plan_hint(tmp):
-    out, err, rc = run("PYPLAN", tmp / "PLAN.md", tmp / "config.md", tmp / "g", tmp / "spec")
+    out, err, rc = run("PYPLAN", tmp / "PLAN.md", tmp / "config.md", tmp / "g", tmp / "spec", TELESMA / "tools")
     assert rc == 0, err
     return out.split("\n", 1)[0].removeprefix("HINT:"), err
 
@@ -118,7 +118,7 @@ def test_plan():
         ok(hint.startswith("1.4 (chain — depends on unmerged: 1.2 (PR #6)"), f"chain as the last option (got: {hint!r})")
 
         # A phase with [ ] + (pr:) does not collapse in the prompt (the checkbox decides)
-        out, _, _ = run("PYPLAN", tmp / "PLAN.md", tmp / "config.md", tmp / "g", tmp / "spec")
+        out, _, _ = run("PYPLAN", tmp / "PLAN.md", tmp / "config.md", tmp / "g", tmp / "spec", TELESMA / "tools")
         ok("- [ ] Task 1.2: Model (pr: #6)" in out, "a task with a PR in progress stays in the prompt")
 
 
@@ -179,7 +179,7 @@ def run_launcher(tmp, project):
     fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     fake.chmod(0o755)
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-               TELESMA_NO_UPDATE_CHECK="1")
+               TELESMA_NO_UPDATE_CHECK="1", XDG_CONFIG_HOME=str(tmp / "xdg"))   # trust records: not this machine's
     return subprocess.run(["bash", str(TELESMA / "telesma.sh"), str(project)], env=env,
                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
                           start_new_session=True, timeout=60)

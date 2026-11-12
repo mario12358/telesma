@@ -556,8 +556,10 @@ guarded: a debugging aid "to be removed before deployment".
 - **Weakenings.** `telesma: weakening <id> — <reason>` marks a deliberate hole; the marker *is* the
   register. An incomplete marker or `MUTANT` blocks a commit; an open weakening warns at phase end
   and blocks the release tag; typical unmarked patterns (TLS off, debug, CSRF exemption) warn.
-- **Fail-open is explicit.** A timed-out hook lets the operation through, so the runner keeps its
-  own budget and reports a check that did not run as "the operation passed without it".
+- **Fail-open is explicit, and narrow.** A timed-out hook lets the operation through, so the runner
+  keeps its own budget and reports a check that did not run — a missing tool, a time limit, an
+  unreachable network — as "the operation passed without it". An internal error of the hook, a
+  crashed module or a command shape it cannot read refuses the commit instead (§22).
 - **Dependencies.** Model-written code invents plausible package names that anyone can register
   (*slopsquatting*). `dependencies` checks only packages new against HEAD: missing from the
   registry, under 7 days old, or a near-typo of a popular package → block; install scripts, git/URL
@@ -768,3 +770,189 @@ releases; the beginner path (`--new`) has no adoption variant. No structural tok
 beyond the two `Adopted` fields in `config.md` and the new spec file, so no parser changed; the
 telemetry `state` event carries an `adopted` flag so that adopted and greenfield projects are
 never compared as one population.
+
+## 22. The audit of 1.3.2: guarding by reading command text
+
+The first outside-in audit (2026-11-10) read the three mechanisms that supervise the agent — the
+permission judge, the quality checks, the protection of their own configuration — as an attacker
+would, and as a careless model would. The evaluation gate was green the whole time: 0 false allows
+on 220 dangerous cases. Twenty-nine commands outside that set were allowed by the rules alone.
+
+**What was wrong was not a rule but the reading.** Each mechanism parsed shell text on its own,
+with regular expressions, and each differently. A `<<` inside quotes was taken for a heredoc and
+the following lines — `rm -rf src`, `sudo …` — dropped as data. A heredoc body with `$(…)` was
+dropped too, though the shell runs it. A blocklist of options missed their abbreviations
+(`sort --outp=`). The checks computed "what this commit contains" from the literal arguments of
+`git add`, so `git add -u`, a glob, or a message with one odd quote left the scan with nothing to
+scan — the last one by accident, in the commit form Claude Code uses every day. The rule that
+followed: **what the parser cannot read is a question (judge) or a refusal of the shape (checks),
+never a pass** — and allowlists of exact options replace blocklists wherever a command is called
+a read.
+
+**A gate measures its own set.** Rules were tuned on the same 324 cases that gated them, so "zero
+false allows" was in-sample. There is now a held-out file that no rule is tuned against (it found
+28 allows in the old judge on its first run and none in the new one), and a mutation test that
+respells every dangerous case — quotes inside the command word, `git -C .`, an assignment prefix,
+a wrapper, an abbreviated option — and requires that no respelling is allowed. It found one more
+miss on its first run.
+
+**The committed config was executable.** `telesma/config.md` travels with the repository, and it
+held commands the launcher ran at start (`cmd:` keys, the adoption baseline), the permission mode
+and the endpoints. Cloning a project was enough to run its author's command. The fix is the
+`direnv allow` idea: a per-machine record of the hashes of the executable sections; the launcher
+shows what is new and asks once, and it is the only writer. The hook, the telemetry tool and the
+`lint-types` check only read the record, each with its own copy of a ten-line hash — the hook is
+copied into projects and cannot import anything. The per-machine telemetry opt-in had covered the
+shared hub only; a custom endpoint now needs the same confirmation.
+
+**The supervised could edit the supervision.** Exceptions, check modules and the config were
+protected by matching file paths in tool calls; an interpreter one-liner or a path in another
+letter case went around it, and approved commands were generalised into wildcards
+(`Bash(python3:*)`, `Bash(find:*)`) that were then committed for the whole team. Path comparison
+is now by real path and case-folded, the generalised families no longer include anything that
+runs code or deletes, and the launcher compares the installed hook and checks with what it
+delivered and says so at every start when they differ.
+
+**Documentation is part of the contract.** Four guarantees in `SECURITY.md` and `CLAUDE.md` did
+not hold as written (own-server telemetry without a per-machine step, checks printing the first
+characters of a password, exceptions writable without a question, repair deleting additions).
+Each was either made true or rewritten to say what the code does, and `SECURITY.md` gained a
+section on what Telesma does not protect against: there is no sandbox, and instructions to the
+model about untrusted text (section 0.7) are a mitigation, not a boundary.
+
+Deliberately left for later, because each changes how the loop behaves or what it costs: a
+sandboxed run, a session budget, an independent verifier before a task is ticked, parallel tasks
+in worktrees, a git-native `pre-commit` hook (it collides with a project's own hooks), and
+splitting the launcher's Python heredocs into tested modules. (1.4.0 took up the sandbox and the
+session budget: §23 and §24.)
+
+## 23. The task loop in a script: `next` and `done`
+
+The audit of §22 had one root: the model ran `git add` / `git commit` itself, so the checks had to
+guess from the text of a command what would be committed, and every bypass found was a new shape of
+that text. The task history row, the number of tries and the test result were written by the one
+being measured. Since format 21 the model decides **when** a task is finished, and a script decides
+**what happens then** (`tools/telesma-task.py`):
+
+- `next` chooses the task with the code the launcher's hint uses (`tools/telesma_state.py`), prints
+  it with its `- AC:` lines, the spec fragment of its `(spec:)` tag after checking every range
+  against its anchor (a shifted range is found again and the index corrected — procedure 0.1 step 4
+  was the step most often skipped), the guidelines in full the first time and on a change of tags,
+  the UI fragments and the change request. The terminal states — complete, blocked by dependencies
+  or an inactive phase, a missing guideline, only `⛔` left, change requests pending — are its
+  answers, not the model's judgement. It reserves the task in `.git/telesma-task/session.json`.
+- `done` takes the files from `git status` (minus `Ignore on commit` and this machine's files),
+  runs lint / tests / smoke only from a `## Tests` section confirmed on this machine (a run with
+  0 tests is a failure), writes the tick and the row, runs the commit-point checks on exactly
+  those files (`telesma-checks.py --files-commit`), commits and records the evidence
+  (`--record-commit`), so the PostToolUse hook has nothing left to verify after the fact. A refusal
+  restores PLAN.md and REPORT.md and counts a try.
+- `commit --kind changes|regression|survey|bugfix|review` is the same without a tick.
+
+Why an explicit command and not a hook: the `Stop` hook does not fire per task in a continuous
+session; a hook on the tick in PLAN.md would run minutes of tests inside a hook timeout, with the
+result poorly visible to the model; a `claude` process per task gives the cleanest trigger but gives
+up the continuous session (kept for later). The script runs from the Telesma clone, never copied
+into the project, and its allow rule is given per session with `--allowedTools`: written into
+`settings.local.json` it would sync into the committed config with a path of one machine.
+
+- `suite` is the full suite when one is due — after the last task of a phase, after a processed
+  change request. It writes the dated `Test status` paragraph and the metrics, commits them, runs the
+  `phase` checks and places the `telesma/phase-<id>` tag on green; on red it records a regression,
+  and `next` issues that regression instead of a task until the suite is green again. An adopted
+  project whose baseline was red is held to the baseline's number of failures, not to zero. The full
+  suite is a separate command, not part of `done`, because the Bash tool stops a command after ten
+  minutes: tests of the task plus a full suite in one call would not fit on a larger project.
+- `changes` issues the next change request (critical first) with the spec lines its `affects:` names
+  and the lines of the decision sources that share its words, verbatim with file and line — the
+  paraphrase from memory of §6 is not possible when the quote is on the screen. `changes-done`
+  refuses a plan edit that flips a checkbox, leaves a new or changed task without `(change: <file>)`
+  or names a dependency that does not exist; otherwise it writes the `Change history` entry with the
+  task lists read from the plan, moves the file and commits.
+
+- The "code only" guard (`tools/telesma-guard.py`) closes the other way round: a PreToolUse hook,
+  registered on every start independently of the judge and the checks, refuses `git add` / `commit`
+  / tag (other than a release version after the person's yes) / push / pull / merge / rebase / reset
+  of a ref / revert and the rest of the history writers, `gh` writes, a tick or untick in PLAN.md and
+  edits of `Task history`, `Test status` and `Change history`. Every refusal names the command that
+  does it. It reuses the checks runner's command parsing, refuses what it cannot read when a git
+  write is mentioned, and lets the call through on an internal error — it keeps a careless model on
+  the scripted path, it does not make a determined one harmless (a script it writes and runs is out
+  of its sight; the evidence and CI are the verifying layers).
+
+- The session budget (`## Telesma loop`) is counted by the same script: refused `done` per task,
+  handouts of the same task by `next`, finished tasks and hours per session. The launcher takes the
+  limits once (`session-start`), so an edit during the session changes nothing until the person
+  starts the next one. Past a limit the script writes BLOCKED.md and marks the session, the guard
+  lets through only reads and BLOCKED.md, and the next start asks the person whether to go on. A
+  tool-call counter (PostToolUse) only warns at 150 calls on one task: a hard threshold waits for
+  the distribution from real sessions. A cost limit in money waits for a live check of
+  `--max-budget-usd` in an interactive session.
+
+- `release vX.Y.Z` creates the release version: it refuses a dirty tree, a missing scenarios file,
+  an existing tag, a blocking `release` check, and code changed since the last green full suite on
+  record (state notes and the scenarios file may land in between). The guard answers the command
+  with `ask` whatever the allow rules and the mode — the one place where Telesma adds a question on
+  purpose — and with a refusal in `bypassPermissions` / `dontAsk`, where the question would reach
+  nobody. Before, the invariant was an instruction plus a parser of `git push`; in `auto` nobody was
+  asked at all.
+
+- With `Repository: github` the same commands do section 17 (`tools/telesma_github.py`): `next`
+  reconciles with `gh pr list`, merges by squash when the required checks are green (a missing one
+  is pending, never green), re-points a chained successor before the merge and rebases it after,
+  hands out a red PR as a fix on its own branch with a counter, and says WAITING at the PR limit;
+  `done` pushes the task branch and opens the PR. Task PRs carry the task's work only. The first
+  version put the tick and `(pr: #n)` into each task PR, and the test with a fake `gh` showed what
+  that does: two parallel PRs touching neighbouring plan lines conflict at the second merge. Now
+  what GitHub says is derived on main (ticks, `(pr: #n)` by the PR title, history rows, the phase
+  run) and committed by one state PR after the phase regression, when nothing parallel is left to
+  collide with. Every other commit goes through its own PR; `next` waits for a `changes` or
+  `regression` PR, because main does not hold it until it is merged. What stays the model's is a
+  rebase conflict (it edits the files, `next` continues the rebase) and the fix itself.
+
+What it does not do yet: the default allow rules for `git add` / `git commit` and the task-branch
+push rules of the GitHub integration are still written into new configs; the guard refuses those
+commands anyway, so they are dead weight to remove with a migration.
+
+
+## 24. The sandbox: a layer that does not read the command
+
+Everything before this section guards by reading: the judge reads a command's text, the checks read
+a diff, the guard reads the shape of a git command. A wrong reading runs with every right the
+person has. Claude Code's built-in sandbox (Seatbelt on macOS, bubblewrap on Linux and WSL2) does not
+read anything — Bash and what it starts write only inside the project, the extra directories and
+`$TMPDIR`, and reach the network only through a proxy with a host list. Format 22 writes it from
+`## Sandbox` (`templates/setup/sandbox.py`) into `settings.local.json` on every start, after the
+mode is final.
+
+The fixed values come from a live probe (2026-11-12, Claude Code 2.1.322) on a project the loop had
+just built:
+
+- **`allowUnsandboxedCommands: false`.** A write to `~` was refused by the sandbox, and the model
+  immediately retried the same command outside it. In a chat that reached a question; for the task
+  tool, whose session allow rule matched, the retry ran **without** one. Without this switch the
+  sandbox is one extra question, not a boundary.
+- **`autoAllowBashIfSandboxed: false`.** The questions and the judge stay; the sandbox is under them.
+  Reading the rest of the machine plus one allowed host is still a way out, so removing questions
+  waits for measurements.
+- **`strictAllowlist` in the autonomous modes.** An unknown host (`files.pythonhosted.org` during
+  `uv run`) opens a question; in mode 1 nobody answers it. The hosts therefore come from what
+  Telesma knows: the stacks (manifests, or the plan's `(tech:)` tags before the first manifest),
+  the checks (registries, OSV) and the GitHub integration; `Allowed hosts` adds the rest.
+- **Package caches are writable.** `uv` refused to start because `~/.cache/uv` is outside the
+  project; the model worked around it with a cold cache in `$TMPDIR`. Each stack's cache
+  directories are allowed; `CORE.md` §5 forbids moving a cache to get around the boundary.
+- **What stays readable.** The plan had `denyRead` on `~/.config/telesma`; the task tool runs through
+  Bash, inside the sandbox, and reads the trust record from there. With the GitHub integration
+  `~/.config/gh` stays readable for the same reason. The person's keys (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.netrc`, cloud configs) are not.
+- **Tests and the proxy.** A test environment built from an allow-list (the guideline after the
+  `~/.zshenv` incident) dropped `HTTPS_PROXY` and failed on DNS; `general.md` keeps the proxy
+  variables on the list.
+
+Measured cost: 1.58 s against 1.44 s for the same 94 tests with a warm cache — the sandbox is not a
+reason to keep it off. Existing projects get `Enabled: no` through the merge and a one-line tip;
+a config the launcher creates starts with `yes` where the sandbox can run. Native Windows has no
+sandbox: `yes` warns, `required` stops the start. `Enabled: no` removes the key only while it is
+still exactly what Telesma wrote, and on every update the hosts and paths the person allowed in
+Claude Code stay (`.git/telesma-task/sandbox.json` remembers which values were Telesma's own).

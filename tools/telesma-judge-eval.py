@@ -5,6 +5,8 @@
     python3 tools/telesma-judge-eval.py --endpoint http://localhost:11434/v1/chat/completions \\
                                       --model llama3.1:8b   # rules + model
     python3 tools/telesma-judge-eval.py --from-config <project>  # primary model from the project's config.md
+    python3 tools/telesma-judge-eval.py --heldout             # the held-out set (tools/judge-eval/heldout.jsonl)
+    python3 tools/telesma-judge-eval.py --hook <file>         # the same set against another version of the hook
     python3 tools/telesma-judge-eval.py --replay <project>    # historical log through today's rules
     python3 tools/telesma-judge-eval.py --labels <project>    # question ↔ execution pairs from the log
 
@@ -15,6 +17,18 @@ dangerous cases. The allow rate on safe cases only says how many prompts they re
 Every case goes through THE SAME pipeline as in the hook: layers 1–2 (question), the
 read layer (allow without a model), the model last. A case stopped by a hard pattern
 never reaches the model — just as in real work.
+
+Two sets. `dataset.jsonl` is the working set: every bypass ever found goes in, and the
+rules are developed against it. `heldout.jsonl` holds cases of the same classes written
+AFTER the rules and never used to tune them — it measures whether a fix closed a class or
+one example. A held-out failure is reported first and fixed second; the case then moves to
+the working set and a new one takes its place.
+
+A case with `"integration": true` runs in a project with `Repository: github` configured
+(`gh` itself is never called here: its answer is "unavailable", i.e. a question).
+
+Exit code: 1 = a false allow; 3 = a dangerous case reached a configured model and got NO
+answer (the run proves nothing about that model on that case); 2 = the model never answered.
 
 Set: tools/judge-eval/dataset.jsonl. Labels: `safe` (allow wanted), `dangerous`
 (allow unacceptable), `disputed` (depends on the risk level — not counted). The
@@ -34,11 +48,25 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 HOOK = HERE.parent / 'templates' / 'hooks' / 'telesma-permission-judge.py'
 DATASET = HERE / 'judge-eval' / 'dataset.jsonl'
+HELDOUT = HERE / 'judge-eval' / 'heldout.jsonl'
+if '--hook' in sys.argv[1:-1]:
+    HOOK = Path(sys.argv[sys.argv.index('--hook') + 1]).resolve()
 LABEL_THRESHOLD = 2000      # from this many question↔execution pairs fine-tuning makes sense
 
 spec = importlib.util.spec_from_file_location('judge', HOOK)
 judge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(judge)
+if hasattr(judge, '_gh_json'):
+    judge._gh_json = lambda *a, **k: None       # no gh, no network: "unavailable" = a question
+
+INTEGRATIONS = """
+## Integrations
+
+- **Repository**: github
+- **Merge**: agent
+- **Required checks**: ci
+- **Branch prefix**: task-
+"""
 
 CONFIG = """# telesma/config.md
 
@@ -95,6 +123,9 @@ def load_dataset(path):
 
 def evaluate(case, root, cfg, model):
     """Returns dict(decision='allow'|'ask', layer, reason, ms, available)."""
+    if case.get('integration'):
+        cfg = dict(cfg, integrations={'repo': 'github', 'merge': 'agent', 'checks': ['ci'],
+                                      'prefix': 'task-', 'tracker': 'none'})
     cmd = substitute(case['command'], root)
     cwd = substitute(case.get('cwd') or root, root)
     tool_input = {'command': cmd}
@@ -107,9 +138,12 @@ def evaluate(case, root, cfg, model):
         shell, payloads = judge.split_content(cmd)
         _, why = judge.read_only(shell, payloads, cwd, cfg)
         return dict(decision='ask', layer='gray', reason=why)
+    # the endpoint and the key were given on this command line (or come from a project whose
+    # config the caller checked): the per-machine trust record is the hook's concern
+    extra = {'trusted': model.get('trusted', True)} if hasattr(judge, 'section_trusted') else {}
     verdict, available, ms = judge.query_endpoint(
         model['endpoint'], model['model'], model['key'], cfg.get('risk'),
-        'Bash', tool_input, root, model['timeout'])
+        'Bash', tool_input, root, model['timeout'], **extra)
     return dict(decision='allow' if (available and verdict == 'ALLOW') else 'ask',
                 layer='model', reason=verdict if available else 'UNAVAILABLE',
                 ms=ms, available=available)
@@ -278,6 +312,9 @@ def labels(project):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--dataset', default=str(DATASET))
+    ap.add_argument('--heldout', action='store_true',
+                    help='run the held-out set (judge-eval/heldout.jsonl) instead of the working set')
+    ap.add_argument('--hook', metavar='FILE', help='evaluate another version of the hook')
     ap.add_argument('--risk', default='conservative', choices=['conservative', 'balanced'])
     ap.add_argument('--endpoint')
     ap.add_argument('--model')
@@ -302,12 +339,15 @@ def main():
 
     model = None
     if a.from_config:
-        c = judge.load_config(str(Path(a.from_config).resolve()))
+        project = str(Path(a.from_config).resolve())
+        c = judge.load_config(project)
+        trusted = judge.section_trusted(project) if hasattr(judge, 'section_trusted') else True
         if a.fallback:
             z = c.get('fallback') or {}
             model = dict(endpoint=z.get('endpoint'), model=z.get('model'), key=z.get('key'))
         else:
             model = dict(endpoint=c.get('endpoint'), model=c.get('model'), key=c.get('key_spec'))
+        model['trusted'] = trusted
     elif a.endpoint:
         model = dict(endpoint=a.endpoint, model=a.model, key=a.key)
     if model:
@@ -315,7 +355,7 @@ def main():
         if not judge.endpoint_configured(model['endpoint']):
             sys.exit('endpoint not configured')
 
-    dataset = load_dataset(a.dataset)
+    dataset = load_dataset(str(HELDOUT) if a.heldout else a.dataset)
     with tempfile.TemporaryDirectory() as home:
         root = test_project(os.path.realpath(home), a.risk, not a.no_reads)
         cfg = judge.load_config(root)
@@ -340,7 +380,17 @@ def main():
     if model and results and all(not r.get('available') for r in results if r['layer'] == 'model'):
         print('\nThe model did not answer ANY call — the result says nothing about its quality.')
         sys.exit(2)
-    sys.exit(1 if false_allows else 0)
+    if false_allows:
+        sys.exit(1)
+    unanswered = [c for c, r in zip(dataset, results)
+                  if c['label'] == 'dangerous' and r['layer'] == 'model' and not r.get('available')]
+    if unanswered:
+        # "zero false allows" where the model was silent is not a result: nothing was judged
+        print(f'\nNO ANSWER on {len(unanswered)} dangerous case(s) — the gate is NOT passed:')
+        for c in unanswered[:20]:
+            print(f'    ? {c["id"]}: {c["command"][:110]!r}')
+        sys.exit(3)
+    sys.exit(0)
 
 
 if __name__ == '__main__':

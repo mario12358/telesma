@@ -13,7 +13,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from _net import NoNetwork, Cache, address, fetch  # noqa: E402
+from _net import NoNetwork, Cache, address, fetch, quote  # noqa: E402
 
 try:
     import tomllib
@@ -199,6 +199,11 @@ def from_head(root, path):
     return r.stdout if r.returncode == 0 else ''
 
 
+def without_credentials(url):
+    """`https://user:token@host/…` → `https://***@host/…` — a registry address is shown, its login never."""
+    return re.sub(r'(://)[^/@\s]+@', r'\1***@', url)
+
+
 def private_scopes(root):
     """npm scopes with their own registry in .npmrc — their packages are not in the public one."""
     try:
@@ -220,8 +225,17 @@ def days_since(iso):
     return (datetime.datetime.now(datetime.timezone.utc) - t).days
 
 
+# Names a registry can hold at all. Anything else in a manifest is not sent anywhere — it is
+# reported as a name that cannot exist.
+VALID_NAME = {
+    'npm': re.compile(r'^(@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*$', re.I),
+    'pypi': re.compile(r'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$', re.I),
+    'jsr': re.compile(r'^@[a-z0-9-]+/[a-z0-9-]+$', re.I),
+}
+
+
 def npm_info(name):
-    code, d = fetch(f'{address("npm")}/{name.replace("/", "%2F")}')
+    code, d = fetch(f'{address("npm")}/{quote(name)}')
     if code == 404 or not d:
         return {'exists': False}
     latest = (d.get('dist-tags') or {}).get('latest')
@@ -230,7 +244,7 @@ def npm_info(name):
     info = {'exists': True, 'created': (d.get('time') or {}).get('created'),
             'scripts': scripts, 'deprecated': bool(version.get('deprecated'))}
     try:
-        code, p = fetch(f'{address("npm_downloads")}/{name}')
+        code, p = fetch(f'{address("npm_downloads")}/{quote(name).replace("%2F", "/")}')
         info['downloads'] = (p or {}).get('downloads') if code != 404 else 0
     except NoNetwork:
         info['downloads'] = None
@@ -238,7 +252,7 @@ def npm_info(name):
 
 
 def pypi_info(name):
-    code, d = fetch(f'{address("pypi")}/{name}/json')
+    code, d = fetch(f'{address("pypi")}/{quote(name)}/json')
     if code == 404 or not d:
         return {'exists': False}
     times = [f.get('upload_time_iso_8601') for files in (d.get('releases') or {}).values()
@@ -250,7 +264,7 @@ def jsr_info(name):
     m = re.match(r'^@([^/]+)/(.+)$', name)
     if not m:
         return {'exists': False}
-    code, d = fetch(f'{address("jsr")}/scopes/{m.group(1)}/packages/{m.group(2)}')
+    code, d = fetch(f'{address("jsr")}/scopes/{quote(m.group(1))}/packages/{quote(m.group(2))}')
     if code == 404 or not d:
         return {'exists': False}
     return {'exists': True, 'created': d.get('createdAt')}
@@ -292,7 +306,7 @@ def similar(eco, name):
 
 def main():
     root = os.environ.get('TELESMA_ROOT') or os.getcwd()
-    files = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+    files = [l for l in sys.stdin.read().split('\n') if l.strip()]
     new = {}            # (eco, name) → (file, spec)
     for p in files:
         base = os.path.basename(p)
@@ -304,9 +318,10 @@ def main():
                 continue
             for m in re.finditer(r'^\s*registry\s*=\s*(\S+)', text, re.M):
                 if 'registry.npmjs.org' not in m.group(1):
+                    shown = without_credentials(m.group(1))
                     emit(file=p, line=None, rule='other-registry', severity='warn',
-                         message=f'default npm registry changed to {m.group(1)} — make sure that is intended',
-                         content_fingerprint=m.group(1))
+                         message=f'default npm registry changed to {shown} — make sure that is intended',
+                         content_fingerprint=shown)
             continue
         if manifest(p, '')[0] is None:
             continue                  # not a manifest — not read (WAV, PNG in a commit broke decoding)
@@ -314,6 +329,12 @@ def main():
             with open(os.path.join(root, p), encoding='utf-8') as f:
                 text = f.read()
         except (OSError, UnicodeDecodeError):
+            continue
+        if base == 'pyproject.toml' and tomllib is None:
+            emit(file=p, line=None, rule='not-checked', severity='warn',
+                 message=f'this Python ({sys.version_info[0]}.{sys.version_info[1]}) cannot read TOML — the '
+                         f'dependencies in {base} were NOT checked; run Telesma with Python 3.11+',
+                 content_fingerprint='not-checked:no-tomllib')
             continue
         now, indexes = manifest(p, text)
         if now is None:
@@ -324,7 +345,7 @@ def main():
             emit(file=p, line=None, rule='extra-index', severity='warn',
                  message=f'"{ix.split()[0]}" — a package of the same name in two indexes is the '
                          f'dependency confusion route; make sure internal names are reserved',
-                 content_fingerprint=ix)
+                 content_fingerprint=without_credentials(ix))
         for eco, name, spec in now:
             if (eco, name) not in before:
                 new[(eco, name)] = (p, spec)
@@ -342,6 +363,12 @@ def main():
             continue
         if re.match(r'^(file|link|workspace|portal|patch):', spec or ''):
             continue
+        if not VALID_NAME[eco].match(name) or len(name) > 214:
+            emit(file=path, line=None, rule='not-found', severity='block',
+                 message=f'a dependency name the {REGISTRY[eco]} registry cannot hold ({len(name)} characters, '
+                         f'not a valid package name) — an invented name or a typo',
+                 content_fingerprint=f'{eco}:{name}:invalid')
+            continue
         to_check.append((eco, name, path))
     if not to_check:
         return 0
@@ -350,7 +377,8 @@ def main():
 
     def check(el):
         eco, name, _ = el
-        key = f'{eco}:{name}'
+        # the registry address is part of the key: an answer from one server says nothing about another
+        key = f'{address(eco)}|{eco}:{name}'
         cached = cache.get(key)
         if cached is not None:
             return el, cached
@@ -367,12 +395,12 @@ def main():
 
     def original_downloads(pair):
         eco, model = pair
-        key = f'downloads:{eco}:{model}'
+        key = f'{address("npm_downloads")}|downloads:{eco}:{model}'
         z = cache.get(key)
         if z is not None:
             return pair, z
         try:
-            code, d = fetch(f'{address("npm_downloads")}/{model}')
+            code, d = fetch(f'{address("npm_downloads")}/{quote(model)}')
         except NoNetwork:
             return pair, None
         n = (d or {}).get('downloads') if code != 404 else None

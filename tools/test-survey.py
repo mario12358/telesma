@@ -143,6 +143,32 @@ def test_other_schemes_and_no_git():
         ok(r.returncode == 0 and "SURVEY" in r.stdout, "no argument: usage")
 
 
+def test_special_files():
+    print("survey — a tracked symlink to a pipe, a pipe among the test results: skipped, never opened")
+    if not hasattr(os, "mkfifo"):
+        print("  - no FIFOs on this platform: skipped")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d) / "trap"
+        repo.mkdir()
+        os.mkfifo(Path(d) / "pipe")
+        git(repo, "init", "-q", "-b", "main")
+        commit(repo, "start", {"a.py": "x = 1  # TODO: one\n"}, "2025-01-10T10:00:00")
+        os.symlink(Path(d) / "pipe", repo / "evil.py")
+        os.symlink(Path(d) / "pipe", repo / "TEST-evil.xml")
+        git(repo, "add", "evil.py", "TEST-evil.xml")
+        git(repo, "commit", "-q", "-m", "a link to a pipe", date="2025-01-11T10:00:00")
+        os.mkfifo(repo / "junit-pipe.xml")
+        for args, what in (((repo,), "the block"), ((repo, "--test-results", "--since", "0"), "--test-results")):
+            try:
+                r = subprocess.run([sys.executable, "-I", str(TOOL), *map(str, args)],
+                                   capture_output=True, text=True, timeout=30)
+                ok(r.returncode == 0 and (what != "the block" or "TODO/FIXME/HACK: 1 in 1+ files" in r.stdout),
+                   f"{what}: finishes, the pipe behind the link is not read")
+            except subprocess.TimeoutExpired:
+                ok(False, f"{what}: hung on a pipe")
+
+
 def test_deep_layout_and_results():
     print("survey — a deep single-root layout is split by its children; the numbers of a test run")
     with tempfile.TemporaryDirectory() as d:
@@ -202,6 +228,7 @@ def test_deep_layout_and_results():
 if __name__ == "__main__":
     test_repo()
     test_other_schemes_and_no_git()
+    test_special_files()
     test_deep_layout_and_results()
     print()
     if FAILURES:

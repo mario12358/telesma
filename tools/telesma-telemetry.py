@@ -14,7 +14,11 @@ wizard), because `telesma/config.md` is committed and one person's `Send: yes` m
 everyone who clones the repo send. Without that file nothing goes out, whatever config.md says.
 To the shared hub the sender's name is never sent, and an empty `Project label` is the project
 hash, not the directory name (which often names a client). `Endpoint: <url>` = a server you run
-yourself, with `API key` from env/file/cmd — the key on each machine is that machine's opt-in.
+yourself, with `API key` from env/file/cmd. That path needs the `## Telemetry` section of
+config.md to be CONFIRMED ON THIS MACHINE (the trust record telesma.sh writes after a person saw
+it in a terminal, ~/.config/telesma/trust/): a committed endpoint, key or `cmd:` must not act on
+a machine whose user never saw it. Without the record no request is made and no command is run.
+Endpoints are https only (http for loopback).
 
 Reads files Telesma leaves in the project anyway, which nobody reads with an eye on the
 QUALITY OF THE FRAMEWORK: problem log, tries per task, bugfixes, reviews, blockers, outcomes
@@ -25,9 +29,11 @@ Two sources beyond the state files, because the report only says what Claude rem
 write: git history (task id from the commit subject → time, files, later fixes) and this
 machine's Claude Code transcripts (counters only: mode, model, tokens, tool errors).
 
-What does NOT leave the machine: `telesma/spec/`, code, `telesma/changes/` (written by a human about the
-product) or commands from PERMISSIONS.jsonl (they may hold secrets) — only counters go out
-of the judge log. What goes out is text Telesma wrote about its own work, after `scrub()`.
+What does NOT leave the machine: the files in `telesma/spec/`, source files, the files in
+`telesma/changes/` (written by a human about the product; not even their names) or commands from
+PERMISSIONS.jsonl (they may hold secrets) — only counters go out of the judge log. What goes out
+with scope `full` is the text of the entries in the state files, after `scrub()` — prose that
+may itself quote a file name, a line of code or the owner's words; scope `metrics` sends no text.
 
 An event id is a NATURAL key (project + type + entry opener), not a content hash: rotation
 moves an entry from REPORT.md to the archive, Claude appends a lesson to it — it is still the
@@ -41,6 +47,8 @@ import collections
 import datetime
 import getpass
 import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import re
@@ -49,6 +57,7 @@ import ssl
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -83,7 +92,7 @@ TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|e2e|spec)/|\.test\.|\.spec\.|(^|
 BUG_SOURCE = re.compile(r"\*\*Bug source\*\*:\s*(?:tasks?\s*)?`?(" + TASK_ID + r")", re.I)
 MODE = re.compile(r"MODE:\s*(autonomous|bugfix|review|artifacts)")
 GAP_MIN = 180
-COUNTERS_VERSION = 2    # bump when session_counters counts something new — invalidates the cache
+COUNTERS_VERSION = 3    # bump when session_counters counts something new — invalidates the cache
 TEST_RUN = re.compile(r"^\*\*[^*\n]*?(\d{4}-\d{2}-\d{2})")
 # "api+shared 276/0, web 185/0, e2e 45/45" — that is how projects on Deno, Vitest and
 # Playwright record runs: suite name, then passed/failed (e2e is sometimes passed/total). The
@@ -112,13 +121,41 @@ CACHE = Path.home() / ".cache" / "telesma"
 SHARED_HUB = os.environ.get("TELESMA_SHARED_HUB", "https://telesma-hub.specky.app:8443")
 CONSENT = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "telesma" / "hub"
 SCOPES = ("full", "metrics")
+# Per-machine files next to the opt-in: the salt of the identifiers that would otherwise be a
+# plain hash of an e-mail address or a directory name, and the trust records telesma.sh writes
+# (one per project: which sections of the committed config.md a person on this machine saw).
+SALT = CONSENT.parent / "salt"
+TRUST = CONSENT.parent / "trust"
+REPLY_BYTES = 1_000_000     # a hub reply is a few hundred bytes; more than this is not a reply
 
+# (pattern, replacement) in order — a URL with credentials goes before the e-mail rule, which
+# would otherwise read `password@host` as an address.
 SECRETS = [
-    re.compile(r"\b(sk|pk|ghp|gho|glpat|xox[abp])[-_][A-Za-z0-9_\-]{16,}"),
-    re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}"),
-    re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[=:]\s*[^\s`'\"]{6,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+     "[removed]"),
+    # scheme://user:password@host — the host goes too: with credentials in front it is an
+    # internal address more often than not
+    (re.compile(r"\b([a-z][a-z0-9+.-]*://)[^\s/@:]*:[^\s/@]*@[^\s/`'\")\]>]*", re.I), r"\1[removed]"),
+    (re.compile(r"\b(sk|pk|gh[pousr]|github_pat|glpat|xox[abp])[-_][A-Za-z0-9_\-]{16,}"),
+     r"\1 [removed]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[removed]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+)?"), "[removed]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"), "[removed]"),
+    (re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?:(basic|bearer|token)\s+)?[^\s`'\"]{6,}"),
+     r"\1[removed]"),
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}"), r"\1 [removed]"),
+    (re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[=:]\s*[^\s`'\"]{6,}"),
+     r"\1 [removed]"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"), "[e-mail]"),
 ]
+# Absolute paths outside the home directory (which becomes `~`): the directories name a machine,
+# a client or a colleague; the file name stays, it is what the entry is about. Only roots that
+# are file-system roots — `/api/users/me` in a log entry is a route, not a path.
+ABS_PATH = re.compile(
+    r"(?<![\w.~/:-])(?:/(?:Users|home|root|srv|var|opt|etc|mnt|media|tmp|private|Volumes|usr|"
+    r"workspace|workspaces|builds)(?=/)|[A-Za-z]:\\)(?:[^\s`'\"()<>|,;]*[/\\])?")
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+#:/\[\]-]{0,59}")
 
 
 # --- shared -------------------------------------------------------------------
@@ -127,9 +164,27 @@ def read_lines(p):
 
 
 def scrub(s):
-    for r in SECRETS:
-        s = r.sub(lambda m: (m.group(1) + " " if m.groups() else "") + "[removed]", s)
-    return s.replace(str(Path.home()), "~").strip()
+    for r, to in SECRETS:
+        s = r.sub(to, s)
+    return ABS_PATH.sub("[path]/", s.replace(str(Path.home()), "~")).strip()
+
+
+def token(v, limit=24):
+    """A value that is one of a few words (a config choice, a tag, a model or tool name), or
+    "other". Config values, plan tags and log fields are typed by a person or copied from a
+    file: whatever is not a single short word is not sent — these fields go out with scope
+    `metrics` too, where no free text may leave."""
+    if v is None:
+        return None
+    v = str(v).strip()
+    return v if len(v) <= limit and TOKEN.fullmatch(v) else "other"
+
+
+def clean(s, limit=300):
+    """Text that came from a server (a status line, an exception built from it), safe to store
+    and to print in a terminal: no control characters, and no backslash — the launcher prints
+    the last error with `echo -e`, which would turn a literal `\\033` into an escape."""
+    return CONTROL.sub(" ", str(s)).replace("\\", "/")[:limit]
 
 
 def cells(row):
@@ -193,28 +248,73 @@ def git(project, *a):
         return ""
 
 
+def salt():
+    """Per-install random salt (0600, next to the opt-in file), created on first use. With it
+    the sender id and the id of a project without a remote cannot be confirmed by hashing a
+    guessed e-mail address or directory name. A home that cannot be written gets a salt that
+    lives as long as the process — nothing is derived from an unsalted value."""
+    try:
+        v = SALT.read_text(encoding="utf-8").strip()
+        if re.fullmatch(r"[0-9a-f]{64}", v):
+            return v.encode()
+    except OSError:
+        pass
+    v = os.urandom(32).hex()
+    try:
+        SALT.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(SALT), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(v + "\n")
+        SALT.chmod(0o600)
+    except OSError:
+        pass
+    return v.encode()
+
+
+def salted(text):
+    return hmac.new(salt(), text.encode(), hashlib.sha256).hexdigest()
+
+
+def remote_key(url):
+    """`host[:port]/path` of a remote, the same for `https://host/o/r.git`, `ssh://git@host/o/r`
+    and the scp form `git@host:o/r.git` — one repository, one project id, however it was
+    cloned. Credentials in the URL are dropped. A port stays in the key: that is what a
+    `scheme://user@host:port/…` remote has always hashed to, and the ids of projects already
+    reported must not move."""
+    url = url.strip()
+    m = re.match(r"^\w+://(?:[^@/]*@)?([^/]+)/(.*)$", url)
+    if not m:
+        m = re.match(r"^(?:[^@/:]+@)?([^/:]+):(?!/)(.*)$", url)      # scp form
+    if m:
+        url = m.group(1) + "/" + m.group(2).lstrip("/")
+    return re.sub(r"\.git$", "", url.rstrip("/")).lower()
+
+
 def project_id(project):
     """Hash of the origin URL — the same project at two team members' machines must give the
-    same id. Without git, the directory name is used."""
-    url = re.sub(r"^\w+://[^@/]*@", "", git(project, "remote", "get-url", "origin"))
-    url = re.sub(r"\.git$", "", url).lower()
-    return hashlib.sha256((url or project.resolve().name).encode()).hexdigest()[:16]
+    same id. Without a remote there is nothing two machines share: the id is the directory
+    name under this machine's salt (a bare hash of a directory name can be looked up)."""
+    url = remote_key(git(project, "remote", "get-url", "origin"))
+    if url:
+        return hashlib.sha256(url.encode()).hexdigest()[:16]
+    return salted("project:" + project.resolve().name)[:16]
 
 
 def sender(project):
     """Who is sending. A write token may be shared by a whole team, so this — together with
     `project` in every event — is the only thing the server can tell people apart by. The
-    identity comes from git (`user.email` as seen from the project, so with a local override),
-    because it is the same on every machine of that person; the e-mail goes out as a hash, only
-    the name stays readable. Without git: OS user + host. A signature, not authentication —
-    access is guarded by the token."""
+    identity comes from git (`user.email` as seen from the project, so with a local override);
+    the e-mail goes out as an HMAC under this machine's salt (not a plain hash, which anyone
+    holding the data could confirm for a known address), only the name stays readable — and
+    only towards your own server. Without git: OS user + host. A signature, not
+    authentication — access is guarded by the token."""
     try:
         os_user = getpass.getuser()
     except (OSError, KeyError):
         os_user = "unknown"
     email = git(project, "config", "user.email") or f"{os_user}@{socket.gethostname()}"
     name = git(project, "config", "user.name") or os_user
-    return dict(id=hashlib.sha256(email.lower().encode()).hexdigest()[:12], name=name[:40])
+    return dict(id=salted("sender:" + email.lower())[:12], name=CONTROL.sub(" ", name)[:40])
 
 
 def versions_over_time(project):
@@ -249,6 +349,63 @@ def shared(endpoint):
     return e.lower() == "shared" or e == SHARED_HUB.rstrip("/")
 
 
+def endpoint_allowed(url):
+    """https, or http to this machine only. A token and the events do not travel in clear text
+    because a config field, the opt-in file or TELESMA_SHARED_HUB says `http://`."""
+    try:
+        u = urllib.parse.urlparse(url.strip())
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return bool(host)
+    if u.scheme != "http":
+        return False
+    try:
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def section_lines(project, name):
+    """The `- ` lines of section `## <name>` of telesma/config.md — what the trust record
+    hashes (the same definition in telesma.sh and the permission judge): the lines after the
+    first line equal to the heading, up to the next `## `, right-stripped."""
+    try:
+        lines = (project / "telesma" / "config.md").read_bytes().decode("utf-8", "replace") \
+            .split("\n")
+    except OSError:
+        return []
+    start = next((k for k, l in enumerate(lines) if l.rstrip() == f"## {name}"), None)
+    if start is None:
+        return []
+    end = next((k for k in range(start + 1, len(lines)) if lines[k].startswith("## ")),
+               len(lines))
+    return [l.rstrip() for l in lines[start + 1:end] if l.lstrip().startswith("- ")]
+
+
+def trusted_section(project, name="Telemetry"):
+    """{field: value} of the section when a person on THIS machine confirmed exactly these
+    lines (telesma.sh wrote their hash to ~/.config/telesma/trust/), else None. Read-only: this
+    tool never writes the record. The fields come from the hashed lines themselves, so a second
+    `## Telemetry` further down the file cannot ride on the confirmation of the first."""
+    lines = section_lines(project, name)
+    key = hashlib.sha256(os.path.realpath(str(project)).encode()).hexdigest()[:32]
+    try:
+        record = json.loads((TRUST / f"{key}.json").read_text(encoding="utf-8"))
+        stored = record["sections"][name]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if stored != hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest():
+        return None
+    out = {}
+    for l in lines:
+        m = FIELD.match(l)
+        if m:
+            out[m.group(1)] = m.group(2).strip().strip("`")
+    return out
+
+
 def config(project):
     """{section: {field: value}} from telesma/config.md, without comment bodies."""
     out, sec = collections.defaultdict(dict), ""
@@ -270,7 +427,11 @@ def task_tags(state):
             m = TASK.match(l)
             if m:
                 tech = re.search(r"\(tech:\s*([^)]*)\)", l)
-                out[m.group(3)] = [x.strip() for x in tech.group(1).split(",")] if tech else []
+                # A tag is the name of a guideline file; anything else (a sentence somebody
+                # put in the parentheses) is neither sent nor used as a file name.
+                out[m.group(3)] = [x for x in (y.strip().lower() for y in tech.group(1).split(","))
+                                   if TOKEN.fullmatch(x) and len(x) <= 24 and "/" not in x] \
+                    if tech else []
     return out
 
 
@@ -371,11 +532,14 @@ def from_history(state):
             if not m:
                 continue
             tries = re.match(r"\D{0,3}(\d+)", c[3])
+            # The status is a mark (✅, ⛔) or one word; what Claude wrote after it is text.
+            status = (c[1].split() or [""])[0]
+            status = status if len(status) <= 12 else "other"
             d = DATE.search(c[5]) or DATE.search(l)
             yield dict(type="task", key=m.group(0), date=d.group(0) if d else None,
                        task=m.group(0), title=c[0][:200], text="",
                        metrics=dict(tries=int(tries.group(1)) if tries else None,
-                                    status=c[1][:20]))
+                                    status=status))
 
 
 def attempt(opener):
@@ -612,8 +776,11 @@ def from_permissions(state):
                 r = json.loads(l)
             except ValueError:
                 continue
-            days[str(r.get("ts", ""))[:10]][f"{r.get('mode', '?')}/l{r.get('layer', '?')}/"
-                                            f"{r.get('decision', '?')}"] += 1
+            if not isinstance(r, dict):
+                continue
+            days[str(r.get("ts", ""))[:10]][f"{token(r.get('mode', '?'))}/"
+                                            f"l{token(r.get('layer', '?'))}/"
+                                            f"{token(r.get('decision', '?'))}"] += 1
     for d, count in days.items():
         if DATE.fullmatch(d):
             yield dict(type="permissions", key=d, date=d, title=f"judge decisions {d}",
@@ -797,6 +964,7 @@ def session_counters(file):
             u, model = m.get("usage"), m.get("model")
             if isinstance(u, dict) and model and not model.startswith("<"):
                 n["turns"] += 1
+                model = token(model, 60)
                 n["models"][model] = n["models"].get(model, 0) + 1
                 for field, key in (("input", "input_tokens"), ("output", "output_tokens"),
                                    ("cache_read", "cache_read_input_tokens"),
@@ -816,7 +984,7 @@ def session_counters(file):
                 if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("name"), str):
                     # Tool name, never arguments: shows whether a session reads (Read/Grep),
                     # writes (Edit/Write) or sits in the shell — with no trace of content.
-                    name = b["name"].split("__")[0][:40]
+                    name = token(b["name"].split("__")[0], 40)
                     n["by_name"][name] = n["by_name"].get(name, 0) + 1
                 if isinstance(b, dict) and b.get("type") == "tool_result":
                     n["tool_calls"] += 1
@@ -923,8 +1091,9 @@ def from_state(project, state, cfg, tags):
         # Shape of the integration (field values only) + how many tasks sit in PRs: without it
         # a project where the loop merges by itself cannot be told from one where PRs wait for
         # a human.
-        integrations=dict(repository=integ.get("Repository"), merge=integ.get("Merge"),
-                          tracker=integ.get("Tracker")),
+        integrations=dict(repository=token(integ.get("Repository"), 16),
+                          merge=token(integ.get("Merge"), 16),
+                          tracker=token(integ.get("Tracker"), 16)),
         pr_open=pr["open"], pr_merged=pr["merged"],
         # "Telesma: checks (local)" statuses posted on PRs (counters from the checks log only):
         # red = a commit without evidence or a check that did not run.
@@ -938,8 +1107,10 @@ def from_state(project, state, cfg, tags):
         instructions_kb={f.name: f.stat().st_size // 1024 for f in sorted(
             (Path(__file__).resolve().parent.parent / "templates/instructions").glob("*.md"))},
         smoke=tests.get("Smoke suite", "none").lower() not in ("none", ""),
-        max_tries=loop.get("Max tries per task"), judge=auto.get("Judge"),
-        auto_approve=auto.get("Auto-approve"),
+        # Config values are typed by a person: a single short word goes out, anything else
+        # is "other".
+        max_tries=token(loop.get("Max tries per task"), 4), judge=token(auto.get("Judge"), 16),
+        auto_approve=token(auto.get("Auto-approve"), 16),
         # An adopted codebase (telesma.sh --adopt) is not greenfield: its defects, test ratio and
         # task sizes come with history Telesma did not make — the hub keeps the two apart.
         adopted=cfg.get("Project", {}).get("Adopted", "no").lower() == "yes"))
@@ -986,6 +1157,12 @@ def collect(project):
     for source in sources:
         for ev in source:
             ev["id"] = hashlib.sha256(f"{pid}|{ev['type']}|{ev['key']}".encode()).hexdigest()[:32]
+            if ev["type"] == "change":
+                # The name of a file in telesma/changes/ is written by a human about the product
+                # ("2026-02-03-client-x-discount.md"). The id above still comes from it, so
+                # the event stays the same event; the name itself does not leave.
+                ev["key"] = "change:" + hashlib.sha256(ev["key"].encode()).hexdigest()[:16]
+                ev["title"] = "change request"
             ev.update(schema=SCHEMA, project=pid, label=label,
                       phase=phase_of(ev.get("task")), tech=tags.get(ev.get("task"), []),
                       title=scrub(ev["title"]), text=scrub(ev["text"]),
@@ -1049,11 +1226,12 @@ def assign_bug_sources(events):
 
 # --- sending ------------------------------------------------------------------
 def api_key(spec):
-    """auto (the opt-in file) | env:NAME | file:<path> | cmd:<command> | literal value; empty = no key."""
-    if not spec.strip():
+    """env:NAME | file:<path> | cmd:<command> | literal value; empty = no key. Called only for
+    a `## Telemetry` section confirmed on this machine (`send`): the field comes from a
+    committed file, and `cmd:` runs a command. `auto` — the token of the shared hub — is not a
+    key for any other server."""
+    if not spec.strip() or spec.strip() == "auto":
         return ""
-    if spec.strip() == "auto":
-        return (consent() or {}).get("token", "")
     if spec.startswith("env:"):
         return os.environ.get(spec[4:].strip(), "")
     if spec.startswith("file:"):
@@ -1097,10 +1275,13 @@ def send_batch(req, timeout):
                 if r.status // 100 != 2:
                     raise OSError(f"HTTP {r.status}")
                 try:
-                    resp = json.loads(r.read() or b"{}")
+                    resp = json.loads(r.read(REPLY_BYTES) or b"{}")
                 except ValueError:
                     resp = {}
-            return set(resp.get("rejected_ids") or []) if isinstance(resp, dict) else set()
+            # The reply is somebody else's data: only a list of strings is a list of ids.
+            rejected = resp.get("rejected_ids") if isinstance(resp, dict) else None
+            return {x for x in rejected if isinstance(x, str)} if isinstance(rejected, list) \
+                else set()
         except urllib.error.URLError as e:
             error = e
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
@@ -1118,9 +1299,10 @@ def fingerprint(ev):
 
 
 def for_shared_hub(events, scope):
-    """What the shared hub gets: with `metrics` scope no title, text or entry opener (`key` is
-    the first line of an entry — text too). The cut happens here, at the sender; the hub never
-    sees what it would have to throw away."""
+    """What a server gets with `metrics` scope: no title, text or entry opener (`key` is the
+    first line of an entry — text too). The cut happens here, at the sender; the hub never
+    sees what it would have to throw away. The scope a person chose when opting in holds for
+    every endpoint, not only the shared hub."""
     if scope != "metrics":
         return events
     return [{k: ("" if k in ("title", "text") else v) for k, v in e.items() if k != "key"}
@@ -1132,26 +1314,48 @@ def send(project, events, limit_s):
     tel = config(project).get("Telemetry", {})
     if tel.get("Send", "no").lower() != "yes":
         return 1, "telemetry disabled (`Send: no`)"
+    if not shared(tel.get("Endpoint", "")):
+        if not tel.get("Endpoint", "").startswith(("http://", "https://")):
+            return 1, "endpoint not set"
+        # An endpoint, a key and a `cmd:` from a committed file act only after a person on THIS
+        # machine has seen them: telesma.sh records that (the trust record). Without it no
+        # request is made and no key is read — whoever cloned the repo has agreed to nothing.
+        tel = trusted_section(project)
+        if tel is None:
+            return 1, ("the `## Telemetry` section of telesma/config.md is not confirmed on this "
+                       "machine — nothing is sent; start the project once with telesma.sh in a "
+                       "terminal")
+        seen = config(project).get("Telemetry", {})
+        if any(tel.get(k, "") != seen.get(k, "") for k in ("Send", "Endpoint", "API key", "Scope",
+                                                         "Project label")):
+            # The confirmed lines are those of the first `## Telemetry`; a second section (or a
+            # field inside a comment) that says something else was confirmed by nobody.
+            return 2, ("telesma/config.md has more than one reading of `## Telemetry` (a second "
+                       "section, or a field inside a comment) — nothing is sent")
     endpoint = tel.get("Endpoint", "")
     to_shared = shared(endpoint)
+    c = consent()
     if to_shared:
         # `Send: yes` in a committed file is the project owner allowing it; the person on THIS
         # machine has to agree on their own. No opt-in file = no request at all.
-        c = consent()
         if not c:
             return 1, "no opt-in on this machine for the shared hub (telesma.sh --setup, step Telemetry)"
         endpoint, key = c.get("endpoint") or SHARED_HUB, c["token"]
-        # The project may narrow the scope for everyone (`Scope: metrics`), never widen it.
-        scope = "metrics" if "metrics" in (c.get("scope"), tel.get("Scope", "").strip().lower()) \
-            else "full"
-        events = for_shared_hub(events, scope)
     else:
         if not endpoint.startswith(("http://", "https://")):
             return 1, "endpoint not set"
+    if not endpoint_allowed(endpoint):
+        return 2, f"endpoint {clean(endpoint, 80)} is not https — nothing is sent (http only to this machine)"
+    if not to_shared:
         key = api_key(tel.get("API key", ""))
         if not key:
-            return 2, (f"cannot read the key (`{tel.get('API key', '')}`) — "
+            return 2, (f"cannot read the key (`{clean(tel.get('API key', ''), 60)}`) — "
                        f"set `API key` in telesma/config.md (env:NAME, file:<path> or cmd:<command>)")
+    # The project may narrow the scope for everyone (`Scope: metrics`), never widen it; and what
+    # a person chose when opting in on this machine (`scope: metrics`) holds for every endpoint.
+    scope = "metrics" if "metrics" in ((c or {}).get("scope"), tel.get("Scope", "").strip().lower()) \
+        else "full"
+    events = for_shared_hub(events, scope)
 
     CACHE.mkdir(parents=True, exist_ok=True)
     # Separate record for the shared hub: `--forget` clears it without making your own server
@@ -1193,7 +1397,7 @@ def send(project, events, limit_s):
             rejected = send_batch(req, min(15, left))
         except (OSError, ValueError) as e:
             path.write_text(json.dumps(sent))
-            return 2, f"sent {delivered} of {len(new)}, then: {e}"
+            return 2, f"sent {delivered} of {len(new)}, then: {clean(e)}"
         # A hub older than the client does not know a new event type and rejects it. Such an
         # event is NOT sent — it goes again until the server is updated.
         for e in batch:
@@ -1216,7 +1420,8 @@ def hub_request(url, method, token=None, timeout=15):
     for ctx in ssl_contexts():
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-                return json.loads(r.read() or b"{}")
+                reply = json.loads(r.read(REPLY_BYTES) or b"{}")
+                return reply if isinstance(reply, dict) else {}
         except urllib.error.URLError as e:
             error = e
             if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
@@ -1232,11 +1437,13 @@ def register(scope):
     if c:
         token, endpoint = c["token"], c.get("endpoint") or SHARED_HUB
     else:
+        if not endpoint_allowed(SHARED_HUB):
+            return 2, "the shared hub address is not https — nothing was turned on"
         try:
             token = hub_request(SHARED_HUB.rstrip("/") + "/register", "POST").get("token", "")
         except (OSError, ValueError) as e:
-            return 2, f"the shared hub did not answer ({e}) — nothing was turned on"
-        if not re.fullmatch(r"th_[0-9a-f]{48}", token or ""):
+            return 2, f"the shared hub did not answer ({clean(e)}) — nothing was turned on"
+        if not isinstance(token, str) or not re.fullmatch(r"th_[0-9a-f]{48}", token):
             return 2, "the shared hub returned no token — nothing was turned on"
         endpoint = SHARED_HUB
     CONSENT.parent.mkdir(parents=True, exist_ok=True)
@@ -1259,18 +1466,24 @@ def forget():
     c = consent()
     if not c:
         return 1, "no opt-in on this machine — nothing to delete"
+    endpoint = c.get("endpoint") or SHARED_HUB
+    if not endpoint_allowed(endpoint):
+        return 2, (f"the hub address in {CONSENT} is not https — the token is not sent there; "
+                   f"correct the `endpoint:` line and try again")
     try:
-        r = hub_request((c.get("endpoint") or SHARED_HUB).rstrip("/") + "/mine", "DELETE", c["token"])
+        r = hub_request(endpoint.rstrip("/") + "/mine", "DELETE", c["token"])
     except urllib.error.HTTPError as e:
         if e.code != 401:       # 401 = the token is already gone on the hub
             return 2, f"the hub refused the deletion (HTTP {e.code}) — the opt-in file stays; try again"
         r = {}
     except (OSError, ValueError) as e:
-        return 2, f"the hub did not answer ({e}) — the opt-in file stays; try again"
+        return 2, f"the hub did not answer ({clean(e)}) — the opt-in file stays; try again"
     CONSENT.unlink()
     for f in CACHE.glob("telemetry-*-shared.json"):
         f.unlink()
-    return 0, f"deleted {r.get('deleted_events', 0)} events on the hub and the opt-in on this machine"
+    deleted = r.get("deleted_events", 0)        # a number from the hub, or it is not printed
+    deleted = deleted if isinstance(deleted, int) and not isinstance(deleted, bool) else "?"
+    return 0, f"deleted {deleted} events on the hub and the opt-in on this machine"
 
 
 def main():
@@ -1296,7 +1509,7 @@ def main():
     a = ap.parse_args()
     if a.last_error:
         if error_file(a.project).is_file():
-            print(error_file(a.project).read_text(encoding="utf-8").strip())
+            print(clean(error_file(a.project).read_text(encoding="utf-8", errors="replace").strip()))
         return
     if not (a.project / "telesma").is_dir():
         sys.exit(f"No directory {a.project / 'telesma'}")

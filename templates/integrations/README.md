@@ -35,7 +35,7 @@ section live in `templates/config.md` (the single source of their comments).
 
 1. A `git/gitlab/` directory with the five files above. `INSTRUCTIONS.md` gets section number 17
    (repository) or 18 (tracker) — the section **overrides CORE steps by reference** ("instead of
-   step 12 of section 1…"), it does not copy them.
+   step 8 of section 1…"), it does not copy them.
 2. `setup.sh`: `source "$SCRIPT_DIR/templates/integrations/lib.sh"` (`config_field`, `set_field`,
    `add_permissions`, `ask_value`, `ask_yes_no`, `show_description`). It checks the hosting CLI (`glab`),
    the login, the remote; writes `Repository: gitlab` + the fields. Exit code 1 = aborted, the section
