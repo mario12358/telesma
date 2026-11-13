@@ -283,6 +283,20 @@ def record_file(d):
     return Path(path)
 
 
+# Specky, 2026-11-13: a reserved task the model parked with ⛔ was handed out again until the
+# attempts limit — the reservation must yield to the marker
+d9 = project(plan="# Plan\n\n## Tasks\n\n### Phase 1: Start\n\n- [ ] Task 1.1: Measure on live traffic\n"
+                  "- [ ] Task 1.2: Edge proxy\n")
+rc, out = task(d9, "next")
+ok("Task 1.1" in out, "next reserves 1.1")
+pl = d9 / "telesma" / "state" / "PLAN.md"
+pl.write_text(pl.read_text(encoding="utf-8").replace("- [ ] Task 1.1:", "- [ ] ⛔ Task 1.1:"), encoding="utf-8")
+rc, out = task(d9, "next")
+ok(rc == 0 and "Released" in out and "TELESMA NEXT: Task 1.2" in out,
+   "a reserved task marked ⛔ is released and the scan hands out the next one")
+rc, out = task(d9, "next")
+ok("TELESMA NEXT: Task 1.2" in out and "Released" not in out, "the new reservation holds")
+
 # 1.4.1: the first task of a new project sets the linter — the unchanged test command still runs
 d5 = project()
 task(d5, "next")

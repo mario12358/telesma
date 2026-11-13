@@ -4,6 +4,38 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.4.2 — 2026-11-13
+
+State format: 23 (unchanged). The next start rewrites the sandbox settings of a project that has
+it on; nothing else of yours changes.
+
+- **Tests can start a server inside the sandbox.** On macOS a sandboxed command could not listen on
+  any port (`listen EPERM 127.0.0.1`), so an API test with a real port, an e2e run or a smoke test
+  stopped the loop. Telesma now sets `network.allowLocalBinding`: a command may listen on and
+  connect to localhost — which also means it can reach other services listening on your
+  localhost. On Linux and WSL2 localhost is already private to the command.
+- **Playwright can download its browsers.** Chromium builds now come from Google's Chrome for
+  Testing bucket, `storage.googleapis.com`, which was not on the list. Playwright's hosts and
+  browser cache are now a stack of their own, added for a project with a `(tech: playwright)` tag
+  or `@playwright/test` in a `package.json` (root or one level down) — no longer for every Node
+  project, since that host is all of Google Cloud Storage. The browsers themselves still do not
+  start inside the sandbox on macOS (they register system services the sandbox cannot allow): an
+  e2e run needs `Excluded commands` → `npx playwright test *`, with the risk spelled out in
+  TROUBLESHOOTING.md.
+- **What runs outside the sandbox is asked about and named.** Each `Excluded commands` pattern is
+  now also a `permissions.ask` rule, so an allow rule such as `Bash(npx:*)` cannot let it run
+  unasked, and every start lists the patterns — with a warning when the previous session ran in
+  Claude Code's `auto` mode, where a classifier answers that question instead of you. In the first
+  live run the e2e exclusion carried a diagnostic script the agent had written.
+- **A task parked for a person is let go.** A task the model had been handed and then marked ⛔
+  (waiting for a person — a measurement on live traffic, say) was handed out again by every `next`
+  until the attempts limit stopped the session; nothing could release it. Now `next` releases a
+  reserved task that carries ⛔ and gives out the next one.
+- **A task's work in progress is not asked about.** When a session ended before `done` (a
+  blocker, an interruption), the next start asked whether to continue with "uncommitted changes
+  outside telesma/", as if they were the person's own. With a task issued and not committed the
+  start now names them as that task's work in progress and goes on.
+
 ## 1.4.1 — 2026-11-12
 
 State format: 23 (unchanged).

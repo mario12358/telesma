@@ -19,6 +19,11 @@ Fixed, whatever the config says (found in the live probe of 2026-11-12):
   and an allow rule (the task tool's own) let that retry through without a question;
 - autoAllowBashIfSandboxed: false — the sandbox is a layer under the questions, not instead of them;
 - strictAllowlist in the autonomous modes — a host question there reaches nobody;
+- network.allowLocalBinding: true — on macOS a sandboxed command cannot listen on a port without
+  it, so no test could start a server (live run of 2026-11-12: `listen EPERM 127.0.0.1`);
+- every `Excluded commands` pattern also becomes a `permissions.ask` rule (`Bash(<pattern>)`): an
+  allow rule such as Bash(npx:*) must not let a command outside the sandbox through without a
+  question (live run of 2026-11-12: the e2e exclusion carried a diagnostic script the agent wrote);
 - ~/.config/telesma stays readable (the task tool reads the trust record from inside the sandbox),
   and so does ~/.config/gh with the GitHub integration (gh runs from the task tool).
 
@@ -32,6 +37,8 @@ allowed for good) is kept while what only Telesma wanted and the config dropped 
         exit 0 always, except a settings file that does not parse (exit 1, nothing written)
     sandbox.py available
         prints: yes | no <reason>
+    sandbox.py excluded <project>
+        the `Excluded commands` of an enabled sandbox, one per line
 
 Python 3.9+, standard library only.
 """
@@ -50,7 +57,12 @@ import trust  # noqa: E402  (same directory: the one config reader)
 # Package registries and the caches the package managers write to (both the Linux and the macOS place).
 STACK_HOSTS = {
     'python': ['pypi.org', 'files.pythonhosted.org'],
-    'node': ['registry.npmjs.org', 'registry.yarnpkg.com', 'cdn.playwright.dev', 'playwright.download.prss.microsoft.com'],
+    'node': ['registry.npmjs.org', 'registry.yarnpkg.com'],
+    # Browsers for e2e tests: Playwright's CDN and mirror; Chromium builds now come from Google's
+    # Chrome for Testing bucket. storage.googleapis.com is all of Google Cloud Storage, so it is
+    # added only for a project that uses Playwright, never for every Node project.
+    'playwright': ['cdn.playwright.dev', 'playwright.download.prss.microsoft.com', 'playwright.azureedge.net',
+                   'storage.googleapis.com'],
     'deno': ['deno.land', 'jsr.io', 'registry.npmjs.org'],
     'rust': ['crates.io', 'index.crates.io', 'static.crates.io'],
     'go': ['proxy.golang.org', 'sum.golang.org', 'storage.googleapis.com'],
@@ -66,8 +78,8 @@ STACK_HOSTS = {
 STACK_WRITE = {
     'python': ['~/.cache/uv', '~/.cache/pip', '~/Library/Caches/pip', '~/.cache/pypoetry',
                '~/Library/Caches/pypoetry'],
-    'node': ['~/.npm', '~/.cache/yarn', '~/Library/Caches/Yarn', '~/.local/share/pnpm', '~/Library/pnpm',
-             '~/.cache/ms-playwright', '~/Library/Caches/ms-playwright'],
+    'node': ['~/.npm', '~/.cache/yarn', '~/Library/Caches/Yarn', '~/.local/share/pnpm', '~/Library/pnpm'],
+    'playwright': ['~/.cache/ms-playwright', '~/Library/Caches/ms-playwright'],
     'deno': ['~/.cache/deno', '~/Library/Caches/deno'],
     'rust': ['~/.cargo/registry', '~/.cargo/git'],
     'go': ['~/go/pkg/mod', '~/.cache/go-build', '~/Library/Caches/go-build'],
@@ -85,7 +97,7 @@ TAG_STACK = {
     'python': 'python', 'django': 'python', 'fastapi': 'python', 'pyside6': 'python', 'robotics': 'python',
     'node': 'node', 'typescript': 'node', 'react': 'node', 'react-native': 'node', 'nextjs': 'node',
     'vue': 'node', 'angular': 'node', 'svelte': 'node', 'nestjs': 'node', 'hono': 'node', 'tailwind': 'node',
-    'playwright': 'node', 'detox': 'node', 'deno': 'deno', 'rust': 'rust', 'go': 'go', 'java': 'java',
+    'playwright': 'playwright', 'detox': 'node', 'deno': 'deno', 'rust': 'rust', 'go': 'go', 'java': 'java',
     'kotlin': 'java', 'spring': 'java', 'csharp': 'dotnet', 'wpf': 'dotnet', 'php': 'php', 'ruby': 'ruby',
     'swift': 'swift', 'flutter': 'flutter',
 }
@@ -145,7 +157,27 @@ def stacks(project):
         for tag in re.split(r'[,\s]+', tags):
             if tag.strip().lower() in TAG_STACK:
                 found.add(TAG_STACK[tag.strip().lower()])
+    if 'playwright' in found or uses_playwright(project):
+        found.update(('playwright', 'node'))
     return sorted(s for s in found if s in STACK_HOSTS)
+
+
+def uses_playwright(project):
+    """A package.json at the root or one level down (a workspace) that names Playwright."""
+    candidates = [os.path.join(project, 'package.json')]
+    try:
+        candidates += [os.path.join(project, d, 'package.json') for d in sorted(os.listdir(project))
+                       if d not in ('node_modules', '.git', 'telesma') and os.path.isdir(os.path.join(project, d))]
+    except OSError:
+        pass
+    for path in candidates:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                if re.search(r'"(@playwright/test|playwright)"\s*:', f.read()):
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def tool_homes(st):
@@ -176,7 +208,11 @@ def wanted(project, autonomous):
         'allowUnsandboxedCommands': False,
         'failIfUnavailable': enabled == 'required',
         'excludedCommands': extra['Excluded commands'],
-        'network': {'allowedDomains': unique(hosts), 'strictAllowlist': bool(autonomous)},
+        # Tests start servers on 127.0.0.1 (an API test, an e2e run, a smoke test): on macOS a
+        # sandboxed command may not listen at all without this. It reaches localhost only — and so
+        # every service listening there; on Linux and WSL2 localhost is private to the command and
+        # the key has no effect.
+        'network': {'allowedDomains': unique(hosts), 'strictAllowlist': bool(autonomous), 'allowLocalBinding': True},
         'filesystem': {'allowWrite': unique(write), 'denyRead': unique(deny)},
     }
 
@@ -235,6 +271,28 @@ def keep_person_additions(ours, current, own_before):
     return ours
 
 
+def ask_rules(excluded):
+    return unique([f'Bash({c})' for c in excluded if c and '\n' not in c and ')' not in c])
+
+
+def sync_ask(settings, ours, before):
+    """permissions.ask: the person's rules stay, Telesma's are the current `Excluded commands`."""
+    perms = settings.get('permissions') if isinstance(settings.get('permissions'), dict) else None
+    current = (perms or {}).get('ask') if isinstance((perms or {}).get('ask'), list) else []
+    kept = [r for r in current if r not in (before or [])]
+    new = unique(kept + ours)
+    if new == current:
+        return
+    if perms is None:
+        if not new:
+            return
+        perms = settings['permissions'] = {}
+    if new:
+        perms['ask'] = new
+    else:
+        perms.pop('ask', None)
+
+
 def sync(project, settings_path, autonomous):
     settings = {}
     if os.path.exists(settings_path):
@@ -252,9 +310,12 @@ def sync(project, settings_path, autonomous):
     wrote, own_before = memory.get('wrote'), memory.get('own')
     current = settings.get('sandbox')
     ok, reason = available()
+    asked_before = memory.get('ask') or []
     if ours is None:
         if wrote is not None and current == wrote:
             settings.pop('sandbox', None)
+        sync_ask(settings, [], asked_before)
+        if (wrote is not None and current == wrote) or asked_before:
             write_settings(settings_path, settings)
         save_memory(project, None)
         print('off')
@@ -264,8 +325,10 @@ def sync(project, settings_path, autonomous):
         return 0
     merged = keep_person_additions(ours, current if isinstance(current, dict) else {}, own_before)
     settings['sandbox'] = merged
+    asks = ask_rules(ours['excludedCommands'])
+    sync_ask(settings, asks, asked_before)
     write_settings(settings_path, settings)
-    save_memory(project, {'own': ours, 'wrote': merged})
+    save_memory(project, {'own': ours, 'wrote': merged, 'ask': asks})
     if ok:
         print('on')
     else:
@@ -282,6 +345,12 @@ def main(argv):
     if len(argv) >= 2 and argv[1] == 'available':
         ok, reason = available()
         print('yes' if ok else f'no {reason}')
+        return 0
+    if len(argv) >= 3 and argv[1] == 'excluded':
+        _, enabled, extra = section(argv[2])
+        if enabled != 'no':
+            for c in extra['Excluded commands']:
+                print(c)
         return 0
     if len(argv) >= 4 and argv[1] == 'sync':
         return sync(argv[2], argv[3], '--autonomous' in argv[4:])

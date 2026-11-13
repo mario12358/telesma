@@ -3932,7 +3932,17 @@ if command -v python3 &> /dev/null; then
     _sandbox=$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" sync "$PROJECT_DIR" \
         "$PROJECT_DIR/.claude/settings.local.json" "$_sbmode" 2>/dev/null) || true
     case "$_sandbox" in
-        on) echo -e "${GREEN}$(msg sandbox.on 'Sandbox: on — commands write only inside the project and reach only the listed hosts.')${NC}" ;;
+        on) echo -e "${GREEN}$(msg sandbox.on 'Sandbox: on — commands write only inside the project and reach only the listed hosts.')${NC}"
+            # What runs outside it, said at every start; each pattern is also an "ask" rule (sandbox.py).
+            # In Claude Code's `auto` mode a classifier answers that question instead of the person.
+            _sbx=$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" excluded "$PROJECT_DIR" 2>/dev/null | head -n 5 | tr '\n' ',' | sed 's/,$//; s/,/, /g') || _sbx=""
+            if [[ -n "$_sbx" ]]; then
+                _sbx=$(plain "$_sbx")
+                echo -e "${YELLOW}$(msg sandbox.excluded 'Outside the sandbox, with all your rights: %s — you are asked before each run.' "$_sbx")${NC}"
+                if [[ -n "${BYPASSED:-}" ]]; then
+                    echo -e "${YELLOW}$(msg sandbox.excluded.auto 'The previous session ran in auto mode: there a classifier, not you, answered that question. Keep acceptEdits (Shift+Tab) to see each run.')${NC}"
+                fi
+            fi ;;
         required-unavailable*)
             echo -e "${RED}$(msg sandbox.required 'Sandbox: required by telesma/config.md, but it cannot run here: %s. Nothing was started.' "${_sandbox#required-unavailable }")${NC}"
             exit 1 ;;
@@ -5336,7 +5346,25 @@ echo ""
 if [[ "$MODE" != "2" && "$MODE" != "3" ]]; then
     _dirty=$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal 2>/dev/null \
              | grep -v -E '^.. "?(telesma/|\.claude/)' | head -n 6 || true)
-    if [[ -n "$_dirty" ]]; then
+    # A task `next` issued and `done` has not finished yet: the changes are its work in progress
+    # (an interrupted session, a blocker the person just answered) — they belong in its commit.
+    _wip=""
+    _gp=$(git -C "$PROJECT_DIR" rev-parse --git-path telesma-task 2>/dev/null || true)
+    [[ -n "$_gp" && "$_gp" != /* ]] && _gp="$PROJECT_DIR/$_gp"
+    if [[ -n "$_dirty" && -f "$_gp/session.json" ]]; then
+        _wip=$(python3 -c 'import json,sys
+try:
+    s = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+if isinstance(s, dict) and s.get("task") and s.get("status") != "committed":
+    print(str(s.get("name") or s.get("task"))[:120])' "$_gp/session.json" 2>/dev/null || true)
+    fi
+    if [[ -n "$_dirty" && -n "$_wip" ]]; then
+        echo -e "${CYAN}$(msg dirty.wip 'Work in progress on %s (not committed yet) — the session continues it:' "$_wip")${NC}"
+        printf '%s\n' "$_dirty" | sed 's/^/    /'
+        echo ""
+    elif [[ -n "$_dirty" ]]; then
         echo -e "${YELLOW}$(msg dirty.tree 'Uncommitted changes outside telesma/ — the next task commit would include them:')${NC}"
         printf '%s\n' "$_dirty" | sed 's/^/    /'
         echo "$(msg dirty.how 'Commit or stash them first if they are yours and not part of the next task.')"

@@ -228,10 +228,12 @@ is written in the user's `Language`; the structure is always English.
   `templates/setup/sandbox.py`, written to `settings.local.json` after the mode is final): a refused
   command is never retried outside it (`allowUnsandboxedCommands: false` — the live probe showed an
   allow rule letting that retry through), `autoAllowBashIfSandboxed: false`, an autonomous session
-  refuses an unknown host (`strictAllowlist`), the person's keys are not readable, while
+  refuses an unknown host (`strictAllowlist`), a command may listen on localhost
+  (`allowLocalBinding` — on macOS no test could start a server otherwise), the person's keys are not readable, while
   `~/.config/telesma` (the trust record, read by the task tool inside the sandbox) and, with the
   GitHub integration, `~/.config/gh` stay readable. The section is under the trust gate: `Allowed
-  hosts`, `Writable paths` and `Excluded commands` loosen it.
+  hosts`, `Writable paths` and `Excluded commands` loosen it; each excluded pattern is also written as a
+  `permissions.ask` rule, and every start lists them.
 - **Release version tags are never created without the user's answer**, never with `-f`, never
   pushed by Telesma. From format 21 they are created by `telesma-task.py release` only (clean tree, a
   green full suite on that state, the scenarios file committed, the `release` checks), which the

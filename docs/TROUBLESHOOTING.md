@@ -129,6 +129,21 @@ stack's registries and the hosts you list. A refusal shows up as "Operation not 
 "Read-only file system", or a connection the proxy refused. Claude does not retry it outside the
 sandbox; in an autonomous run it reports `TELESMA BLOCKED` with the command.
 
+- A test server that cannot listen (`listen EPERM 127.0.0.1`) or Playwright that cannot download
+  its browsers → update Telesma (1.4.2 allows localhost and adds the browser hosts for a project
+  with Playwright); the next start rewrites the sandbox settings.
+- Playwright's browsers do not start on macOS (`bootstrap_check_in … MachPortRendezvousServer:
+  Permission denied`, or Firefox's `sandbox_extension_issue_file_to_process … Operation not
+  permitted`): a browser registers its own system services, which the sandbox cannot allow. The
+  e2e run has to go outside it: `Excluded commands` → `- npx playwright test *`. Be aware of what
+  that means: the test files and `playwright.config.ts` are code the agent writes, and that run has
+  all your rights (in the first live run the agent used it for a diagnostic script of its own).
+  The pattern matches the whole command only: a chained command (`cd frontend && …`, a pipe)
+  stays inside the sandbox and fails. With the frontend in a subdirectory use a one-command form,
+  e.g. `- npm --prefix frontend exec -- playwright test *`.
+  Telesma makes every such run a question to you — keep the session in `acceptEdits`, since in
+  `auto` a classifier answers it. Do not exclude `npm run …` — the script behind it is one edit away from any
+  command. In CI the browsers run as usual; on Linux Claude Code's documentation lists Chromium among the tools that fail inside its sandbox too.
 - A host the build needs → `Allowed hosts` (`- api.example.com`).
 - A cache or tool directory outside the project → `Writable paths` (`- ~/.cache/my-tool`).
 - A tool that cannot run sandboxed (Docker, some simulators) → `Excluded commands`

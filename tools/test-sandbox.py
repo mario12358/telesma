@@ -114,6 +114,24 @@ ok(not any("github" in h for h in net["allowedDomains"]) and "api.osv.dev" not i
    "no GitHub and no check hosts without the integration and the checks")
 rc, out, data = run(d, autonomous=False)
 ok(data["sandbox"]["network"]["strictAllowlist"] is False, "a chat asks about an unknown host")
+ok(net.get("allowLocalBinding") is True, "a test may listen on 127.0.0.1 (macOS: listen EPERM without it)")
+
+d = project(plan="### Phase 1: A\n\n- [ ] Task 1.1: x (tech: react, typescript)\n")
+rc, out, data = run(d)
+hosts = data["sandbox"]["network"]["allowedDomains"]
+ok("registry.npmjs.org" in hosts and "storage.googleapis.com" not in hosts and "cdn.playwright.dev" not in hosts,
+   "a Node project without Playwright: npm, but not all of Google Cloud Storage")
+(d / "web").mkdir()
+(d / "web" / "package.json").write_text(json.dumps({"devDependencies": {"@playwright/test": "^1.50.0"}}), encoding="utf-8")
+rc, out, data = run(d)
+hosts, writable = data["sandbox"]["network"]["allowedDomains"], data["sandbox"]["filesystem"]["allowWrite"]
+ok("cdn.playwright.dev" in hosts and "storage.googleapis.com" in hosts and "~/.cache/ms-playwright" in writable,
+   "@playwright/test in a workspace package.json: the browser downloads (Chrome for Testing) and their cache")
+d = project(plan="### Phase 1: A\n\n- [ ] Task 1.1: e2e (tech: playwright, typescript)\n")
+rc, out, data = run(d)
+ok("storage.googleapis.com" in data["sandbox"]["network"]["allowedDomains"]
+   and "registry.npmjs.org" in data["sandbox"]["network"]["allowedDomains"],
+   "a (tech: playwright) tag before any package.json: Playwright's hosts and npm")
 
 print("sandbox.py — integrations, checks, the config's lists")
 d = project(fields={("Integrations", "Repository"): "github", ("Checks", "Enabled"): "yes"})
@@ -131,6 +149,30 @@ ok("api.example.com" in hosts and not any(" " in h for h in hosts) and "[e.g. x]
    "Allowed hosts from the config; a line that is not a host name is dropped, a template placeholder too")
 ok(sb["excludedCommands"] == ["docker compose *"] and "~/.cache/my-tool" in sb["filesystem"]["allowWrite"],
    "Excluded commands and Writable paths from the config")
+
+ok(data.get("permissions", {}).get("ask") == ["Bash(docker compose *)"],
+   "an excluded command is also an ask rule: an allow rule cannot let it run outside the sandbox unasked")
+
+print("sandbox.py — ask rules: the person's stay, Telesma's follow Excluded commands")
+d3 = project()
+configure(d3, lambda t: items(t, "Sandbox", "Excluded commands", ["npx playwright test *"]))
+(d3 / ".claude").mkdir()
+(d3 / ".claude" / "settings.local.json").write_text(json.dumps({"permissions": {
+    "allow": ["Bash(npx:*)"], "ask": ["Bash(git push:*)"]}}), encoding="utf-8")
+rc, out, data = run(d3)
+ok(data["permissions"]["ask"] == ["Bash(git push:*)", "Bash(npx playwright test *)"]
+   and data["permissions"]["allow"] == ["Bash(npx:*)"],
+   "the person's ask rule and allow list stay; the excluded e2e run is asked about despite Bash(npx:*)")
+configure(d3, lambda t: t.replace("  - npx playwright test *\n", ""))
+rc, out, data = run(d3)
+ok(data["permissions"]["ask"] == ["Bash(git push:*)"], "an exclusion removed from the config: its ask rule goes, the person's stays")
+configure(d3, lambda t: items(t, "Sandbox", "Excluded commands", ["npx playwright test *"]))
+run(d3)
+configure(d3, lambda t: re.sub(r"(?m)^- \*\*Enabled\*\*:.*$", "- **Enabled**: no", t))
+rc, out, data = run(d3)
+ok(out == "off" and data["permissions"]["ask"] == ["Bash(git push:*)"], "Enabled: no removes Telesma's ask rules with the sandbox")
+r = subprocess.run([sys.executable, str(SETUP / "sandbox.py"), "excluded", str(d3)], capture_output=True, text=True)
+ok(r.stdout == "", "excluded: nothing when the sandbox is off")
 
 print("sandbox.py — what the person added stays, what Telesma wrote and no longer wants goes")
 p = d / ".claude" / "settings.local.json"

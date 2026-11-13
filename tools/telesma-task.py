@@ -1608,7 +1608,14 @@ def cmd_next(root, args):
     item, again = None, False
     if reserved:
         found = plan.find(reserved)
-        if found and not found["done"] and session.get("status") != "committed":
+        parked = found is not None and ts.WAITING_ON_HUMAN in plan.lines[found["idx"]]
+        if parked and session.get("status") != "committed":
+            # ⛔ on the reserved task: it waits for a person, so the reservation goes and the scan
+            # picks the next task (the attempts counter starts again for that one)
+            print(f"Released {plan.label(found)}: it is marked ⛔ (waiting for a person) in {ts.PLAN}.")
+            session.update({"task": None, "status": None, "refusals": 0, "issued": None})
+            save_session(root, session)
+        elif found and not found["done"] and session.get("status") != "committed":
             item, again = found, True
         elif session.get("status") == "committed" and found and not found["done"] and found["pr"] is None:
             plan.pr_lines[found["idx"]] = 0      # committed, its PR not tagged yet: not issued twice

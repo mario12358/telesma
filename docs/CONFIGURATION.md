@@ -191,12 +191,14 @@ layer under them.
 | Key | Default | Meaning |
 |---|---|---|
 | `Enabled` | `yes` for a config the launcher creates when the sandbox is available; `no` in a project migrated from before format 22 | `no` \| `yes` \| `required` (Claude Code does not start when the sandbox cannot run). |
-| `Allowed hosts` | — | Extra hosts, one per line (`- api.example.com`, `- *.internal.example.com`). The stack's registries (PyPI, npm, crates.io, Maven, pub.dev …), the checks' services and, with the GitHub integration, GitHub's hosts are added by Telesma. In the autonomous modes (1, 4) any other host is refused; in a chat Claude Code asks you. |
+| `Allowed hosts` | — | Extra hosts, one per line (`- api.example.com`, `- *.internal.example.com`). The stack's registries (PyPI, npm, crates.io, Maven, pub.dev …), the checks' services and, with the GitHub integration, GitHub's hosts are added by Telesma; a project with Playwright (a `(tech: playwright)` tag or `@playwright/test` in a `package.json`) also gets the browser downloads, including `storage.googleapis.com`. In the autonomous modes (1, 4) any other host is refused; in a chat Claude Code asks you. |
 | `Writable paths` | — | Directories outside the project a command may write to (`- ~/.cache/my-tool`). The project, the `## Working directories`, the temporary directory and the stack's package caches are writable already. |
-| `Excluded commands` | — | Commands that run outside the sandbox (`- docker compose *` — Docker does not work inside it). Each one is a hole: it runs with all your rights. |
+| `Excluded commands` | — | Commands that run outside the sandbox (`- docker compose *` — Docker does not work inside it). Each one is a hole: it runs with all your rights. Telesma also writes each pattern as a `permissions.ask` rule, so an allow rule like `Bash(npx:*)` does not let it through unasked; every start lists them. In Claude Code's `auto` mode a classifier answers that question, not you. |
 
 Fixed, whatever the section says: a refused command is never retried outside the sandbox, a
-sandboxed command is not auto-approved because it is sandboxed, and `~/.ssh`, `~/.aws`, `~/.gnupg`,
+sandboxed command is not auto-approved because it is sandboxed, a command may listen on and
+connect to `localhost` (tests start servers; on macOS nothing could listen otherwise — this also
+lets a command reach other services listening on your localhost), and `~/.ssh`, `~/.aws`, `~/.gnupg`,
 `~/.netrc`, Docker, Kubernetes and cloud CLI credentials are not readable (`~/.config/gh` stays
 readable with the GitHub integration). Keys you add to the `sandbox` block of
 `settings.local.json` yourself are kept. The section is under the trust gate: `Allowed hosts`,

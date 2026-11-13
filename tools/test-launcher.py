@@ -577,6 +577,31 @@ def test_no_silent_exit():
             ok(re.search(site, SCRIPT) is not None, f"a failing helper cannot end the launcher under set -e: /{site[:38]}…/")
 
 
+def test_work_in_progress():
+    print("uncommitted changes: the issued task's work in progress is not the person's")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        project = shipped_project(tmp)
+        launch(tmp, project, "-m", "1", TELESMA_TRUST_CONFIG="yes")
+        (project / "e2e.spec.ts").write_text("test('x', () => {})\n")
+        r = launch(tmp, project, "-m", "1")
+        ok("Uncommitted changes outside telesma/" in r.out and "e2e.spec.ts" in r.out,
+           "no task issued: changes outside telesma/ are named as the person's")
+        state = project / ".git" / "telesma-task"
+        state.mkdir(exist_ok=True)
+        (state / "session.json").write_text(json.dumps({"task": "1.1", "name": "Task 1.1: do it", "status": None}))
+        r = launch(tmp, project, "-m", "1")
+        ok("Work in progress on Task 1.1: do it" in r.out and "Uncommitted changes outside" not in r.out
+           and "e2e.spec.ts" in r.out and started(tmp),
+           "a task next issued and done did not finish: its work in progress, no question")
+        (state / "session.json").write_text(json.dumps({"task": "1.1", "name": "Task 1.1: do it", "status": "committed"}))
+        r = launch(tmp, project, "-m", "1")
+        ok("Uncommitted changes outside telesma/" in r.out, "after the task's commit, changes are the person's again")
+        (state / "session.json").write_text("{not json")
+        r = launch(tmp, project, "-m", "1")
+        ok("Uncommitted changes outside telesma/" in r.out and started(tmp), "an unreadable session file: the ordinary warning")
+
+
 def test_survey_preconditions():
     print("survey — an existing plan is never replaced; the launcher's own writes do not block it")
     with tempfile.TemporaryDirectory() as d:
@@ -710,6 +735,7 @@ if __name__ == "__main__":
     test_broken_settings()
     test_format_gate()
     test_no_silent_exit()
+    test_work_in_progress()
     test_survey_preconditions()
     test_answers_verbatim()
     test_supervision()
