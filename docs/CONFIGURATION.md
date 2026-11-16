@@ -166,6 +166,7 @@ Opt-in screenshots and recordings ([WORKFLOW.md § 7](WORKFLOW.md#7-visual-artif
 | `Max attempts per task` | `3` | How many times `next` may hand out the same task without a finished `done` (a restart, a compaction, a lost session) before the script stops. `none` = no limit. |
 | `Max tasks per session` | `none` | After this many finished tasks `next` hands out nothing and writes `telesma/state/BLOCKED.md`. |
 | `Max hours per session` | `none` | The same, counted in hours since the launcher started the session. Limits are read once, at the start; the next start shows the reason and asks you whether to go on. |
+| `Max tokens per session` | `none` | The same, counted in tokens since the start of the session: input + output + cache read + cache write, as Claude Code's transcripts on this machine record them (`300M`, `1.5B`, `500k`). Cache reads are most of a long session — `telesma.sh --usage` shows what yours take. |
 | `Report progress` | `yes` | Kept for compatibility; currently not read by the launcher or the instructions. |
 | `Rotate state files` | `yes` | Move older entries of REPORT.md, PROJECT_CONTEXT.md and PLAN.md into `*_ARCHIVE.md` at every start ([STATE_FILES.md](STATE_FILES.md#state-file-rotation)). `no` turns all rotation off. |
 | `Plan phases in file` | `5` | How many of the latest fully completed phases stay in PLAN.md in full; only applies above 100 KB of plan. `none` = never touch PLAN.md; `0` = archive every completed phase. |

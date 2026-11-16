@@ -4,6 +4,35 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.5.0 — 2026-11-16
+
+State format: 23 (unchanged). Nothing in your project's files changes; the usage record lives in
+`.git/telesma-usage/`, on your machine only.
+
+- **What each task cost, on your machine.** Telesma now keeps a usage record in
+  `.git/telesma-usage/usage.jsonl`: `done` writes a row per task with the tokens per model spent
+  on it (read from Claude Code's transcripts, the model reports nothing; in one session a task
+  starts where the previous one ended, so work done before `next` is not lost), the working time
+  (pauses over 10 minutes left out) next to the clock time, tries, refusals, the diff size and the
+  Claude Code version; a test item is named `3.2/test`; the launcher writes a row per Claude
+  session, so what is spent outside tasks (start, compactions, clarification, modes 2/3/4) shows
+  too. Counters only, never committed, never in a prompt, no telemetry needed. `telesma --usage`
+  breaks it down by phase, model, week and release, lists the tasks that took the most tokens and
+  time; `--csv` gives every row. Each session ends with one line: tasks, time, tokens, cache share,
+  model. `telesma_usage.py rebuild <project>` recounts the rows from the transcripts still on the
+  machine.
+- **`Max tokens per session`** (`## Telesma loop`, default `none`): the session budget stops at
+  this many tokens, counted from the same transcripts (`300M`, `1.5B`, `500k`).
+- **An unknown option is no longer a project.** `telesma --usage` on a clone without that option
+  created a project named `--usage`; an unknown option now stops the launcher with a message, and
+  nothing is created.
+- The guard refuses edits of the task tool's own data (`.git/telesma-task/`, `.git/telesma-usage/`).
+- **Telemetry counts tokens correctly.** Claude Code writes one response as several transcript
+  lines with the same usage; each line was counted, so session tokens and turns were 2–3 times
+  too high. A response now counts once, and the tokens of the session's subagents are added.
+  Session events sent before this fix carry the inflated numbers (a session event now carries
+  `counters: 4`, so the two can be told apart).
+
 ## 1.4.2 — 2026-11-13
 
 State format: 23 (unchanged). The next start rewrites the sandbox settings of a project that has

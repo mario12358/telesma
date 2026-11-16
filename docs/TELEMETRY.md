@@ -132,7 +132,8 @@ course name a file or quote a commit title — see "What leaves, exactly".)
 
 **From Claude Code transcripts on this machine:** counters only — Telesma mode, model, tokens, number of
 tool calls by tool *name* and how many errored, compactions, wall-clock minutes, size of the startup
-prompt. Never arguments, never message text. The model matters most: without it a framework change
+prompt. A response Claude Code writes over several lines (one per content block) is counted once, and
+the session's subagents (`<session>/subagents/`) are added to it. Never arguments, never message text. The model matters most: without it a framework change
 cannot be told apart from a model change.
 
 **From the permission judge log:** per-day counters of decisions by layer — never the commands.

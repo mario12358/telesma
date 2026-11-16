@@ -10,7 +10,9 @@ history; the agent writes code. This hook refuses what would route around that:
   does it instead;
 - Edit / Write / MultiEdit on telesma/state/PLAN.md that ticks or unticks a task;
 - Edit / Write / MultiEdit on the `Task history`, `Test status` or `Change history` sections of
-  telesma/state/REPORT.md.
+  telesma/state/REPORT.md;
+- Edit / Write / MultiEdit in the task tool's own data, `.git/telesma-task/` (the reservation and
+  the counters) and `.git/telesma-usage/` (the usage record, change plan K13).
 
 Session budget (change plan K2): when the task tool has marked the session as out of its budget,
 everything but reads and writing telesma/state/BLOCKED.md is refused, whatever the integration.
@@ -297,11 +299,25 @@ def section(text, header):
     return "\n".join(l.rstrip() for l in lines[start:end]).strip()
 
 
+def script_dirs(root):
+    out = []
+    for name in ("telesma-task", "telesma-usage"):
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--git-path", name], capture_output=True, text=True)
+        d = r.stdout.strip()
+        if r.returncode == 0 and d:
+            out.append(os.path.realpath(d if os.path.isabs(d) else os.path.join(root, d)))
+    return out
+
+
 def check_edit(root, tool, tool_input, checks):
     path = tool_input.get("file_path") or ""
     if not path:
         return
     full = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
+    for d in script_dirs(root):
+        if full == d or full.startswith(d + os.sep):
+            deny("this is the task tool's own data (the reservation, the counters, the usage record) — it is "
+                 f"written by `{task_tool()}` only; nothing in it is yours to change.")
     rel = os.path.relpath(full, os.path.realpath(root)).replace(os.sep, "/")
     if rel not in (ts.PLAN, ts.REPORT):
         return

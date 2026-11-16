@@ -128,6 +128,10 @@ ok(out is None, "the Summary is the model's")
 other = d / "notes.md"
 other.write_text("## Task history\n", encoding="utf-8")
 ok(call(d, "Write", {"file_path": str(other), "content": "x"}) is None, "other files are not looked at")
+for rel in (".git/telesma-usage/usage.jsonl", ".git/telesma-task/session.json"):
+    out = call(d, "Write", {"file_path": str(d / rel), "content": "{}\n"})
+    ok(out and out["permissionDecision"] == "deny" and "task tool's own data" in out["permissionDecisionReason"],
+       f"a Write into {rel.split('/')[1]}/ (the task tool's data, the usage record) is refused")
 
 print("inactive — older format, not a Telesma project; the integration is covered")
 d20 = project(fmt=20)

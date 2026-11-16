@@ -49,6 +49,7 @@ TELESMA = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import telesma_state as ts  # noqa: E402
 import telesma_github as ghf  # noqa: E402
+import telesma_usage as tu  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -687,11 +688,12 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
         return 0
     if session.get("branch") and branch != session["branch"]:
         raise Refused(f"{name} is worked on `{session['branch']}`, you are on `{branch}` — `git checkout {session['branch']}`")
-    run_tests(root, cfg, files)
+    tests = run_tests(root, cfg, files)
     warnings = run_checks(root, files)
     subject = short_subject(f"Telesma: {name}")
     sha = make_commit(root, files, excluded, subject, args.message, args.trailer)
     record_evidence(root)
+    record_usage(root, session, item, name, sha, tests, int(session.get("refusals", 0)))
     ghf.push(root, branch)
     n = ghf.open_pr(root, branch, session.get("base") or ghf.base_branch(root), subject, pr_body(args.message, args.trailer))
     # (pr: #n) is not committed on the branch: main learns it from the PR's title (apply_derived)
@@ -705,6 +707,24 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
         print(warnings)
     print(f"Next: `{self_command()} next`")
     return 0
+
+
+# --- the usage record (K13) -----------------------------------------------------------------
+
+def format_version(root):
+    try:
+        with open(os.path.join(root, "telesma", "state", ".telesma-version"), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def record_usage(root, session, item, name, sha, tests, refusals):
+    """The task's row in .git/telesma-usage/usage.jsonl: tokens from next to done, read from the
+    transcripts. Never refuses — a failure is a note."""
+    tu.record_task(root, task=(item or {}).get("tid") or name, phase=(item or {}).get("phase"),
+                   since=session.get("issued"), commit=sha, tests=tests,
+                   attempts=int(session.get("issues") or 1), refusals=refusals, fmt=format_version(root))
 
 
 # --- done -----------------------------------------------------------------------------------
@@ -790,6 +810,7 @@ def cmd_done(root, args):
                     files.append(p)
         warnings = run_checks(root, sorted(set(files)))
         if not auto_commit:
+            record_usage(root, session, item, name, None, tests, refusals)
             session.update({"task": None, "last": name, "refusals": 0})
             save_session(root, session)
             print(f"done {name} — Auto-commit: no, nothing committed")
@@ -809,6 +830,7 @@ def cmd_done(root, args):
                     f"done was refused {session['refusals']} times for {name}; the last reason is below")
         raise
     record_evidence(root)
+    record_usage(root, session, item, name, sha, tests, refusals)
     if git_mode:
         session.update({"status": "committed", "commit": sha})
     else:
@@ -869,7 +891,8 @@ def cmd_commit(root, args):
 # --- the session budget (K2) ---------------------------------------------------------------
 
 LIMITS = (("Max refusals per task", 5), ("Max attempts per task", 3), ("Max tasks per session", None),
-          ("Max hours per session", None))
+          ("Max hours per session", None), ("Max tokens per session", None))
+TOKEN_UNITS = {"k": 10 ** 3, "m": 10 ** 6, "b": 10 ** 9}
 BUDGET_MARK = "Budget:"
 
 
@@ -879,6 +902,9 @@ def limit_value(raw, default):
         return default
     if v in ("none", "no", "-", "unlimited"):
         return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmb])", v.replace("_", "").replace(" ", ""))
+    if m:                                # 200M, 1.5B, 500k (Max tokens per session)
+        return int(float(m.group(1)) * TOKEN_UNITS[m.group(2)])
     try:
         return float(v) if "." in v else int(v)
     except ValueError:
@@ -940,6 +966,16 @@ def budget_check(root, session, again):
         if spent >= hours:
             return exhaust(root, session, "Max hours per session",
                            f"the session has run {spent:.1f} h; the limit is {hours} h")
+    tokens = lim.get("Max tokens per session")
+    if tokens and started:
+        try:
+            used = tu.total(tu.usage(root, started))
+        except Exception:            # noqa: BLE001 — unreadable transcripts never stop the loop
+            used = 0
+        if used >= tokens:
+            return exhaust(root, session, "Max tokens per session",
+                           f"the session has used {tu.human(used)} tokens (input, output and cache); "
+                           f"the limit is {tu.human(tokens)}")
     tasks = lim.get("Max tasks per session")
     if tasks and int(session.get("tasks_this_session", 0)) >= tasks:
         return exhaust(root, session, "Max tasks per session", f"{tasks} tasks were finished in this session")
@@ -1137,6 +1173,10 @@ def cmd_release(root, args):
         if r.returncode != 0:
             raise Refused("the release checks block the version:\n" + out)
     git(root, "tag", "-a", tag, "-m", args.message.strip())
+    try:
+        tu.append(root, {"type": "release", "version": tag, "at": tu.iso(tu.now_utc()), "commit": head[:12]})
+    except Exception as e:           # noqa: BLE001 — the usage record never stops a release
+        print(f"note: the usage record was not written ({type(e).__name__})")
     print(f"created {tag} on {head[:7]} (annotated; not pushed)")
     print("Now, in this order (section 15.6): the DECISIONS.md entry (Kind: operations), then the message to the "
           f"person with `git push origin {tag}` — tags do not travel with a plain `git push`.")

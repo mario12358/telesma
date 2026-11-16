@@ -545,7 +545,7 @@ shows**, minus the `Ignore on commit` patterns of the config and this machine's 
 - **Blocked dependency**: skip the task, choose the next one without blocks
 - **After running out of tries** (`Max tries per task` refused `done` for the same task): STOP and ask the user
 - **The session budget** (`## Telesma loop`: `Max refusals per task`, `Max attempts per task`,
-  `Max tasks per session`, `Max hours per session`) is enforced by the script, not by you: past a
+  `Max tasks per session`, `Max hours per session`, `Max tokens per session`) is enforced by the script, not by you: past a
   limit `next` hands out nothing, the script writes `telesma/state/BLOCKED.md` (`Budget: …`) and a hook
   refuses everything but reads. Report the block and stop — going on is the person's answer at the
   next start. Past 150 tool calls on one task a hook reminds you; take it as the signal to finish the

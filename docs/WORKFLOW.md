@@ -25,7 +25,7 @@ writes, GitHub writes through `gh`, ticking PLAN.md and editing REPORT.md's hist
 time naming the command to use instead. Under it, Claude Code's sandbox (`## Sandbox`,
 [CONFIGURATION.md](CONFIGURATION.md#-sandbox)) limits what any Bash command may write and reach. A
 session budget (`## Telesma loop` → `Max refusals per task`, `Max attempts per task`, `Max tasks per
-session`, `Max hours per session`) stops the loop with `TELESMA BLOCKED`; whether to go on is your
+session`, `Max hours per session`, `Max tokens per session`) stops the loop with `TELESMA BLOCKED`; whether to go on is your
 answer at the next start.
 
 - [1. Clarification](#1-clarification)

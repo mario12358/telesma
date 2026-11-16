@@ -92,7 +92,7 @@ TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|e2e|spec)/|\.test\.|\.spec\.|(^|
 BUG_SOURCE = re.compile(r"\*\*Bug source\*\*:\s*(?:tasks?\s*)?`?(" + TASK_ID + r")", re.I)
 MODE = re.compile(r"MODE:\s*(autonomous|bugfix|review|artifacts)")
 GAP_MIN = 180
-COUNTERS_VERSION = 3    # bump when session_counters counts something new — invalidates the cache
+COUNTERS_VERSION = 4    # bump when session_counters counts something new — invalidates the cache
 TEST_RUN = re.compile(r"^\*\*[^*\n]*?(\d{4}-\d{2}-\d{2})")
 # "api+shared 276/0, web 185/0, e2e 45/45" — that is how projects on Deno, Vitest and
 # Playwright record runs: suite name, then passed/failed (e2e is sometimes passed/total). The
@@ -946,6 +946,9 @@ def session_counters(file):
     n = dict(turns=0, tool_calls=0, tool_errors=0, compactions=0, models={}, mode=None,
              start=None, end=None, input=0, output=0, cache_read=0, cache_write=0,
              startup_prompt_chars=None, by_name={})
+    # One API response is written as several lines (one per content block), each carrying the
+    # same message id and the same usage: counted once per id, or tokens come out 2-3x too high.
+    seen = set()
     with file.open(encoding="utf-8", errors="ignore") as f:
         for l in f:
             try:
@@ -962,7 +965,11 @@ def session_counters(file):
                 n["compactions"] += 1
             m = r.get("message") if isinstance(r.get("message"), dict) else {}
             u, model = m.get("usage"), m.get("model")
-            if isinstance(u, dict) and model and not model.startswith("<"):
+            reply = m.get("id") or r.get("requestId")
+            if isinstance(u, dict) and model and not model.startswith("<") \
+                    and (not reply or reply not in seen):
+                if reply:
+                    seen.add(reply)
                 n["turns"] += 1
                 model = token(model, 60)
                 n["models"][model] = n["models"].get(model, 0) + 1
@@ -992,6 +999,20 @@ def session_counters(file):
     return n
 
 
+def merge_subagent(n, s):
+    """A subagent's transcript (`<session>/subagents/*.jsonl`) belongs to its session: its
+    tokens, turns and tool calls are the session's cost too. Mode, start, end and the startup
+    prompt stay the main transcript's."""
+    for k in ("turns", "tool_calls", "tool_errors", "compactions", "input", "output",
+              "cache_read", "cache_write"):
+        n[k] += s[k]
+    for k in ("models", "by_name"):
+        for name, c in s[k].items():
+            n[k][name] = n[k].get(name, 0) + c
+    n["subagents"] = n.get("subagents", 0) + 1
+    return n
+
+
 def from_sessions(project):
     """One event per Claude Code session in this project, on THIS machine. Without it a
     framework change cannot be told apart from a model change (three different ones worked on
@@ -1004,11 +1025,17 @@ def from_sessions(project):
     mem, save = cache_file(f"sessions-{project_id(project)}.json")
     new = {}
     for file in sorted(d.glob("*.jsonl")):
-        st = file.stat()
-        file_fingerprint = [st.st_size, int(st.st_mtime), COUNTERS_VERSION]
+        subs = sorted((d / file.stem / "subagents").glob("*.jsonl"))
+        file_fingerprint = [COUNTERS_VERSION] + [[f.name, f.stat().st_size, int(f.stat().st_mtime)]
+                                                 for f in [file] + subs]
         old = mem.get(file.stem)
-        new[file.stem] = old if old and old[0] == file_fingerprint \
-            else [file_fingerprint, session_counters(file)]
+        if old and old[0] == file_fingerprint:
+            new[file.stem] = old
+        else:
+            n = session_counters(file)
+            for f in subs:
+                merge_subagent(n, session_counters(f))
+            new[file.stem] = [file_fingerprint, n]
     if new != mem:
         save(new)
     for sid, (_, n) in new.items():
@@ -1026,6 +1053,8 @@ def from_sessions(project):
                    metrics=dict(mode=n["mode"], model=model, models=n["models"], turns=n["turns"],
                                 tool_calls=n["tool_calls"], tool_errors=n["tool_errors"],
                                 compactions=n["compactions"], wall_minutes=minutes,
+                                subagents=n.get("subagents", 0),
+                                counters=COUNTERS_VERSION,
                                 startup_prompt_chars=n.get("startup_prompt_chars"),
                                 tools_by_name=dict(sorted(n.get("by_name", {}).items(),
                                                           key=lambda x: -x[1])[:12]),

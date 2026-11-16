@@ -456,6 +456,16 @@ def test_generalization():
 # Robustness of the start
 # ---------------------------------------------------------------------------------------------
 
+def test_arguments():
+    print("arguments — an unknown option is never a project directory")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        r = subprocess.run(["bash", str(LAUNCHER), "./", "--usage-typo"], cwd=tmp, env=env_for(tmp), capture_output=True,
+                           text=True, stdin=subprocess.DEVNULL, timeout=60)
+        ok(r.returncode == 2 and "Unknown option: --usage-typo" in r.stderr and not (tmp / "--usage-typo").exists()
+           and not (tmp / "telesma").exists(), "an unknown option → refused, nothing created")
+
+
 def test_lock():
     print("start lock — one launcher per project")
     with tempfile.TemporaryDirectory() as d:
@@ -731,6 +741,7 @@ if __name__ == "__main__":
     test_links_and_integrations()
     test_prompt_route()
     test_generalization()
+    test_arguments()
     test_lock()
     test_broken_settings()
     test_format_gate()

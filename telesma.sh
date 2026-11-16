@@ -121,6 +121,16 @@ while [[ $# -gt 0 ]]; do
             DOCTOR=true
             shift
             ;;
+        --usage)
+            # The usage record (change plan K13): tokens, time and model per task, read from
+            # .git/telesma-usage/usage.jsonl — no Claude session, zero tokens.
+            USAGE_REPORT=true
+            shift
+            ;;
+        --csv)
+            USAGE_CSV=true
+            shift
+            ;;
         --telemetry-forget)
             # Machine-wide, needs no project: delete what this machine sent to the shared hub and
             # withdraw the opt-in (docs/TELEMETRY.md → "Deleting your data").
@@ -168,6 +178,9 @@ Options:
                           Claude Code and its sign-in — and say what to install. Then exits.
                           With a project: also the programs its ## Tests commands call.
                           The same check runs silently on every start.
+      --usage [--csv]     Tokens, time and model per task, phase, model, week and release for this
+                          project on this machine (recorded by Telesma itself, no telemetry needed),
+                          then exits. --csv prints every row for a spreadsheet.
       --telemetry-forget  Delete everything this machine sent to the shared Telesma hub and
                           withdraw the opt-in on this machine (all projects). Then exits.
   -m, --mode <1|2|3|4>    Choose the working mode (skips the console menu):
@@ -182,6 +195,12 @@ Modes 2 and 3 always start interactively (they force -i).
 Mode 4 is autonomous — it scans PLAN.md + telesma/spec/APP_FLOW.md and generates missing artifacts.
 EOF
             exit 0
+            ;;
+        -*)
+            # Never a project directory: an option this clone does not know (a newer one, a typo)
+            # would otherwise create a project named after it.
+            echo "Unknown option: $1 — see telesma.sh --help (an option added in a newer Telesma needs an updated clone: git -C \"$SCRIPT_DIR\" pull)" >&2
+            exit 2
             ;;
         *)
             PROJECT_DIR="$1"
@@ -207,6 +226,10 @@ case "$PROJECT_DIR" in
     *) PROJECT_DIR="$PWD/${PROJECT_DIR#./}" ;;
 esac
 PROJECT_DIR="${PROJECT_DIR%/}"
+
+if [[ "${USAGE_REPORT:-false}" == "true" ]]; then
+    exec python3 "$SCRIPT_DIR/tools/telesma_usage.py" report "$PROJECT_DIR" ${USAGE_CSV:+--csv}
+fi
 
 # Validate the -m flag
 if [[ -n "$MODE" ]] && [[ "$MODE" != "1" ]] && [[ "$MODE" != "2" ]] && [[ "$MODE" != "3" ]] && [[ "$MODE" != "4" ]]; then
@@ -255,6 +278,23 @@ close_line() {
 # first message asks to read the file. stdin stays the terminal. TELESMA_PROMPT_VIA_FILE=1 forces
 # the Windows route elsewhere (tests).
 run_claude() {
+    # Every Claude session the launcher starts leaves one `session` row in the usage record
+    # (.git/telesma-usage/usage.jsonl, change plan K13) and one line for the person. Neither can
+    # stop anything: a failure prints nothing.
+    local _since _rc=0 _line _tasks _time _tokens _cache _models
+    _since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    run_claude_once "$@" || _rc=$?
+    _line=$(python3 "$SCRIPT_DIR/tools/telesma_usage.py" session --since "$_since" --mode "${MODE:-setup}" \
+        --project "$PROJECT_DIR" 2> /dev/null) || _line=""
+    if [[ -n "$_line" ]]; then
+        IFS=$'\t' read -r _tasks _time _tokens _cache _models <<< "$_line"
+        echo ""
+        echo -e "${CYAN}$(msg usage.session 'This session: %s tasks in %s, %s tokens (%s of the input from the cache), %s. Details: telesma.sh --usage' "$_tasks" "$_time" "$_tokens" "$_cache" "$_models")${NC}"
+    fi
+    return $_rc
+}
+
+run_claude_once() {
     local how="$1" prompt="$2" f arg a rc=0 continued=false limit=0 size
     shift 2
     size=${#prompt}

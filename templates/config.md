@@ -260,6 +260,10 @@
   <!-- Session budget: after this many finished tasks / hours since the launcher started the     -->
   <!-- session, `next` hands out nothing and writes telesma/state/BLOCKED.md. The next start      -->
   <!-- shows the reason and asks you whether to go on. The values are read once, at the start.   -->
+- **Max tokens per session**: none
+  <!-- The same stop after this many tokens in the session (input + output + cache read + cache  -->
+  <!-- write, as Claude Code records them; e.g. 300M). Cache reads are most of it in a long       -->
+  <!-- session — look at `telesma.sh --usage` for what a session of yours takes before you set it. -->
 - **Report progress**: yes
 - **Rotate state files**: yes
   <!-- REPORT.md, PROJECT_CONTEXT.md and PLAN.md go IN FULL into the startup prompt         -->

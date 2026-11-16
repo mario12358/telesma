@@ -4,6 +4,7 @@
 Every case builds a git project in a temp directory; the trust record goes to a temp
 XDG_CONFIG_HOME. Nothing here touches this repository.
 """
+import datetime
 import json
 import os
 import re
@@ -21,12 +22,16 @@ sys.path.insert(0, str(TELESMA / "tools"))
 sys.path.insert(0, str(TELESMA / "templates" / "setup"))
 import telesma_state as ts  # noqa: E402
 import trust  # noqa: E402
+import telesma_usage as tu  # noqa: E402
 
 FAILURES = []
 XDG = tempfile.mkdtemp(prefix="telesma-task-xdg-")
 ENV = dict(os.environ, XDG_CONFIG_HOME=XDG, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid", TELESMA_TEST_TIMEOUT="60")
 ENV.pop("GIT_DIR", None)
+# Claude Code's transcripts: a directory of this test's own (the usage record reads them, K13)
+CLAUDE_DIR = Path(tempfile.mkdtemp(prefix="telesma-task-claude-"))
+ENV["CLAUDE_CONFIG_DIR"] = str(CLAUDE_DIR)
 
 
 def ok(cond, desc):
@@ -549,6 +554,112 @@ task(k4, "session-start")
 import time; time.sleep(1)
 rc, out = task(k4, "next")
 ok("Budget: Max hours per session" in out, "the session's hour limit")
+
+print("usage record (K13)")
+
+
+def transcript(d, name, rows):
+    folder = CLAUDE_DIR / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(d))
+    path = folder / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def reply(ts_, mid, model="claude-opus-5-5", out=100, read=1000):
+    u = {"input_tokens": 3, "output_tokens": out, "cache_read_input_tokens": read, "cache_creation_input_tokens": 50}
+    return [{"type": "assistant", "timestamp": ts_, "requestId": "r" + mid, "version": "2.1.323",
+             "message": {"id": mid, "model": model, "content": [{"type": "text", "text": "x"}], "usage": u}},
+            {"type": "assistant", "timestamp": ts_, "requestId": "r" + mid, "version": "2.1.323",
+             "message": {"id": mid, "model": model, "content": [{"type": "tool_use", "name": "Read"}], "usage": u}}]
+
+
+def utcnow(shift=0):
+    return tu.iso(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=shift))
+
+
+record = lambda d: d / ".git" / "telesma-usage" / "usage.jsonl"  # noqa: E731
+u = project()
+session_since = utcnow(-5)
+transcript(u, "s1.jsonl", reply(utcnow(-3600), "old"))           # before next: not the task's
+task(u, "next")
+transcript(u, "s1.jsonl", reply(utcnow(), "m1") + reply(utcnow(), "m2", model="claude-haiku-5-5", out=10, read=0))
+transcript(u, "s1/subagents/agent-a.jsonl", reply(utcnow(), "s1", model="claude-haiku-5-5", out=20, read=0))
+(u / "greet.py").write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
+rc, out = task(u, "done")
+rows = [json.loads(x) for x in record(u).read_text(encoding="utf-8").splitlines()] if record(u).exists() else []
+row = rows[0] if rows else {}
+models = (row.get("usage") or {}).get("models", {})
+ok(rc == 0 and len(rows) == 1 and row["type"] == "task" and row["task"] == "1.1" and row["phase"] == "1",
+   "done writes one task row into .git/telesma-usage/usage.jsonl")
+ok(models.get("claude-opus-5-5", {}).get("output") == 100 and models.get("claude-haiku-5-5", {}).get("output") == 30,
+   "the row: one response split over two lines counted once, the subagent added, the earlier response left out, "
+   "two models apart")
+ok(row.get("commit") and sh(u, "git", "rev-parse", "HEAD").stdout.startswith(row["commit"])
+   and row.get("attempts") == 1 and row.get("diff", {}).get("files", 0) >= 1 and row["usage"]["versions"] == ["2.1.323"],
+   "with the commit, the attempts, the diff and the Claude Code version")
+ok(sh(u, "git", "status", "--porcelain").stdout.strip() == "", "the record is not in the work tree (nothing to commit)")
+task(u, "next")
+(u / "tests" / "test_red.py").write_text("import unittest\n\nclass R(unittest.TestCase):\n"
+                                         "    def test_r(self):\n        self.fail('no')\n", encoding="utf-8")
+before = record(u).read_bytes()
+rc, out = task(u, "done")
+ok(rc == 1 and record(u).read_bytes() == before, "a refused done leaves the record byte for byte as it was")
+r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"), "session", "--since", session_since,
+                    "--mode", "1", "--project", str(u)], env=ENV, capture_output=True, text=True)
+rows = [json.loads(x) for x in record(u).read_text(encoding="utf-8").splitlines()]
+ok(r.returncode == 0 and r.stdout.split("\t")[0] == "1" and rows[-1]["type"] == "session" and rows[-1]["tasks"] == 1
+   and rows[-1]["in_tasks"]["output"] == 130, f"the launcher's session row counts the task in it ({r.stdout.strip()})")
+r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"), "report", str(u)], env=ENV,
+                   capture_output=True, text=True)
+ok("Tasks finished: 1" in r.stdout and "By phase" in r.stdout and "Most tokens" in r.stdout
+   and "claude-opus-5-5" in r.stdout, "telesma.sh --usage: the summary")
+r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"), "report", str(u), "--csv"], env=ENV,
+                   capture_output=True, text=True)
+ok(r.stdout.startswith("type,from,to,task") and len(r.stdout.strip().splitlines()) == 3, "--csv: a header and every row")
+k5 = project(plan=TWO, **{"Max tokens per session": "1k"})
+task(k5, "session-start")
+transcript(k5, "s.jsonl", reply(utcnow(), "big", out=900, read=900))
+rc, out = task(k5, "next")
+ok("Budget: Max tokens per session" in out, "the session's token limit (1k)")
+n = project()
+task(n, "next")
+(n / "greet.py").write_text("x = 1\n", encoding="utf-8")
+rc, out = task(n, "done")
+rows = [json.loads(x) for x in record(n).read_text(encoding="utf-8").splitlines()] if record(n).exists() else []
+ok(rc == 0 and rows and rows[0]["usage"] is None and "no transcripts" in rows[0].get("note", ""),
+   "no transcripts on this machine: the task is committed, the row says why it has no numbers")
+w = project(plan=TWO)
+transcript(w, "s.jsonl", reply(utcnow(), "a"))
+task(w, "next")
+(w / "a.py").write_text("A = 1\n", encoding="utf-8")
+task(w, "done")
+time.sleep(1.1)
+transcript(w, "s.jsonl", reply(utcnow(), "b"))                  # the work, before next
+time.sleep(1.1)
+task(w, "next")
+transcript(w, "s.jsonl", reply(utcnow(), "c"))                  # the call of done
+(w / "b.py").write_text("B = 1\n", encoding="utf-8")
+task(w, "done")
+rows = [json.loads(x) for x in record(w).read_text(encoding="utf-8").splitlines()]
+ok(len(rows) == 2 and rows[1]["from"] == rows[0]["to"] and rows[1]["issued"] > rows[1]["from"]
+   and tu.sums(rows[1]["usage"])["output"] == 200,
+   "work done before next counts for the task: in one session the window opens where the previous task ended")
+old = dict(rows[1], usage={"models": {}, "turns": 0}, task="Test: 1.2 — the test of b")
+old["from"] = old.pop("issued")
+record(w).write_text(json.dumps(rows[0]) + "\n" + json.dumps(old) + "\n", encoding="utf-8")
+r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"), "rebuild", str(w)], env=ENV,
+                   capture_output=True, text=True)
+rows = [json.loads(x) for x in record(w).read_text(encoding="utf-8").splitlines()]
+ok(r.returncode == 0 and tu.sums(rows[1]["usage"])["output"] == 200 and rows[1]["task"] == "1.2/test"
+   and "wall_minutes" in rows[1], f"rebuild recounts an old row from the transcripts ({r.stdout.strip()})")
+t0 = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+ok(tu.active_seconds([t0 + datetime.timedelta(seconds=s) for s in (0, 30, 30 + 7200, 30 + 7200 + 30)]) == 60,
+   "working time leaves a two-hour pause out")
+ok([tu.task_label(x) for x in ("1.1", "Test: 14.3 — Vitest: x", "Task 2.4: y", "Phase 3 notes")]
+   == ["1.1", "14.3/test", "2.4", "Phase 3 notes"], "short task names in the record")
+shutil.rmtree(w, ignore_errors=True)
 
 print("release (Z6)")
 r = project(plan="# Plan\n\n## Tasks\n\n### Phase 1: A\n\n- [x] Task 1.1: a\n")

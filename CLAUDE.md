@@ -93,6 +93,8 @@ tools/
 ├── telesma-guard.py                 PreToolUse "code only" guard: refuses git / gh writes, ticks in PLAN.md and edits
 │                                  of REPORT.md's history sections (format 21+)
 ├── telesma-repair.py                State-file diagnosis (every start) and repair (--repair)
+├── telesma_usage.py               The usage record (K13): tokens per task / session from Claude Code's
+│                                  transcripts → .git/telesma-usage/usage.jsonl; `--usage` report
 ├── telesma-telemetry.py             Optional quality telemetry collector (schema 2)
 ├── telesma-survey.py                Git digest + survey units for --adopt (SURVEY: block, Phase 0 tasks)
 ├── telesma-specky-snapshots.py      Backfill Specky release snapshots for existing vX.Y.Z tags
@@ -193,7 +195,10 @@ is written in the user's `Language`; the structure is always English.
   then ticks the task, writes the `Task history` row and commits with the footer. A refusal leaves
   PLAN.md and REPORT.md byte-identical. `next` and the launcher's hint choose the task with the same
   code (`tools/telesma_state.py`). The reservation lives in `.git/telesma-task/` — this machine's
-  data; it keeps a careless model in line, not a determined one.
+  data; it keeps a careless model in line, not a determined one. A finished task also leaves a row
+  in `.git/telesma-usage/usage.jsonl` (tokens from `next` — or the previous task's end in the same
+  session — to `done`, read from Claude Code's
+  transcripts; counters only, never committed, never in a prompt); a failure there is a note, never a refusal.
 - **The "code only" guard refuses, by design** (`tools/telesma-guard.py`, registered by the launcher
   on every start, whatever `## Auto-approval` and `## Checks` say): git commands that write history
   or move refs, GitHub writes through `gh`, a tick or untick in PLAN.md, and edits of `Task history`,
@@ -205,7 +210,7 @@ is written in the user's `Language`; the structure is always English.
   `(pr: #n)`, history rows, the phase run on main) is derived on main and committed by a state PR.
   A command it cannot read that mentions a git write is refused; an internal error lets the call through.
 - **The session budget is the script's** (`## Telesma loop` → `Max refusals per task`, `Max attempts
-  per task`, `Max tasks per session`, `Max hours per session`): the launcher snapshots the limits at
+  per task`, `Max tasks per session`, `Max hours per session`, `Max tokens per session`): the launcher snapshots the limits at
   `session-start`, the task tool counts and, past a limit, writes BLOCKED.md and marks the session;
   the guard then refuses everything but reads (with an integration too). Going on is the person's
   answer at the next start of the launcher, never the agent's.
@@ -307,6 +312,7 @@ A parser change comes with a fixture that would have failed before it. The bench
 ./telesma.sh --repair /path/to/project         # repair state files from git history, no Claude
 ./telesma.sh --home [folder]                   # start menu of the desktop shortcut: new idea or a project
 ./telesma.sh --doctor [project]                # what this machine still needs (git, python3, claude, sign-in; the project's tools)
+./telesma.sh --usage [--csv] /path/to/project  # tokens, time and model per task / phase / model / week / release, no Claude
 ./telesma.sh --integrations /path/to/project   # GitHub / Specky wizard
 ./telesma.sh --sync-specky /path/to/project    # Specky sync into telesma/changes/, no loop
 ```

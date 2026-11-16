@@ -224,10 +224,16 @@ class SharedHub(http.server.BaseHTTPRequestHandler):
 TRANSCRIPT = [
     {"type": "user", "timestamp": "2026-02-02T10:00:00Z",
      "message": {"role": "user", "content": "CANARY_TRANSCRIPT start\n\nMODE: autonomous"}},
-    {"type": "assistant", "timestamp": "2026-02-02T10:05:00Z",
-     "message": {"model": "claude-opus-5", "content": [
+    # One response, written as two lines with the same id and the same usage (as Claude Code
+    # does, one line per content block): its tokens count once.
+    {"type": "assistant", "timestamp": "2026-02-02T10:05:00Z", "requestId": "req_1",
+     "message": {"id": "msg_1", "model": "claude-opus-5", "content": [
          {"type": "text", "text": "CANARY_TRANSCRIPT"},
-         {"type": "tool_use", "name": "Read", "input": {"file_path": "CANARY_TRANSCRIPT"}},
+         {"type": "tool_use", "name": "Read", "input": {"file_path": "CANARY_TRANSCRIPT"}}],
+                 "usage": {"input_tokens": 10, "output_tokens": 200,
+                           "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 40}}},
+    {"type": "assistant", "timestamp": "2026-02-02T10:05:01Z", "requestId": "req_1",
+     "message": {"id": "msg_1", "model": "claude-opus-5", "content": [
          {"type": "tool_use", "name": "Bash", "input": {"command": "echo CANARY_TRANSCRIPT"}}],
                  "usage": {"input_tokens": 10, "output_tokens": 200,
                            "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 40}}},
@@ -236,6 +242,17 @@ TRANSCRIPT = [
          {"type": "tool_result", "is_error": True, "content": "CANARY_TRANSCRIPT"},
          {"type": "tool_result", "content": "ok"}]}},
     {"type": "system", "subtype": "compact_boundary", "timestamp": "2026-02-02T10:30:00Z"},
+]
+
+# A subagent of that session (`<session>/subagents/agent-*.jsonl`): its tokens are the session's.
+SUBAGENT = [
+    {"type": "user", "isSidechain": True, "timestamp": "2026-02-02T10:10:00Z",
+     "message": {"role": "user", "content": "CANARY_TRANSCRIPT find it"}},
+    {"type": "assistant", "isSidechain": True, "timestamp": "2026-02-02T10:11:00Z",
+     "message": {"id": "msg_s1", "model": "claude-haiku-5", "content": [
+         {"type": "tool_use", "name": "Grep", "input": {"pattern": "CANARY_TRANSCRIPT"}}],
+                 "usage": {"input_tokens": 5, "output_tokens": 50,
+                           "cache_read_input_tokens": 100, "cache_creation_input_tokens": 0}}},
 ]
 
 
@@ -543,6 +560,10 @@ def main():
         sessions.mkdir(parents=True)
         (sessions / "11111111-2222-3333-4444-555555555555.jsonl").write_text(
             "\n".join(json.dumps(r) for r in TRANSCRIPT), encoding="utf-8")
+        subagents = sessions / "11111111-2222-3333-4444-555555555555" / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent-a1.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in SUBAGENT), encoding="utf-8")
 
         before = file_bytes(project)
         ev = events(project, home)
@@ -636,10 +657,14 @@ def main():
         se = next(e for e in ev if e["type"] == "session")["metrics"]
         check(se["mode"] == "autonomous" and se["model"] == "claude-opus-5"
               and (se["tool_calls"], se["tool_errors"], se["compactions"]) == (2, 1, 1)
-              and se["tokens"]["output"] == 200 and se["wall_minutes"] == 30
-              and se["tools_by_name"] == {"Read": 1, "Bash": 1}
+              and se["tokens"] == {"input": 15, "output": 250, "cache_read": 3100, "cache_write": 40}
+              and se["turns"] == 2 and se["subagents"] == 1 and se["counters"] == 4
+              and se["models"] == {"claude-opus-5": 1, "claude-haiku-5": 1}
+              and se["wall_minutes"] == 30
+              and se["tools_by_name"] == {"Read": 1, "Bash": 1, "Grep": 1}
               and se["startup_prompt_chars"] == len("CANARY_TRANSCRIPT start\n\nMODE: autonomous"),
-              "session: mode, model, tokens, tool errors, compactions, tools by name, prompt size")
+              "session: mode, model, tokens (one response split over lines counted once, the "
+              "subagent's added), tool errors, compactions, tools by name, prompt size")
         st_d = next(e for e in ev if e["type"] == "state")["metrics"]["diagnosis"]
         check(isinstance(st_d, dict) and set(st_d) == {"damage", "notice"},
               f"state carries the state-file diagnosis as numbers only ({st_d})")

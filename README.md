@@ -134,6 +134,9 @@ usage limits.
   only ever removes prompts, never adds blocks. → [Judge](docs/PERMISSION_JUDGE.md)
 - **Integrations** (optional) — GitHub pull-request workflow and the Specky requirements tracker.
   → [Integrations](docs/INTEGRATIONS.md)
+- **Know what each task cost** — tokens, time, model and tries per task, read from Claude Code's
+  own transcripts by a script and kept on your machine: `telesma --usage` breaks them down by phase,
+  model, week and release, and every session ends with one line. No telemetry needed.
 - **Cheap to restart** — state-file rotation, a startup-prompt diet and a git-based repair of
   damaged state files.
 

@@ -450,3 +450,4 @@ sup.changed.how = Jeśli zmieniłeś je sam, to tylko przypomnienie. Jeśli nie 
 survey.hasplan = telesma/state/PLAN.md zawiera już zadania, ale nie ma Phase 0 — ten projekt już działa z Telesmą, a przegląd zastąpiłby jego plan.
 survey.hasplan.how = Ustaw Adopted: no w telesma/config.md (## Project), żeby pracować dalej z planem; nic nie zostało zmienione.
 inst.git.timeout = Narzędzia wiersza poleceń nie pojawiły się. Uruchom samodzielnie %s, a potem jeszcze raz instalator.
+usage.session = Ta sesja: zadania %s w %s, tokeny %s (%s wejścia z cache), %s. Szczegóły: telesma.sh --usage
