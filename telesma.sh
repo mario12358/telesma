@@ -56,7 +56,7 @@ MODE=""
 # migration to the version gate below) AND for every change to the instructions or guidelines
 # whose effect should be measurable: telemetry stamps events with this number and only by it
 # tells "before the change" from "after".
-TELESMA_FORMAT=23
+TELESMA_FORMAT=24
 
 # The task loop's mechanical steps (tools/telesma-task.py: next / done / commit). It runs from this
 # clone and is never copied into the project, so the agent cannot rewrite it without a question.
@@ -619,6 +619,10 @@ if [[ -f "$VERSION_FILE" ]]; then
                                        #     tags, task-branch pushes, gh pr create) leave config.md and
                                        #     settings.local.json — the guard refuses those commands anyway
                 python3 "$SCRIPT_DIR/templates/setup/retired_rules.py" apply "$PROJECT_DIR" > /dev/null 2>&1 || true ;;
+            23) PROJECT_FORMAT=24 ;;   # 24: known sandbox limits asked once (## Sandbox → Limits asked, reaches
+                                       #     config.md through the merge), e2e the session cannot run waits for
+                                       #     the person, ## Tests set at clarification, inherited findings at
+                                       #     adoption (instructions + task tool; nothing else changes)
             *) break ;;
         esac
         write_version "$PROJECT_FORMAT"
@@ -3391,7 +3395,18 @@ run_survey() {
         printf '%s\n' "$out" | head -30 | sed 's/^/  /'
         b=$(printf '%s\n' "$out" | sed -n 's/^BLOCK (\([0-9]*\)).*/\1/p' | head -1)
         w=$(printf '%s\n' "$out" | sed -n 's/^WARN (\([0-9]*\)).*/\1/p' | head -1)
+        # Blocking findings of the code as found would stop the first phase tag (a vulnerable
+        # lockfile nobody touched yet): the person, here at the terminal, may accept them as
+        # inherited — exceptions marked so, each still a task for the survey (change plan K16).
+        local inherited=0 before_exc after_exc
+        if [[ "${b:-0}" -gt 0 && -t 0 && -t 1 ]]; then
+            before_exc=$(grep -c 'inherited at adoption' "$TELESMA_DIR/state/CHECK_EXCEPTIONS.md" 2>/dev/null || true)
+            (cd "$PROJECT_DIR" && python3 telesma/checks/telesma-checks.py --inherit "$PROJECT_DIR" --sha "$sha") || true
+            after_exc=$(grep -c 'inherited at adoption' "$TELESMA_DIR/state/CHECK_EXCEPTIONS.md" 2>/dev/null || true)
+            inherited=$(( ${after_exc:-0} - ${before_exc:-0} ))
+        fi
         checks_line="[$today] Adoption: checks dry run (ci point, whole repository): ${b:-0} blocking, ${w:-0} warnings — rules and files in telesma/state/CHECKS.jsonl; a false alarm is waived by the owner in telesma/state/CHECK_EXCEPTIONS.md, a real finding becomes a task"
+        [[ "$inherited" -gt 0 ]] && checks_line+="; $inherited accepted by the owner as inherited (CHECK_EXCEPTIONS.md, \"inherited at adoption\") — each still needs a task"
     fi
     if [[ -n "$baseline" || -n "$checks_line" ]]; then
         python3 - "$REPORT_FILE" "$baseline" "$checks_line" "$today" "${counts:-}" <<'PYBASE'
@@ -3973,6 +3988,35 @@ if command -v python3 &> /dev/null; then
         "$PROJECT_DIR/.claude/settings.local.json" "$_sbmode" 2>/dev/null) || true
     case "$_sandbox" in
         on) echo -e "${GREEN}$(msg sandbox.on 'Sandbox: on — commands write only inside the project and reach only the listed hosts.')${NC}"
+            # Known limits no setting fixes (sandbox.py KNOWN_LIMITS, change plan K12): asked once,
+            # here, before the loop meets them as a BLOCKED in the middle of a phase. The answer is
+            # written into ## Sandbox (Limits asked, Excluded commands) and stamped as our own write.
+            _limits=$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" limits "$PROJECT_DIR" 2>/dev/null) || _limits=""
+            if [[ -n "$_limits" ]]; then
+                _answered=false
+                while IFS=$'\t' read -r _lkey _lpat _lmsg; do
+                    [[ -n "$_lkey" ]] || continue
+                    # the person's language: each limit's message by its own key (the English text from sandbox.py)
+                    case "$_lkey" in
+                        playwright) _lmsg=$(msg sandbox.limit.playwright "$_lmsg") ;;
+                        docker) _lmsg=$(msg sandbox.limit.docker "$_lmsg") ;;
+                        watchman) _lmsg=$(msg sandbox.limit.watchman "$_lmsg") ;;
+                    esac
+                    echo -e "${YELLOW}$(msg sandbox.limit 'Sandbox limit (%s): %s' "$_lkey" "$_lmsg")${NC}"
+                    [[ -t 0 && -t 1 ]] || continue
+                    _lans=n
+                    if [[ "$_lpat" != "-" ]]; then
+                        read -r -p "  $(msg sandbox.limit.ask 'Run %s outside the sandbox (a question before each run)?' "$_lpat") [$(msg no.yes 'y/N')]: " _lans < /dev/tty || _lans=n
+                    fi
+                    case "$_lans" in [yYtT]*) _lans=yes ;; *) _lans=no ;; esac
+                    python3 "$SCRIPT_DIR/templates/setup/sandbox.py" answer "$PROJECT_DIR" "$_lkey" "$_lans" > /dev/null && _answered=true
+                done <<< "$_limits"
+                if [[ "$_answered" == true ]]; then
+                    trust_stamp
+                    python3 "$SCRIPT_DIR/templates/setup/sandbox.py" sync "$PROJECT_DIR" \
+                        "$PROJECT_DIR/.claude/settings.local.json" "$_sbmode" > /dev/null 2>&1 || true
+                fi
+            fi
             # What runs outside it, said at every start; each pattern is also an "ask" rule (sandbox.py).
             # In Claude Code's `auto` mode a classifier answers that question instead of the person.
             _sbx=$(python3 "$SCRIPT_DIR/templates/setup/sandbox.py" excluded "$PROJECT_DIR" 2>/dev/null | head -n 5 | tr '\n' ',' | sed 's/,$//; s/,/, /g') || _sbx=""

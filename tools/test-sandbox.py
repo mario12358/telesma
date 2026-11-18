@@ -265,6 +265,49 @@ ok(SCRIPT.index("sandbox.py\" sync") > SCRIPT.index('[[ "$MODE" == "2" ]] && INT
 ok(SCRIPT.count("sandbox_default ") >= 2, "both places that create a config start it with the sandbox on")
 ok("21) PROJECT_FORMAT=22" in SCRIPT, "format 22 (the sandbox) has its gate step")
 
+print("sandbox.py — known limits (K12): asked once, the answer kept in the config")
+real_system, real_which = sandbox.platform.system, sandbox.shutil.which
+sandbox.platform.system = lambda: "Darwin"
+sandbox.shutil.which = lambda name: None
+d = project()
+(d / "package.json").write_text('{"devDependencies": {"@playwright/test": "1.0.0"}}', encoding="utf-8")
+(d / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+keys = [k for k, _, _ in sandbox.limits(str(d))]
+ok(keys == ["playwright", "docker"], f"Playwright on macOS and a compose file → two limits ({keys})")
+sandbox.answer(str(d), "playwright", True)
+sandbox.answer(str(d), "docker", False)
+_, _, extra = sandbox.section(str(d))
+text = (d / "telesma" / "config.md").read_text(encoding="utf-8")
+ok(extra["Excluded commands"] == ["npx playwright test *"], "yes → the pattern is in Excluded commands")
+ok("- **Limits asked**: playwright, docker" in text, "both answers are recorded in Limits asked")
+ok(sandbox.limits(str(d)) == [], "nothing is asked again")
+rc, out, data = run(d)
+ok((data or {}).get("sandbox", {}).get("excludedCommands") == ["npx playwright test *"]
+   and "Bash(npx playwright test *)" in data.get("permissions", {}).get("ask", []),
+   "the answered exclusion reaches the settings with its ask rule")
+sandbox.platform.system = lambda: "Linux"
+d2 = project()
+(d2 / "package.json").write_text('{"devDependencies": {"@playwright/test": "1.0.0", "jest": "29"}}', encoding="utf-8")
+sandbox.shutil.which = lambda name: "/usr/bin/watchman" if name == "watchman" else None
+ok(sandbox.limits(str(d2)) == [], "the macOS limits are not asked on Linux")
+sandbox.platform.system = lambda: "Darwin"
+ok([k for k, _, _ in sandbox.limits(str(d2))] == ["playwright", "watchman"], "jest + watchman on macOS → advice")
+d3 = project(enabled="no")
+(d3 / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+ok(sandbox.limits(str(d3)) == [], "a sandbox that is off has no limits to ask about")
+d4 = project()
+configure(d4, lambda t: re.sub(r"- \*\*Limits asked\*\*:.*\n(  <!--.*\n)*", "", t))
+(d4 / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+sandbox.answer(str(d4), "docker", True)
+_, _, extra = sandbox.section(str(d4))
+ok(extra["Excluded commands"] == ["docker compose *"] and "- **Limits asked**: docker"
+   in (d4 / "telesma" / "config.md").read_text(encoding="utf-8"), "an older config without the field gets it")
+sandbox.platform.system, sandbox.shutil.which = real_system, real_which
+for x in (d, d2, d3, d4):
+    shutil.rmtree(x, ignore_errors=True)
+ok("sandbox.py\" limits" in SCRIPT and "sandbox.py\" answer" in SCRIPT and "trust_stamp" in SCRIPT,
+   "the launcher asks, writes the answer and stamps it as its own write")
+
 if FAILURES:
     print(f"\nFAILED: {len(FAILURES)}")
     sys.exit(1)

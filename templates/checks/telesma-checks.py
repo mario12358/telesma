@@ -68,6 +68,10 @@ Modes:
                           module files identical to the delivered templates; with --config-section
                           (right after the launcher's own wizard wrote it) also the ## Checks section
   --approve [DIR]         the human, in a terminal: approve the current state of the check files
+  --inherit [DIR] [--sha SHA]
+                          the human, in a terminal (the launcher's adoption start): the blocking
+                          findings of INHERITABLE checks in the code as adopted → exceptions marked
+                          `inherited at adoption <sha>`; new findings still block
 """
 import datetime
 import hashlib
@@ -902,6 +906,21 @@ def load_exceptions(root):
         return set()
 
 
+# Checks whose findings in the code as adopted may be accepted as inherited (--inherit). A
+# vulnerable lockfile or a SAST pattern in code nobody touched yet is the system as found: the
+# survey turns it into a task. Not `secrets`: a committed key is to be rotated now, not waived.
+INHERITABLE = ('dependency-audit', 'sast')
+INHERITED_MARK = 'inherited at adoption'
+
+
+def load_inherited(root):
+    try:
+        with open(os.path.join(root, EXCEPTIONS), encoding='utf-8') as f:
+            return set(re.findall(r'^\s*-\s*`([0-9a-f]{12})`[^\n]*' + INHERITED_MARK, f.read(), re.M))
+    except OSError:
+        return set()
+
+
 # Claude Code runs the hook without the user's shell profile, so PATH lacks the directories of
 # tool installers: on one project clippy, fmt and cargo check passed as "tool missing", because
 # the hook did not see ~/.cargo/bin. We add the ones that exist, at the end — the user's PATH
@@ -1504,7 +1523,7 @@ def bash_touches_protected(cmd):
     command hides from this reading is caught by the integrity baseline at the next commit."""
     if not PROTECTED_MENTION.search(cmd):
         return False
-    if re.search(r'telesma-checks\.py[^\n;&|]*--(approve|baseline)\b', cmd):
+    if re.search(r'telesma-checks\.py[^\n;&|]*--(approve|baseline|inherit)\b', cmd):
         return True
     members = command_members(cmd)
     if members is None:
@@ -1758,6 +1777,69 @@ def mode_approve(root):
     return 0
 
 
+def mode_inherit(root, sha):
+    """The human, in a terminal, at the adoption start: the blocking findings of the INHERITABLE
+    checks over the whole repository (the ci point) become exceptions marked as inherited, so the
+    first phase tag is not stopped by the code as it was found. New findings — another
+    vulnerability, another file — have other fingerprints and still block. The integrity baseline
+    follows only when nothing else differed from it, so this never approves an unreviewed change."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        sys.stderr.write('--inherit records what the HUMAN accepted: run it yourself in a terminal '
+                         '(it needs a terminal on stdin and stdout).\n')
+        return 2
+    if not load_config(root)['enabled']:
+        print('Checks disabled (## Checks → Enabled: no).')
+        return 0
+    clean_before = not integrity_drift(root)
+    try:
+        b, _, _, _ = run_point(root, 'ci')
+    except GitError as err:
+        print(f'CHECK ERROR: {err} - the scope could not be read, nothing was accepted')
+        return 1
+    found = {}
+    for x in b:
+        if x['check'] in INHERITABLE:
+            found.setdefault(x['fingerprint'], x)
+    if not found:
+        print('No blocking finding of ' + ', '.join(INHERITABLE) + ' in the code as found.')
+        return 0
+    per = {}
+    for x in found.values():
+        key = x['check'] + (f'/{x["rule"]}' if x.get('rule') else '')
+        per[key] = per.get(key, 0) + 1
+    print(f'Blocking findings in the code as found ({len(found)}):')
+    for k in sorted(per):
+        print(f'  - {k}: {per[k]}')
+    print(describe(sorted(found.values(), key=lambda x: (x['check'], x['file'])), 15))
+    try:
+        answer = input('Accept them as inherited (they become tasks; a new finding still blocks)? [Y/n] ').strip().lower()
+    except EOFError:
+        answer = 'n'
+    if answer not in ('', 'y', 'yes', 't', 'tak'):
+        print('Nothing recorded — the first phase tag waits until they are fixed or excepted.')
+        return 1
+    path = os.path.join(root, EXCEPTIONS)
+    old = read_text(path) or ''
+    day = datetime.date.today().isoformat()
+    label = f'{INHERITED_MARK} {sha}' if sha else INHERITED_MARK
+    lines = [f'- `{fp}` — {x["check"]}{"/" + x["rule"] if x.get("rule") else ""} {x["file"]} — {label} ({day})'
+             for fp, x in sorted(found.items(), key=lambda kv: (kv[1]['check'], kv[1]['file']))]
+    text = (old.rstrip('\n') + '\n\n' if old.strip() else '# Check exceptions\n\n') \
+        + f'## Inherited at adoption ({day})\n\n' + '\n'.join(lines) + '\n'
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + f'.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text)
+    os.replace(tmp, path)
+    if clean_before:
+        write_baseline(root)
+        print(f'Recorded {len(found)} inherited finding(s) in {EXCEPTIONS}.')
+    else:
+        print(f'Recorded {len(found)} inherited finding(s) in {EXCEPTIONS}. Other check files differed '
+              f'from the approved state already — review them: python3 {DIRECTORY}/telesma-checks.py --approve')
+    return 0
+
+
 # --- Hook ---------------------------------------------------------------------------------
 
 def respond(decision, reason):
@@ -1959,10 +2041,17 @@ def mode_point(point, since):
         print('Checks disabled (## Checks → Enabled: no).')
         return 0
     try:
-        b, w, e, _ = run_point(root, point, since=since, vouched=True)
+        b, w, e, log = run_point(root, point, since=since, vouched=True)
     except GitError as err:
         print(f'CHECK ERROR: {err} - the scope could not be read, nothing was checked')
         return 1
+    inherited = load_inherited(root)
+    still = sorted({x['fingerprint'] for x in log if x.get('decision') == 'exception'
+                    and x.get('fingerprint') in inherited})
+    if still:
+        # Accepted, not gone: every phase says how many are left, so they stay somebody's task
+        print(f'INHERITED ({len(still)}): findings accepted at adoption are still in the code '
+              f'({EXCEPTIONS}, "{INHERITED_MARK}") — they do not block; their tasks fix them.')
     if b:
         print(f'BLOCK ({len(b)}):\n' + describe(b, 200))
     if w:
@@ -2049,6 +2138,9 @@ def main(argv):
                              config_section='--config-section' in argv)
     if '--approve' in argv:
         return mode_approve(argument_after(argv, '--approve', os.getcwd()))
+    if '--inherit' in argv:
+        return mode_inherit(argument_after(argv, '--inherit', os.getcwd()),
+                            argument_after(argv, '--sha', '') if '--sha' in argv else '')
     if '--files-commit' in argv:
         return mode_files_commit()
     if '--record-commit' in argv:

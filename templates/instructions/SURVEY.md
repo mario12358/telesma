@@ -123,7 +123,18 @@ Append a `## <Module>` section to `AS_BUILT.md` (the heading is the anchor later
    `REPORT.md → Problem log`): read `telesma/state/CHECKS.jsonl` for the rules and files, group
    them into open questions ("3 secrets findings in `config/…`: real or false alarms? exceptions
    go into `telesma/state/CHECK_EXCEPTIONS.md`, written by the owner"). Never quote a finding's
-   content, only rule and file.
+   content, only rule and file. Findings the owner accepted at that start as inherited (the entry
+   says so; their lines in `CHECK_EXCEPTIONS.md` carry `inherited at adoption`) do not block, but
+   they are not resolved: one `📌` row in `## Known problems and solutions` per check (`39
+   dependency-audit findings inherited at adoption — accepted, not fixed`) and an open question
+   on when to fix them, so the clarification plans it.
+3a. **`## Tests` in `telesma/config.md`**: when the code configures a linter or a typechecker
+   (`eslint.config.*`, `.eslintrc*`, `[tool.ruff]`, `tsconfig.json`, `mypy.ini`) and `Linter/formatter`
+   or `Typecheck command` is still `none` or a placeholder, set it to the tool itself through the
+   project's environment (`npx eslint .`, `uv run ruff check`, `npx tsc --noEmit`), never a script
+   such as `yarn lint`: the `lint-types` check runs only that form. Leave `Test command` and
+   `Lint before commit` as they are. The person confirms the change at the next start, before the
+   clarification, so the loop never stops on it.
 4. `PROJECT_CONTEXT.md → ## Current state`: `Adopted at <sha> (<date>); survey done <today>; next:
    the owner reviews AS_BUILT.md and puts what should happen next into telesma/spec/`.
 5. `REPORT.md → ## Summary`: Status `Survey done` (the `Progress` line and the `Task history` rows

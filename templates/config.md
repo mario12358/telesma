@@ -340,6 +340,9 @@
 - **Excluded commands**:
   <!-- Commands that run outside the sandbox, e.g. `- docker compose *` (Docker does not work  -->
   <!-- inside it). Each one is a hole: it runs with all your rights.                            -->
+- **Limits asked**:
+  <!-- Known limits of the sandbox you already answered at a start (playwright, docker,        -->
+  <!-- watchman) — Telesma asks about each once, written here by the launcher.                 -->
 
 ## Auto-approval
 

@@ -35,7 +35,10 @@ this phase:
   step 2, a **safety net** first: `Task 1.1: Characterisation tests for <the modules the plan
   touches>` — tests that pin the `[inferred]` behaviour lines of `AS_BUILT.md` before anything
   changes them. A task that changes existing behaviour cites `(spec: AS_BUILT.md)` next to the
-  owner's file, so the loop reads the as-built lines it is about to change. `## Spec coverage`:
+  owner's file, so the loop reads the as-built lines it is about to change. Findings accepted
+  as inherited at adoption (`CHECK_EXCEPTIONS.md`, `inherited at adoption`) each get a task that
+  fixes them (a version bump, a rewrite) or a `telesma/state/BACKLOG.md` item with the owner's
+  reason — an accepted finding with neither is a hole in the plan, like an uncovered section. `## Spec coverage`:
   every `## <Module>` section of `AS_BUILT.md` gets a row — `exists — 0.N` (the Phase 0 task that
   surveyed it) when nothing changes it, or the tasks that do.
 - **Step 6a**: the decisions the code already made (the `📌` rows the survey wrote) are not
@@ -414,9 +417,25 @@ After ALL questions are answered and the contradictions and assumptions are reso
    implementation instructions): without the rows, the most deliberate decisions of the whole
    project — the ones the user answered in person — are invisible to every later session, and a
    change request can quietly reverse them.
+6b. **`## Tests` holds the commands the plan will need — set them now, not in a task.** The
+   loop runs only what the person confirmed on this machine, and the person confirms at the start
+   of a session; a command changed during the loop stops it with TELESMA BLOCKED until the next
+   start. So, from the stack the plan settles on, write into `telesma/config.md → ## Tests`:
+   `Test command`, `Full suite command`, `Linter/formatter`, `Typecheck command` and `Lint before
+   commit` — through the environment the project runs in (`uv run pytest -q`, `poetry run …`,
+   `npx vitest run`, `cd backend && …`) when the stack has one, `none` for a tool the plan does not
+   use. `Linter/formatter` and `Typecheck command` name the tool itself (`npx eslint .`, `ruff
+   check`, `npx tsc --noEmit`), not a script (`npm run lint`, `yarn lint`): the `lint-types` check
+   runs only that form. A field the project cannot run yet (no `package.json` before task 1.1) is still the command
+   it will be: the task that creates the project makes it work. Keep a filled-in value unless the
+   stack changed (an adopted project's test command is the baseline the survey ran). No task gets
+   the criterion "set the commands in `## Tests`" — that is this step; the task writes the tool's own
+   configuration (`eslint.config.js`, `[tool.ruff]`). Name the commands in the closing message, so
+   the person knows what the launcher will ask them to confirm.
 7. **Plan self-review (the last step before finishing):** read the generated plan with fresh
    eyes against the checklist: task atomicity / a feasible order / dependencies exist and have no cycles /
-   a test with every implementation / e2e at the end of every phase with UI / the packaging task
+   a test with every implementation / e2e at the end of every phase with UI / `## Tests` set
+   (step 6b) and no task that edits it / the packaging task
    last (beginner only) / coverage of the gaps from the spec quality
    assessment (the `Topic gaps` section in SPEC_INDEX — a significant gap → a task or a deliberate omission
    in Spec coverage) / **no task line exceeds 400 characters** (rationale and context
@@ -536,6 +555,7 @@ TELESMA: PLAN GENERATED
 The plan is saved in telesma/state/PLAN.md, based on:
 - Documentation: [list of files from telesma/spec/]
 - Answers to [N] clarifying questions
+- Test commands in telesma/config.md → ## Tests: [Test command; Linter/formatter; Typecheck command]
 
 Close this session (type /exit) — the launcher checks the plan and asks whether to start the work.
 ```

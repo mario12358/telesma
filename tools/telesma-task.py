@@ -16,6 +16,12 @@
     telesma-task.py session-start [--continue]
                                            the launcher, before a session: limits snapshot, session counters;
                                            exit 3 when the previous session ran out of its budget
+    telesma-task.py done … --e2e-not-run PATH
+                                           the task's e2e test exists but cannot run in this session (the
+                                           sandbox refuses the browser): committed on its other tests, the
+                                           file waits for the person; `release` refuses while any waits
+    telesma-task.py e2e-ran                the person, in a terminal: the waiting e2e tests ran green outside
+                                           the session — the list is cleared
     telesma-task.py changes-done FILE --kind bug|correction|feature -m SUMMARY
                          [--source X.Y|unknown] [--detected-by WHO] [--withdrawn]
                                            check the plan edit, write Change history, move, commit
@@ -231,18 +237,40 @@ NOT_CONFIRMED = ("the ## Tests section of telesma/config.md is not confirmed on 
                  "the person confirms the section at the next start of the launcher")
 
 
+def not_confirmed(root):
+    """NOT_CONFIRMED with what the person needs to act on it: which fields differ from what they
+    confirmed here, and the exact start that shows them the change (so the BLOCKED message is the
+    same every time instead of each session composing its own)."""
+    changed = []
+    trust = trust_module()
+    if trust is not None:
+        try:
+            before = trust.confirmed_tests(root) or {}
+            current = trust.test_values(trust.read_config(root) or "")
+            if before:
+                changed = [f"{k} `{before.get(k, '').strip() or 'none'}` → `{v.strip() or 'none'}`"
+                           for k, v in current.items() if not same(v, before.get(k, ""))]
+        except Exception:       # a hint only — the refusal stands without it
+            changed = []
+    detail = f" (changed: {'; '.join(changed)})" if changed else ""
+    start = f"{os.path.join(TELESMA, 'telesma.sh')} {root}"
+    return (NOT_CONFIRMED + detail + f". In BLOCKED.md tell the person: type /exit, then start `{start}` — "
+            "it shows the changed values and asks once; the task goes through `done` again after that, "
+            "the code needs no change")
+
+
 def confirmed_tests(root):
     """What may run from `## Tests` while the section waits for the person: None = everything as
     written (confirmed); otherwise {field: value} of what the person last confirmed here. Raises
     Refused when there is nothing to go by (a record from before 1.4.1, or no record)."""
     trust = trust_module()
     if trust is None:
-        raise Refused(NOT_CONFIRMED)
+        raise Refused(not_confirmed(root))
     if "Tests" not in trust.untrusted(root):
         return None
     values = trust.confirmed_tests(root)
     if values is None:
-        raise Refused(NOT_CONFIRMED)
+        raise Refused(not_confirmed(root))
     return values
 
 
@@ -250,7 +278,7 @@ def same(a, b):
     return (a or "").strip() == (b or "").strip() or (ts.unset(a or "") and ts.unset(b or ""))
 
 
-def usable(field, current, confirmed, notes):
+def usable(root, field, current, confirmed, notes):
     """While `## Tests` is unconfirmed: a command that did not change runs; one that is new (was
     none) is skipped with a note; a confirmed command changed or removed refuses — dropping or
     editing a check the person approved is theirs to confirm, not the agent's."""
@@ -260,7 +288,7 @@ def usable(field, current, confirmed, notes):
         notes.append(f"{field} `{current.strip()}` not run until the person confirms ## Tests at the next start")
         return "none"
     raise Refused(f"## Tests → {field} changed from a value confirmed on this machine (`{confirmed.get(field, '')}`) "
-                  f"— it is not run. " + NOT_CONFIRMED)
+                  f"— it is not run. " + not_confirmed(root))
 
 
 def run_tests(root, cfg, files):
@@ -285,13 +313,13 @@ def run_tests(root, cfg, files):
             raise
         confirmed = None                  # nothing to run and nothing confirmed to compare with
     if confirmed is not None:
-        test_cmd = usable("Test command", test_cmd, confirmed, notes)
-        smoke = usable("Smoke suite", smoke, confirmed, notes)
+        test_cmd = usable(root, "Test command", test_cmd, confirmed, notes)
+        smoke = usable(root, "Smoke suite", smoke, confirmed, notes)
         if ts.is_yes(confirmed.get("Lint before commit", "")) and not ts.is_yes(lint_on):
             raise Refused("## Tests → Lint before commit was switched off after the person confirmed it — "
-                          + NOT_CONFIRMED)
+                          + not_confirmed(root))
         if ts.is_yes(lint_on):
-            lint = usable("Linter/formatter", lint, confirmed, notes)
+            lint = usable(root, "Linter/formatter", lint, confirmed, notes)
     for n in notes:
         print("Note: " + n, flush=True)
     pending = "; not run until confirmed: " + ", ".join(n.split(" `")[0] for n in notes) if notes else ""
@@ -688,7 +716,7 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
         return 0
     if session.get("branch") and branch != session["branch"]:
         raise Refused(f"{name} is worked on `{session['branch']}`, you are on `{branch}` — `git checkout {session['branch']}`")
-    tests = run_tests(root, cfg, files)
+    tests = run_tests(root, cfg, files) + e2e_note(args)
     warnings = run_checks(root, files)
     subject = short_subject(f"Telesma: {name}")
     sha = make_commit(root, files, excluded, subject, args.message, args.trailer)
@@ -785,7 +813,7 @@ def cmd_done(root, args):
     original_report = ts.read_text(report_path)
     wrote = False
     try:
-        tests = run_tests(root, cfg, files)
+        tests = run_tests(root, cfg, files) + e2e_note(args)
         if not git_mode:
             # With a repository integration the tick and the row come with the merge (17.1).
             text = ts.tick(original_plan, item["idx"])
@@ -1027,7 +1055,7 @@ def cmd_suite(root, args):
         if ts.unset(before) or before.strip().startswith("["):
             before = confirmed.get("Test command", "")
         if not same(full, before) or ts.unset(before):
-            raise Refused(f"the full suite command `{full}` is not the one confirmed on this machine — " + NOT_CONFIRMED)
+            raise Refused(f"the full suite command `{full}` is not the one confirmed on this machine — " + not_confirmed(root))
     print(f"Telesma suite ({due['reason']}): {full}", flush=True)
     argv = [BASH, "-c", full] if BASH else full
     start = now()
@@ -1122,10 +1150,72 @@ def cmd_suite(root, args):
     session["green"] = {"head": git(root, "rev-parse", "HEAD").stdout.decode().strip(),
                         "at": now().isoformat(timespec="seconds"), "command": full}
     save_session(root, session)
+    waiting = load_e2e_pending(root)
+    if waiting:
+        print(e2e_waiting_text(waiting))
     if phase:
         print("End of the phase: review PROJECT_CONTEXT.md (section 7 — known pitfalls) and propose a release in a "
               "📦 RELEASE PROPOSAL block (section 15.1) if there is anything to release.")
     print(f"Next: `{self_command()} next`")
+    return 0
+
+
+# --- e2e tests the session cannot run (change plan K12) ------------------------------------
+# On macOS the sandbox does not let a browser start (Mach port registration). Blocking the loop on
+# that asks the person the same thing every time; instead the task is committed on its other tests,
+# the e2e file waits here (this machine's data, next to the reservation) and `release` refuses until
+# the person ran them. A careless model is kept in line, not a determined one: the list is a file.
+
+def e2e_path(root):
+    return os.path.join(os.path.dirname(session_path(root)), "e2e-pending.json")
+
+
+def load_e2e_pending(root):
+    try:
+        with open(e2e_path(root), encoding="utf-8") as f:
+            data = json.load(f)
+        return [x for x in data if isinstance(x, dict) and x.get("file")] if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def add_e2e_pending(root, files, task):
+    items = load_e2e_pending(root)
+    known = {x["file"] for x in items}
+    day = now().strftime("%Y-%m-%d")
+    items += [{"file": f, "task": task, "since": day} for f in dict.fromkeys(files) if f not in known]
+    ts.atomic_write(e2e_path(root), json.dumps(items, indent=2, ensure_ascii=False) + "\n")
+    print("e2e waiting for the person (not run in this session): " + ", ".join(files))
+
+
+def e2e_note(args):
+    return ("; e2e not run in session: " + ", ".join(args.e2e)) if getattr(args, "e2e", None) else ""
+
+
+def e2e_waiting_text(items):
+    lines = [f"  - {x['file']} ({x.get('task') or '?'}, since {x.get('since') or '?'})" for x in items]
+    return (f"E2E WAITING FOR THE PERSON ({len(items)}): written, never run in a session —\n" + "\n".join(lines) +
+            f"\nThe person runs them outside the sandbox (or CI does), then `{self_command()} e2e-ran` in a terminal.")
+
+
+def cmd_e2e_ran(root, args):
+    items = load_e2e_pending(root)
+    if not items:
+        print("No e2e test waits.")
+        return 0
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise Refused("e2e-ran records what the PERSON ran: they type it in a terminal (it needs a terminal on "
+                      "stdin and stdout)")
+    print(e2e_waiting_text(items))
+    try:
+        answer = input("Did all of them run green outside the session? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes", "t", "tak"):
+        print("Nothing changed.")
+        return 1
+    ts.atomic_write(e2e_path(root), "[]\n")
+    print(f"Cleared {len(items)} e2e test(s).")
     return 0
 
 
@@ -1166,6 +1256,10 @@ def cmd_release(root, args):
         if code:
             raise Refused("code changed since the last green full suite (" + ", ".join(code[:5]) +
                           f") — run `{self_command()} suite --full` first")
+    waiting = load_e2e_pending(root)
+    if waiting:
+        raise Refused("e2e tests that never ran in a session wait for the person — a version is not released on "
+                      "tests nobody ran:\n" + e2e_waiting_text(waiting) + "\nTell the person (TELESMA BLOCKED)")
     runner = os.path.join(root, "telesma", "checks", "telesma-checks.py")
     if os.path.isfile(runner):
         r = subprocess.run([sys.executable, runner, "--point", "release"], cwd=root, capture_output=True, timeout=900)
@@ -1768,6 +1862,7 @@ class Args:
         self.command, self.id, self.full, self.message, self.kind = None, None, False, "", None
         self.trailer, self.project, self.only = [], None, []
         self.source, self.detected_by, self.withdrawn, self.cont = None, None, False, False
+        self.e2e = []
 
 
 def parse(argv):
@@ -1799,6 +1894,11 @@ def parse(argv):
             a.withdrawn = True
         elif x == "--continue":
             a.cont = True
+        elif x == "--e2e-not-run":
+            v = next(it, "")
+            if not v or v.startswith(("/", "-")) or ".." in v.split("/"):
+                raise Refused("--e2e-not-run takes the path of the e2e test file inside the project")
+            a.e2e.append(v)
         elif x.startswith("-"):
             raise Refused(f"unknown option {x}")
         elif a.command is None:
@@ -1815,13 +1915,23 @@ def main(argv):
         a = parse(argv)
         commands = {"next": cmd_next, "done": cmd_done, "commit": cmd_commit, "suite": cmd_suite,
                     "changes": cmd_changes, "changes-done": cmd_changes_done, "session-start": cmd_session_start,
-                    "release": cmd_release}
+                    "release": cmd_release, "e2e-ran": cmd_e2e_ran}
         if a is None or a.command not in commands:
             sys.stdout.write(__doc__)
             return 2
         root = project_root(a.project)
         check_trailers(a.trailer)
-        return commands[a.command](root, a)
+        if a.e2e and a.command != "done":
+            raise Refused("--e2e-not-run belongs to done")
+        if a.e2e:
+            missing = [f for f in a.e2e if not os.path.isfile(os.path.join(root, f))]
+            if missing:
+                raise Refused("--e2e-not-run: no such file " + ", ".join(missing) + " — the test is written, "
+                              "only its run waits for the person")
+        rc = commands[a.command](root, a)
+        if rc == 0 and a.e2e:
+            add_e2e_pending(root, a.e2e, load_session(root).get("last") or "")
+        return rc
     except Refused as e:
         print(f"refused: {e}")
         return 1

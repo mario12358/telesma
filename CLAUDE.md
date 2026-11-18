@@ -181,7 +181,8 @@ is written in the user's `Language`; the structure is always English.
   committed**: the scope widens to everything modified whenever the `git add` plan is not exact,
   and a commit that appears without evidence is checked after the fact. Exceptions are the
   human's: writes to `telesma/state/CHECK_EXCEPTIONS.md`, `telesma/checks/` and the `## Checks`
-  section ask the user, and a difference from the integrity baseline
+  section ask the user (at adoption the launcher offers `--inherit`, in the terminal, for
+  `dependency-audit` / `sast` only — never `secrets`), and a difference from the integrity baseline
   (`.git/telesma-checks/baseline.json`) that no approved edit explains stops the next commit until
   the human runs `telesma-checks.py --approve` in a terminal. The baseline lives where the agent
   can reach it — it catches a careless model, not a determined one; CI (`--point ci`) is the
@@ -256,7 +257,7 @@ Two independent numbers:
 
 - **Release version** (`vX.Y.Z` git tag, `CHANGELOG.md`) — what users install.
 - **`TELESMA_FORMAT`** in `telesma.sh` — internal state-format / migration counter, stored per
-  project in `telesma/state/.telesma-version`. Currently **23**. Bump it when a project's files need a
+  project in `telesma/state/.telesma-version`. Currently **24**. Bump it when a project's files need a
   migration, *and* when an instruction change should be measurable (telemetry tells "before" from
   "after" by this number). The format gate in the launcher runs before anything creates, reads or
   writes a file in the project: 18 = the first public format (the layout every later number
@@ -267,7 +268,11 @@ Two independent numbers:
   22 = the sandbox (`## Sandbox` reaches an older config through the merge as `Enabled: no`; a config
   the launcher creates starts with `yes`), 23 = allow rules for what the task tool does (`git add` /
   `git commit`, phase tags, task-branch pushes, `gh pr create`) removed from config.md and
-  settings.local.json (`templates/setup/retired_rules.py`).
+  settings.local.json (`templates/setup/retired_rules.py`), 24 = what the sandbox cannot do is said
+  before the loop (`## Sandbox → Limits asked`, through the merge; `KNOWN_LIMITS` in `sandbox.py`),
+  an e2e test the session cannot run waits for the person (`done --e2e-not-run`, `e2e-ran`, `release`
+  refuses meanwhile), `## Tests` is set at clarification, and findings of the code as adopted may be
+  accepted as inherited by the person (`telesma-checks.py --inherit`, at the adoption start).
   A new step is one `case` line in the gate's loop.
 
 ## Tests

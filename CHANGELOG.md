@@ -4,6 +4,32 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## Unreleased
+
+State format: 24. An older config gets `## Sandbox → Limits asked` through the merge; nothing
+else in your project's files changes.
+
+- **What the sandbox cannot do is said at the start, once.** On macOS Playwright's browsers do
+  not start inside the sandbox, Docker does not work in it, and Jest with watchman fails there.
+  The launcher now names the limit that applies to your project and asks once whether to run that
+  command outside the sandbox (`npx playwright test *`, `docker compose *`, with a question before
+  each run). The answer is kept in `## Sandbox`. Before, the loop found these out with a BLOCKED
+  in the middle of a phase.
+- **An e2e test the session cannot run no longer blocks the loop.** The task is committed on its
+  other tests with `done --e2e-not-run <file>`, `suite` lists what waits, and `release` refuses
+  until you ran them and typed `telesma-task.py e2e-ran` in your terminal.
+- **Test commands are settled before the loop.** The clarification writes `Test command`,
+  `Linter/formatter` and `Typecheck command` for the chosen stack, so you confirm them at the next
+  start instead of the loop stopping at task 1.1. The adoption survey fills in a linter or
+  typechecker the code already configures. When `done` still refuses an unconfirmed `## Tests`,
+  the message names the changed fields and the exact command that confirms them.
+- **Adopting a project with vulnerable dependencies.** At the adoption start the launcher offers
+  to accept the blocking `dependency-audit` and `sast` findings of the code as found as
+  inherited (`telesma-checks.py --inherit`, in your terminal). The first phase tag is then not
+  stopped by code nobody touched yet; every phase says how many inherited findings are left, and
+  the plan gets a task or a backlog item for each. New findings still block. A committed secret
+  is never accepted this way.
+
 ## 1.5.0 — 2026-11-16
 
 State format: 23 (unchanged). Nothing in your project's files changes; the usage record lives in

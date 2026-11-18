@@ -563,6 +563,19 @@ shows**, minus the `Ignore on commit` patterns of the config and this machine's 
   naming the path or the host and the line that would allow it (`## Sandbox → Writable paths` /
   `Allowed hosts`). A test that needs the network keeps the proxy variables (`HTTPS_PROXY`, …) in
   its environment.
+- **An e2e test cannot start its browser in the session** (Playwright's `browserType.launch`
+  closes, `MachPortRendezvousServer … Permission denied`, `sandbox_extension_issue_file_to_process`)
+  — a known limit of the sandbox on macOS, not of the task: no setting fixes it, and a BLOCKED
+  only asks the person what they already answered at the start. Write the test, run everything
+  else (unit, integration, the server on 127.0.0.1), and finish with
+  `<TASK_TOOL> done --e2e-not-run <test file>` (once per file). The task is committed, the file
+  waits for the person, `suite` lists it, and `release` refuses until they ran it (`e2e-ran`).
+  Never mark such a test as passed, never skip it in the code to get past it, and name the
+  waiting files in your summary.
+- **A command from `Excluded commands` runs with all the person's rights.** Run it alone (a
+  compound command does not match the pattern and stays in the sandbox) and only on the project's
+  own test files — never a file you wrote to run something outside the sandbox (a diagnostic spec,
+  a script); diagnose inside the sandbox, and when that is impossible, TELESMA BLOCKED.
 
 **HARD RULE — a failing test is fixed by changing the code, not the test.**
 Changing a test's content (assertions, expected values, adding skip/only, removing a case) is allowed

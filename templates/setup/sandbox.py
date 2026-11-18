@@ -13,6 +13,7 @@ network only through a proxy with a host list, and cannot read the person's keys
                                       the repository integration
     Writable paths:     list          added to the package caches of the project's stacks
     Excluded commands:  list          run outside the sandbox (e.g. `docker compose *`)
+    Limits asked:       value         the known limits (KNOWN_LIMITS) the person already answered
 
 Fixed, whatever the config says (found in the live probe of 2026-11-12):
 - allowUnsandboxedCommands: false — without it a refused command is retried outside the sandbox,
@@ -39,6 +40,12 @@ allowed for good) is kept while what only Telesma wanted and the config dropped 
         prints: yes | no <reason>
     sandbox.py excluded <project>
         the `Excluded commands` of an enabled sandbox, one per line
+    sandbox.py limits <project>
+        the known limits of this project's stack not answered yet (enabled sandbox only):
+        `key<TAB>pattern or -<TAB>message`, one per line
+    sandbox.py answer <project> <key> yes|no
+        the person's answer at the launcher: the key goes into `Limits asked`, and with `yes` the
+        limit's pattern into `Excluded commands` (exit 1 when the config cannot be written)
 
 Python 3.9+, standard library only.
 """
@@ -109,6 +116,24 @@ DENY_READ = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.docker/config.json'
 GH_CONFIG = '~/.config/gh'
 HOST_RE = re.compile(r'^(\*\.)?[A-Za-z0-9.-]+(:\d+)?$')
 
+# What no sandbox setting fixes, found on live projects (change plan K12, hub data 12-18.11.2026):
+# said once, at the launcher, before the loop discovers it as a BLOCKED in the middle of a phase.
+# key, platform (None = every), the pattern to run outside the sandbox (None = advice only), message.
+KNOWN_LIMITS = (
+    ('playwright', 'darwin', 'npx playwright test *',
+     "Playwright's browsers do not start inside the sandbox on macOS (Chromium: MachPortRendezvousServer "
+     "Permission denied; Firefox: sandbox_extension_issue_file_to_process). Outside it they run with all "
+     "your rights, after a question each time; without it the e2e tests wait for you (`e2e-ran`)."),
+    ('docker', None, 'docker compose *',
+     "Docker does not work inside the sandbox (its socket is outside). A docker command outside it can "
+     "do anything on this machine — practically full access."),
+    ('watchman', 'darwin', None,
+     "Jest with watchman installed fails inside the sandbox (watchman writes to ~/Library/LaunchAgents). "
+     "Run Jest with --no-watchman or `watchman: false` in its config; never make that directory writable "
+     "(it starts programs at login)."),
+)
+DOCKER_FILES = ('Dockerfile', 'compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml')
+
 
 def available():
     """(True, '') or (False, reason) — whether Claude Code's sandbox can run on this machine."""
@@ -164,6 +189,10 @@ def stacks(project):
 
 def uses_playwright(project):
     """A package.json at the root or one level down (a workspace) that names Playwright."""
+    return names_package(project, r'"(@playwright/test|playwright)"\s*:')
+
+
+def names_package(project, pattern):
     candidates = [os.path.join(project, 'package.json')]
     try:
         candidates += [os.path.join(project, d, 'package.json') for d in sorted(os.listdir(project))
@@ -173,11 +202,81 @@ def uses_playwright(project):
     for path in candidates:
         try:
             with open(path, encoding='utf-8', errors='replace') as f:
-                if re.search(r'"(@playwright/test|playwright)"\s*:', f.read()):
+                if re.search(pattern, f.read()):
                     return True
         except OSError:
             continue
     return False
+
+
+def limits(project):
+    """[(key, pattern | None, message)] of KNOWN_LIMITS that apply here and nobody answered yet."""
+    text, enabled, extra = section(project)
+    if enabled == 'no':
+        return []
+    asked = {k.strip().lower() for k in re.split(r'[,\s]+', config_value(text, 'Sandbox', 'Limits asked')) if k.strip()}
+    st = set(stacks(project))
+    try:
+        with open(os.path.join(project, 'telesma', 'state', 'PLAN.md'), encoding='utf-8', errors='replace') as f:
+            plan_tags = {t.strip().lower() for tags in re.findall(r'\(tech:\s*([^)]*)\)', f.read())
+                         for t in re.split(r'[,\s]+', tags)}
+    except OSError:
+        plan_tags = set()
+    found = {
+        'playwright': 'playwright' in st,
+        'docker': 'docker' in plan_tags or any(os.path.isfile(os.path.join(project, n)) for n in DOCKER_FILES),
+        'watchman': bool(shutil.which('watchman')) and names_package(project, r'"jest"\s*:'),
+    }
+    system = platform.system().lower()
+    return [(k, pat, msg) for k, plat, pat, msg in KNOWN_LIMITS
+            if found.get(k) and (plat is None or plat == system) and k not in asked
+            and not (pat and pat in extra['Excluded commands'])]
+
+
+def answer(project, key, yes):
+    """The person's answer: `key` into `Limits asked`; with yes the pattern into `Excluded commands`.
+    The launcher stamps the config afterwards (its own write, made at the person's answer)."""
+    limit = next((x for x in KNOWN_LIMITS if x[0] == key), None)
+    if limit is None:
+        raise KeyError(f'unknown limit {key}')
+    path = os.path.join(project, 'telesma', 'config.md')
+    with open(path, encoding='utf-8') as f:
+        lines = f.read().split('\n')
+    start = next((i for i, l in enumerate(lines) if l.strip() == '## Sandbox'), None)
+    if start is None:
+        raise KeyError('no ## Sandbox section')
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+
+    def field_at(label):
+        return next((i for i in range(start, end) if lines[i].startswith(f'- **{label}**:')), None)
+
+    if yes and limit[2]:
+        i = field_at('Excluded commands')
+        if i is None:
+            lines[end:end] = ['- **Excluded commands**:']
+            i, end = end, end + 1
+        j = i + 1
+        while j < end and (lines[j].lstrip().startswith('<!--') or ITEM_LINE.match(lines[j])):
+            j += 1
+        lines[j:j] = [f'  - `{limit[2]}`']
+        end += 1
+    i = field_at('Limits asked')
+    if i is None:
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
+        lines[end:end] = ['- **Limits asked**:']
+        i = end
+    current = [k for k in re.split(r'[,\s]+', lines[i].split(':', 1)[1]) if k.strip()]
+    if key not in current:
+        current.append(key)
+    lines[i] = '- **Limits asked**: ' + ', '.join(current)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.config-')
+    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
+        f.write('\n'.join(lines))
+    os.replace(tmp, path)
+
+
+ITEM_LINE = re.compile(r'^\s+-\s+\S')
 
 
 def tool_homes(st):
@@ -351,6 +450,17 @@ def main(argv):
         if enabled != 'no':
             for c in extra['Excluded commands']:
                 print(c)
+        return 0
+    if len(argv) >= 3 and argv[1] == 'limits':
+        for key, pat, message in limits(argv[2]):
+            print(f'{key}\t{pat or "-"}\t{message}')
+        return 0
+    if len(argv) >= 5 and argv[1] == 'answer':
+        try:
+            answer(argv[2], argv[3], argv[4].strip().lower() in ('yes', 'y', 't', 'tak'))
+        except (KeyError, OSError) as e:
+            print(f'not written: {e}', file=sys.stderr)
+            return 1
         return 0
     if len(argv) >= 4 and argv[1] == 'sync':
         return sync(argv[2], argv[3], '--autonomous' in argv[4:])

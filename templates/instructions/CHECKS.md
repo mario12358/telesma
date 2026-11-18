@@ -22,7 +22,9 @@ checked right after it exists, from its content; findings come back as a blockin
 commit (19.1 applies, the fix is an amend).
 
 The `lint-types` check takes its commands from `## Tests` (`Linter/formatter`, `Typecheck command`) —
-an empty field = no such tool, so fill them in during task 1.1 together with the linter configuration.
+an empty field = no such tool. They are set at clarification (section -1, step 6b), before the loop,
+so the person confirms them at the start of the first build session; task 1.1 writes the linter's
+own configuration file, never `## Tests` itself.
 It runs only a known tool called directly (`ruff check`, `npx eslint .`, `cd backend && mypy app`), never
 a script or `npm run …`, and only once the human has confirmed the section at a start of Telesma: after
 you change `## Tests` the warning `config-unconfirmed` is expected until the next session — run the

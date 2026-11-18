@@ -2483,6 +2483,69 @@ if block_skel and block_ver:
     ok(r.returncode == 0 and since_start in r.stdout, f"no version — from the start of the map ({since_start!r})")
     shutil.rmtree(d)
 
+print("Adoption: inherited findings (--inherit)")
+
+
+def in_tty(args, answer, cwd):
+    """Run the runner with a terminal on stdin and stdout, as the launcher runs it at adoption."""
+    import pty
+    import select
+    master, slave = pty.openpty()
+    pr = subprocess.Popen(args, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    out, sent = b"", False
+    while True:
+        r, _, _ = select.select([master], [], [], 60)
+        if not r:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if not sent and b"[Y/n]" in out:
+            os.write(master, answer.encode() + b"\n")
+            sent = True
+    pr.wait(timeout=60)
+    os.close(master)
+    return pr.returncode, out.decode("utf-8", "replace")
+
+
+_semgrep_env = os.environ.get("TELESMA_SEMGREP")
+os.environ["TELESMA_SEMGREP"] = "none"       # the built-in patterns: eval blocks there
+d = new_repo()
+commit_file(d, "app/calc.py", "def calc(expr):\n    return eval(expr)\n")
+commit_file(d, "app/keys.py", 'KEY = "AKIA' + "QWERTYUIOPASDFGH" + '"\n')
+runner = [sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py")]
+r = subprocess.run(runner + ["--inherit", str(d)], cwd=d, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+ok(r.returncode == 2 and "terminal" in r.stderr, "--inherit refuses without a terminal (the agent cannot accept for the owner)")
+dec, _, _ = bash(d, "python3 telesma/checks/telesma-checks.py --inherit .")
+ok(dec == "ask", "the agent running --inherit through Bash is a question to the person")
+rc, out = in_tty(runner + ["--inherit", str(d), "--sha", "abc1234"], "n", d)
+ok(rc == 1 and not (d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").exists(), "answer no — nothing recorded")
+rc, out = in_tty(runner + ["--inherit", str(d), "--sha", "abc1234"], "", d)
+exc = (d / "telesma" / "state" / "CHECK_EXCEPTIONS.md").read_text(encoding="utf-8")
+ok(rc == 0 and "sast/eval-exec" in out and "inherited at adoption abc1234" in exc and "app/calc.py" in exc,
+   "ENTER accepts: the sast finding becomes an exception marked inherited, with the adoption commit")
+ok("app/keys.py" not in exc and "secrets" not in exc, "a committed key is never accepted as inherited")
+ok("AKIA" not in out and "AKIA" not in exc, "the secret's value is printed nowhere")
+r = subprocess.run(runner + ["--point", "ci"], cwd=d, capture_output=True, text=True)
+ok("INHERITED (1)" in r.stdout and "eval-exec" not in r.stdout,
+   "the ci / phase point no longer blocks on it, and says how many inherited findings are left")
+ok("secrets" in r.stdout and r.returncode == 1, "the secret still blocks")
+dec, txt, _ = bash(d, "git add -A && git commit -m x --allow-empty")
+ok("differ" not in (txt or ""), "the integrity baseline followed the accepted exceptions (nothing else differed)")
+commit_file(d, "app/calc2.py", "def run(code):\n    exec(code)\n")
+r = subprocess.run(runner + ["--point", "ci"], cwd=d, capture_output=True, text=True)
+ok("app/calc2.py" in r.stdout and r.returncode == 1, "a new finding after adoption still blocks")
+shutil.rmtree(d)
+if _semgrep_env is None:
+    del os.environ["TELESMA_SEMGREP"]
+else:
+    os.environ["TELESMA_SEMGREP"] = _semgrep_env
+
 print()
 if FAILURES:
     print(f"FAILURES: {len(FAILURES)}")
