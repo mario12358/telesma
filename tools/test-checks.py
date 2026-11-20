@@ -2127,6 +2127,9 @@ SAMPLES = {
     "npm.py": ('T = "npm_' + "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5" + '"\n', "npm-token"),
     "sg.py": ('T = "SG.' + "aB3dE5gH7jK9mN1pQ3sT5v.X7zA9cE1gI3kM5oQ7sU9wY1aC3eG5iK7mO9qS1uW3yA5" + '"\n', "sendgrid-key"),
     "pat.py": ('T = "github_pat_' + "11QRZTUVW0aB3dE5gH7jK9_mN1pQ3sT5vX7zA9cE1gI3kM5oQ7sU9wY1aC3eG5iK7mO9qS1uW3yA5bC" + '"\n', "github-token"),
+    "tg.py": ('T = "987654321:' + "AAFmQzR7tY2wX9vK4pL6sN8dH3jG5bV1qE4" + '"\n', "telegram-bot-token"),
+    "discord.py": ('T = "MTk4NzY1NDMyMTA5ODc2NTRz.aB3dE5.' + "gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5" + '"\n', "discord-bot-token"),
+    "twilio.py": ('T = "SK' + "9f8e7d6c5b4a39281706f5e4d3c2b1a0" + '"\n', "twilio-api-key"),
     "split.py": ('K = "AKIA" \\\n    "' + AWS[4:] + '"\n', "aws-access-key-split"),
     "plus.py": ('K = "AKIA" + "' + AWS[4:] + '"\n', "aws-access-key-split"),
     "b64.py": ('import base64\nK = base64.b64decode("' + __import__("base64").b64encode(AWS.encode()).decode() + '")\n',
@@ -2148,6 +2151,17 @@ ok(dec == "deny", "the commit is blocked")
 out_all = txt + log(d)
 ok(all(frag not in out_all for frag in ("Tr0u", "k9#m", "wJal", "S3cr", "MIIE", "lQOY", AWS))
    and "characters, content hidden" in txt, "no part of any value is shown — only its length")
+shutil.rmtree(d)
+d = new_repo()
+write(d, "standup.md", "Standup at 12:30, sync at 3:5, ratio 3:5\n")
+write(d, "bot.py", 'T = "987654321:AAFmQzR7tY2wX9vK4pL6sN8dH3jG5bV1qE"\n')
+write(d, "twilio.py", 'T = "SK9f8e7d6c5b4a39281706f5e4d3c2b1a"\n')
+write(d, "chat.py", 'T = "MTk4NzY1NDMyMTA5ODc2NTRz.aB3dE5.gH7jK9mN1pQ3sT5vX7zA9cE1"\n')
+gitc(d, "add", ".")
+dec, txt, _ = bash(d, "git commit -m x")
+ok(dec is None and "telegram-bot-token" not in txt and "discord-bot-token" not in txt
+   and "twilio-api-key" not in txt,
+   "times and ratios, a 34-character Telegram secret, a 31-hex Twilio key and a short Discord token do not block")
 shutil.rmtree(d)
 d = new_repo()
 write(d, "big.py", "# pad\n" * 200000 + KEYFILE)
