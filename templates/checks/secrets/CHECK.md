@@ -14,7 +14,8 @@ A secret in the repository stays in git history forever — deleting it in the n
 does not undo it, it has to be revoked. That is why this check runs **before** the commit.
 
 **What it catches.** Keys in known formats (AWS, GitHub incl. `github_pat_`, GitLab, Slack tokens and
-webhooks, OpenAI/Anthropic, Google, Stripe, Hugging Face, npm, PyPI, SendGrid, DigitalOcean, PEM / PGP
+webhooks, OpenAI/Anthropic, Google, Stripe, Hugging Face, npm, PyPI, SendGrid, DigitalOcean, Telegram
+and Discord bot tokens, Twilio keys, PEM / PGP
 private keys — also inside quoted strings), the same formats split into adjacent string literals
 (`"AKIA" + "…"`, also across a line end: `<rule>-split`) or wrapped in base64 (`<rule>-base64`), a login
 in an address (`scheme://user:password@host` → `url-credentials`) and files that are secrets by name

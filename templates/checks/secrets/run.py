@@ -38,6 +38,9 @@ PATTERNS = [
     ('pypi-token', B + r'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}', 'block'),
     ('sendgrid-key', B + r'SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}', 'block'),
     ('digitalocean-token', B + r'do[opr]_v1_[a-f0-9]{64}', 'block'),
+    ('telegram-bot-token', B + r'\d{8,10}:[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])', 'block'),
+    ('discord-bot-token', B + r'[MN][A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}(?![A-Za-z0-9_-])', 'block'),
+    ('twilio-api-key', B + r'SK[0-9a-fA-F]{32}(?![0-9a-fA-F])', 'block'),
     ('jwt', r'\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', 'warn'),
 ]
 COMPILED = [(r, re.compile(w), g) for r, w, g in PATTERNS]

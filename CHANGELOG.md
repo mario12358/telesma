@@ -29,6 +29,10 @@ else in your project's files changes.
   stopped by code nobody touched yet; every phase says how many inherited findings are left, and
   the plan gets a task or a backlog item for each. New findings still block. A committed secret
   is never accepted this way.
+- **The secrets check recognises three more key formats.** Telegram bot tokens
+  (`<8–10 digits>:<35 characters>`), Discord bot tokens and Twilio API keys (`SK` + 32 hex)
+  now block a commit, with fixtures for each shape and near misses (times like `12:30`, a
+  34-character Telegram secret, a 31-hex Twilio key, a short Discord token) that stay silent.
 
 ## 1.5.0 — 2026-11-16
 
