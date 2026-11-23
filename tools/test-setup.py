@@ -157,7 +157,9 @@ FAKE_CLAUDE = r'''#!/bin/sh
 # The Windows route (run_claude): the prompt comes as --append-system-prompt-file <file>.
 pf=""; prev=""
 for a in "$@"; do [ "$prev" = "--append-system-prompt-file" ] && pf="$a"; prev="$a"; done
-if [ -n "$pf" ]; then cat "$pf" > "${FAKE_LOG:-/dev/null}"
+if [ -n "$pf" ]; then
+  # the instructions' file, then the first message (an argument, or stdin in pipe mode)
+  cat "$pf" > "${FAKE_LOG:-/dev/null}"; printf '\n%s\n' "$*" >> "${FAKE_LOG:-/dev/null}"; [ -t 0 ] || cat >> "${FAKE_LOG:-/dev/null}"
 elif [ "$#" -gt 0 ]; then
   # options and the prompt (an argument, or stdin in pipe mode — never read from a terminal)
   printf '%s\n' "$*" > "${FAKE_LOG:-/dev/null}"; [ -t 0 ] || cat >> "${FAKE_LOG:-/dev/null}"

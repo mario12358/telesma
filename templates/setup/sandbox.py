@@ -111,6 +111,9 @@ TAG_STACK = {
 CHECK_HOSTS = ['api.osv.dev', 'pypi.org', 'registry.npmjs.org', 'api.npmjs.org', 'jsr.io', 'api.jsr.io']
 GITHUB_HOSTS = ['github.com', 'api.github.com', 'codeload.github.com', 'objects.githubusercontent.com']
 ALWAYS_WRITE = ['~/.cache/telesma']
+# Gemini CLI as the reviewer (## Review): its API (key or Google sign-in) and its own state directory
+GEMINI_HOSTS = ['generativelanguage.googleapis.com', 'cloudcode-pa.googleapis.com', 'oauth2.googleapis.com']
+GEMINI_HOME = '~/.gemini'
 DENY_READ = ['~/.ssh', '~/.aws', '~/.gnupg', '~/.netrc', '~/.docker/config.json', '~/.kube',
              '~/.config/gcloud', '~/.azure']
 GH_CONFIG = '~/.config/gh'
@@ -124,6 +127,11 @@ KNOWN_LIMITS = (
      "Playwright's browsers do not start inside the sandbox on macOS (Chromium: MachPortRendezvousServer "
      "Permission denied; Firefox: sandbox_extension_issue_file_to_process). Outside it they run with all "
      "your rights, after a question each time; without it the e2e tests wait for you (`e2e-ran`)."),
+    ('playwright-python', 'darwin', None,
+     "Playwright's browsers do not start inside the sandbox on macOS, and this project runs them from "
+     "Python (pytest), where no single command covers only the browser tests. They wait for you: the "
+     "loop commits the task without them and `release` refuses until you ran them and typed `e2e-ran`. "
+     "To let the session run them, add their exact command to `Excluded commands` yourself."),
     ('docker', None, 'docker compose *',
      "Docker does not work inside the sandbox (its socket is outside). A docker command outside it can "
      "do anything on this machine — practically full access."),
@@ -131,7 +139,13 @@ KNOWN_LIMITS = (
      "Jest with watchman installed fails inside the sandbox (watchman writes to ~/Library/LaunchAgents). "
      "Run Jest with --no-watchman or `watchman: false` in its config; never make that directory writable "
      "(it starts programs at login)."),
+    ('metro', 'darwin', None,
+     "Metro (`react-native start` / `bundle`) hangs on watchman inside the sandbox. Set "
+     "`resolver.useWatchman: false` in metro.config.js, or build the bundle yourself in your terminal; "
+     "never make ~/Library/LaunchAgents writable (it starts programs at login)."),
 )
+PY_MANIFESTS = ('pyproject.toml', 'requirements.txt', 'requirements-dev.txt', 'requirements-test.txt',
+                'dev-requirements.txt', 'Pipfile', 'setup.cfg', 'setup.py')
 DOCKER_FILES = ('Dockerfile', 'compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml')
 
 
@@ -192,6 +206,18 @@ def uses_playwright(project):
     return names_package(project, r'"(@playwright/test|playwright)"\s*:')
 
 
+def python_playwright(project):
+    """A Python manifest at the root that names Playwright (`playwright`, `pytest-playwright`)."""
+    for name in PY_MANIFESTS:
+        try:
+            with open(os.path.join(project, name), encoding='utf-8', errors='replace') as f:
+                if re.search(r'(?im)^[^#\n]*\bplaywright\b', f.read()):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def names_package(project, pattern):
     candidates = [os.path.join(project, 'package.json')]
     try:
@@ -222,10 +248,15 @@ def limits(project):
                          for t in re.split(r'[,\s]+', tags)}
     except OSError:
         plan_tags = set()
+    py_pw = python_playwright(project)
+    watchman = bool(shutil.which('watchman'))
     found = {
-        'playwright': 'playwright' in st,
+        # the plan's `playwright` tag alone means the npx form only where Python does not name it
+        'playwright': uses_playwright(project) or ('playwright' in st and not py_pw),
+        'playwright-python': py_pw,
+        'metro': watchman and names_package(project, r'"react-native"\s*:'),
         'docker': 'docker' in plan_tags or any(os.path.isfile(os.path.join(project, n)) for n in DOCKER_FILES),
-        'watchman': bool(shutil.which('watchman')) and names_package(project, r'"jest"\s*:'),
+        'watchman': watchman and names_package(project, r'"jest"\s*:'),
     }
     system = platform.system().lower()
     return [(k, pat, msg) for k, plat, pat, msg in KNOWN_LIMITS
@@ -290,6 +321,20 @@ def tool_homes(st):
     return out
 
 
+def review_hosts(text):
+    """The reviewer of ## Review is called by the task tool, inside the sandbox: its host (an api
+    endpoint) or Claude's own (Reviewer: claude) has to be reachable. The section is under the
+    trust gate, so the host is one the person saw."""
+    if config_value(text, 'Review', 'Enabled').lower() not in ('yes', 'true'):
+        return []
+    if config_value(text, 'Review', 'Reviewer').lower() == 'claude':
+        return ['api.anthropic.com']
+    if config_value(text, 'Review', 'Reviewer').lower() == 'gemini':
+        return GEMINI_HOSTS
+    m = re.match(r'^https://([A-Za-z0-9.-]+)(?::\d+)?(?:/|$)', config_value(text, 'Review', 'Endpoint'))
+    return [m.group(1)] if m and HOST_RE.match(m.group(1)) else []
+
+
 def wanted(project, autonomous):
     text, enabled, extra = section(project)
     if enabled == 'no':
@@ -297,9 +342,11 @@ def wanted(project, autonomous):
     st = stacks(project)
     github = config_value(text, 'Integrations', 'Repository').lower() == 'github'
     checks = config_value(text, 'Checks', 'Enabled').lower() in ('yes', 'true')
+    review = review_hosts(text)
     hosts = [h for s in st for h in STACK_HOSTS[s]] + (CHECK_HOSTS if checks else []) \
-        + (GITHUB_HOSTS if github else []) + [h for h in extra['Allowed hosts'] if HOST_RE.match(h)]
-    write = ALWAYS_WRITE + [p for s in st for p in STACK_WRITE[s]] + tool_homes(st) + extra['Writable paths']
+        + (GITHUB_HOSTS if github else []) + review + [h for h in extra['Allowed hosts'] if HOST_RE.match(h)]
+    write = ALWAYS_WRITE + [p for s in st for p in STACK_WRITE[s]] + tool_homes(st) + extra['Writable paths'] \
+        + ([GEMINI_HOME] if review == GEMINI_HOSTS else [])
     deny = DENY_READ + ([] if github else [GH_CONFIG])
     return enabled, {
         'enabled': True,

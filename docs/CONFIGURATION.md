@@ -145,6 +145,43 @@ each with:
 A check without a subsection does not run and costs nothing. Writes to this section, to
 `telesma/checks/` and to `telesma/state/CHECK_EXCEPTIONS.md` always ask the human.
 
+### `## Review`
+
+An independent review of every task before it is committed. `telesma-task.py done` itself sends
+the task's plan lines (with its `- AC:` lines), the spec fragments the task cites and the diff to
+a second model, which knows nothing of the session, and reads the verdict — the model that wrote
+the code does not judge it and cannot write the verdict. Off by default: with it on, the diff
+leaves your machine for the reviewer you name.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Enabled` | `no` | `yes` = every `done` (a task, a PR fix) is reviewed after its tests and checks pass. |
+| `Reviewer` | `api` | `api` = a chat endpoint in the OpenAI format (Google, OpenAI, Anthropic, an own server). `claude` = a separate Claude Code session on your subscription, without tools, started outside the project; `gemini` = Gemini CLI on your own sign-in, headless and read-only, started in an empty directory. For both only `Model` is used. |
+| `Endpoint` | `none` | `api` only. `https://…` (`http://` only for localhost). Google: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`. |
+| `Model` | empty | The model's id as the provider lists it. Choose a different model than the one that writes the code. |
+| `API key` | `env:TELESMA_REVIEW_KEY` | `env:NAME`, `file:<path outside the repo>`, `cmd:<command>` or `none`. Never a literal. |
+| `Max diff` | `240000` | Characters of diff a review reads; a bigger one is `not run`. A built or minified file (a line over 2000 characters) is named in the diff and not counted. What is left of the number after the diff is filled with context: the changed files in full and the files the task names in backticks, smallest first. Lower it to pay less per review. Set it to what a local model's context window holds (about 3 characters per token). |
+| `Timeout` | `180` | Seconds to wait for the reviewer (10–480). |
+
+- The reviewer first says in its own words what the diff does and through which entry point it is
+  reached, then lists findings as `blocker`, `major` or `nit`. Only a **blocker refuses `done`**
+  (PLAN.md, REPORT.md and git stay as they were).
+- The author fixes the blocker — the new diff is reviewed again — or, when the blocker is wrong,
+  answers it for the same files: `done --contested "<why>"`. The answer goes into the commit
+  message; nobody judges it but you.
+- **No answer is never a pass and never a stop**: network, key, timeout, an answer that cannot be
+  read or a diff over 240,000 characters is `Review: not run (reason)` in the commit message.
+- **A model run locally** (Ollama, LM Studio, llama.cpp, vLLM) is `Reviewer: api` with
+  `Endpoint: http://localhost:<port>/v1/chat/completions` and `API key: none`; nothing leaves the
+  machine. Mind its context window: a server that cuts a long prompt silently would review half a
+  diff, so a reviewer that reports far fewer prompt tokens than the prompt has is `not run`.
+  A small model raises more wrong blockers — look at `.git/telesma-review/reviews.jsonl` before
+  relying on it.
+- The section is under the [trust gate](#trust-gate-configmd-on-this-machine): a section nobody
+  confirmed on the machine sends nothing. With the sandbox on, the reviewer's host is allowed
+  automatically. Every review leaves a row in `.git/telesma-review/reviews.jsonl` (this machine
+  only): outcome, findings, time, tokens.
+
 ### `## Visual artifacts`
 
 Opt-in screenshots and recordings ([WORKFLOW.md § 7](WORKFLOW.md#7-visual-artifacts)).
@@ -164,6 +201,7 @@ Opt-in screenshots and recordings ([WORKFLOW.md § 7](WORKFLOW.md#7-visual-artif
 | `Max tries per task` | `3` | Tries before `TELESMA BLOCKED`. Later tries widen the context (neighbouring spec sections, the whole file, the problem log). |
 | `Max refusals per task` | `5` | Hard stop counted by the task tool: this many refused `done` for one task end the session with `TELESMA BLOCKED`. `none` = no limit. |
 | `Max attempts per task` | `3` | How many times `next` may hand out the same task without a finished `done` (a restart, a compaction, a lost session) before the script stops. `none` = no limit. |
+| `Compact context at` | `500k` | Claude Code summarises the conversation once it passes this size (`100k`–`1000k`) instead of when the model's window is full. Every step re-reads the whole conversation, so the size is what a step costs — a smaller value is cheaper, a larger one leaves a big task uninterrupted; `telesma.sh --usage` shows the context per step. `auto` = leave it to Claude Code. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` you exported wins. |
 | `Max tasks per session` | `none` | After this many finished tasks `next` hands out nothing and writes `telesma/state/BLOCKED.md`. |
 | `Max hours per session` | `none` | The same, counted in hours since the launcher started the session. Limits are read once, at the start; the next start shows the reason and asks you whether to go on. |
 | `Max tokens per session` | `none` | The same, counted in tokens since the start of the session: input + output + cache read + cache write, as Claude Code's transcripts on this machine record them (`300M`, `1.5B`, `500k`). Cache reads are most of a long session — `telesma.sh --usage` shows what yours take. |
@@ -364,7 +402,7 @@ runs one without a session), the permission mode and the allow rules, the judge'
 telemetry's endpoint and key command, extra directories, the integrations. Telesma keeps one
 record per project per machine, outside the repository
 (`~/.config/telesma/trust/<hash of the project path>.json`), with a hash of the field lines of
-`## Tests`, `## Integrations`, `## Working directories`, `## Auto-approval`, `## Telemetry` and
+`## Tests`, `## Integrations`, `## Working directories`, `## Sandbox`, `## Review`, `## Auto-approval`, `## Telemetry` and
 `## Permissions`. Comments and other sections do not count.
 
 - A section that is new on this machine or changed since you confirmed it is **shown at the start,

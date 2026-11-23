@@ -88,6 +88,8 @@ tools/
 │                                  commit --kind, suite (full suite, Test status, phase tag, regression gate),
 │                                  changes / changes-done; runs from this clone, never copied into a project
 ├── telesma_state.py               Shared plan / config / report reading (the launcher's plan check and next)
+├── telesma_review.py              The independent review of ## Review for `done`: the task's plan lines and diff
+│                                  to a second model (an OpenAI-format endpoint or a separate `claude -p`), verdict, log
 ├── telesma_github.py              The GitHub flow of section 17 for the task tool: PR list, required checks,
 │                                  squash merge, chain re-point + rebase, branch, push, PR
 ├── telesma-guard.py                 PreToolUse "code only" guard: refuses git / gh writes, ticks in PLAN.md and edits
@@ -200,6 +202,13 @@ is written in the user's `Language`; the structure is always English.
   in `.git/telesma-usage/usage.jsonl` (tokens from `next` — or the previous task's end in the same
   session — to `done`, read from Claude Code's
   transcripts; counters only, never committed, never in a prompt); a failure there is a note, never a refusal.
+- **The independent review is the script's, and off by default** (`## Review`, `tools/telesma_review.py`):
+  `done` sends the task's plan lines, cited spec fragments, the test result and the diff, with the changed files
+  and the committed files the task names in full — never the state files or a file git does not hold — to the
+  reviewer the person named, only while the section is confirmed on the machine, after the tests
+  and the checks passed (a secret the checks refuse is never sent). Only a `blocker` refuses, and the
+  author may contest it for the same diff with a reason recorded in the commit message. A reviewer
+  that did not answer is `not run`, said in the commit message: never a pass, never a refusal.
 - **The "code only" guard refuses, by design** (`tools/telesma-guard.py`, registered by the launcher
   on every start, whatever `## Auto-approval` and `## Checks` say): git commands that write history
   or move refs, GitHub writes through `gh`, a tick or untick in PLAN.md, and edits of `Task history`,

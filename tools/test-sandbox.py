@@ -215,6 +215,28 @@ rc = sandbox.sync(str(d), str(d / ".claude" / "settings.local.json"), True)
 ok(rc == 1 and (d / ".claude" / "settings.local.json").read_text(encoding="utf-8") == "{broken",
    "a settings file that does not parse is left as it is")
 
+print("the reviewer's host (## Review)")
+d = project()
+rc, out, data = run(d)
+ok("generativelanguage.googleapis.com" not in data["sandbox"]["network"]["allowedDomains"], "review off: no reviewer host")
+cfgp = d / "telesma" / "config.md"
+text = cfgp.read_text(encoding="utf-8")
+for label, value in (("Enabled", "yes"), ("Endpoint", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")):
+    text = field(text, "Review", label, value)
+cfgp.write_text(text, encoding="utf-8")
+rc, out, data = run(d)
+ok("generativelanguage.googleapis.com" in data["sandbox"]["network"]["allowedDomains"],
+   "review on: the endpoint's host is reachable for the task tool")
+cfgp.write_text(field(text, "Review", "Reviewer", "claude"), encoding="utf-8")
+rc, out, data = run(d)
+hosts = data["sandbox"]["network"]["allowedDomains"]
+ok("api.anthropic.com" in hosts and "generativelanguage.googleapis.com" not in hosts, "Reviewer: claude → Claude's own host")
+cfgp.write_text(field(text, "Review", "Reviewer", "gemini"), encoding="utf-8")
+rc, out, data = run(d)
+ok("generativelanguage.googleapis.com" in data["sandbox"]["network"]["allowedDomains"]
+   and any(p.endswith(".gemini") for p in data["sandbox"]["filesystem"]["allowWrite"]),
+   "Reviewer: gemini → Gemini's hosts and its own state directory")
+
 print("trust — the Sandbox section")
 d = project(enabled="yes")
 configure(d, lambda t: items(t, "Sandbox", "Excluded commands", ["docker compose *"]))
@@ -302,8 +324,23 @@ sandbox.answer(str(d4), "docker", True)
 _, _, extra = sandbox.section(str(d4))
 ok(extra["Excluded commands"] == ["docker compose *"] and "- **Limits asked**: docker"
    in (d4 / "telesma" / "config.md").read_text(encoding="utf-8"), "an older config without the field gets it")
+d5 = project()
+(d5 / "pyproject.toml").write_text('[project.optional-dependencies]\nui = ["pytest-playwright>=0.5"]\n', encoding="utf-8")
+(d5 / "telesma" / "state").mkdir(parents=True, exist_ok=True)
+(d5 / "telesma" / "state" / "PLAN.md").write_text("- [ ] Task 1.1: UI (tech: playwright, python)\n", encoding="utf-8")
+got = sandbox.limits(str(d5))
+ok([(k, p) for k, p, _ in got] == [("playwright-python", None)],
+   f"Playwright from Python → advice, never the npx pattern ({[(k, p) for k, p, _ in got]})")
+sandbox.answer(str(d5), "playwright-python", False)
+ok(sandbox.limits(str(d5)) == [] and sandbox.section(str(d5))[2]["Excluded commands"] == [],
+   "… said once, nothing excluded")
+d6 = project()
+(d6 / "package.json").write_text('{"dependencies": {"react-native": "0.76.0"}}', encoding="utf-8")
+ok([k for k, _, _ in sandbox.limits(str(d6))] == ["metro"], "react-native + watchman on macOS → the Metro advice")
+sandbox.shutil.which = lambda name: None
+ok(sandbox.limits(str(d6)) == [], "no watchman on this machine → nothing to say about Metro")
 sandbox.platform.system, sandbox.shutil.which = real_system, real_which
-for x in (d, d2, d3, d4):
+for x in (d, d2, d3, d4, d5, d6):
     shutil.rmtree(x, ignore_errors=True)
 ok("sandbox.py\" limits" in SCRIPT and "sandbox.py\" answer" in SCRIPT and "trust_stamp" in SCRIPT,
    "the launcher asks, writes the answer and stamps it as its own write")

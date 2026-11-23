@@ -166,6 +166,23 @@ def tags(line, name):
     return out
 
 
+QUESTIONS = "telesma/state/QUESTIONS.md"
+QUESTION_ID = re.compile(r"^[SAQ]\d+[a-z]?$")
+
+
+def question_ids(spec_tag):
+    """The clarification entries a `(spec: …)` value cites — `QUESTIONS.md Q15`, a bare `Q19`
+    (after a comma), `QUESTIONS.md` alone — or None when the value names a spec file. The answers
+    live in telesma/state/QUESTIONS.md, not in telesma/spec/ (hub data 2026-11-18: a task citing
+    them was refused as "no file QUESTIONS.md")."""
+    words = [w.strip(",;") for w in spec_tag.split()]
+    if not words:
+        return None
+    if QUESTION_ID.match(words[0]) or words[0].rsplit("/", 1)[-1] == "QUESTIONS.md":
+        return [w for w in words if QUESTION_ID.match(w)]
+    return None
+
+
 def tag_values(line, name):
     """The whole tag value without splitting on commas — ui-*/flow tags have the format
     file#Id1,Id2 (commas separate identifiers, not separate files)."""

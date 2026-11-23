@@ -357,7 +357,7 @@ After ALL questions are answered and the contradictions and assumptions are reso
      Key decisions). Without it, cross-cutting things are decided implicitly by the first task that
      touches them, and later ones may decide differently (especially after auto-compact)
    - Dependencies between tasks `(requires: X.X)`
-   - **References to the documentation `(spec: file.md)`** — which documents are the source of requirements for the task
+   - **References to the documentation `(spec: file.md)`** — which documents are the source of requirements for the task. An answer of the clarification is cited as `(spec: QUESTIONS.md Q15)`: `next` prints that entry from `telesma/state/QUESTIONS.md`
    - **Technology tags `(tech: tag1, tag2)`** — match them to each task based on `GUIDELINES_INDEX` (in the prompt) and the task's context (backend/frontend/db/etc.). Use only tags from the index. Purely configuration/design tasks may have no `(tech: ...)` — then only `general.md` gets loaded.
    - **Acceptance criteria for non-trivial tasks** (heuristic: a task tagged `(spec: ...)`
      or `(ui-screen: ...)`): 2-4 points indented under the task, EXTRACTED FROM THE SPEC (not invented),

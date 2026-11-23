@@ -106,7 +106,7 @@ def transcript_files(d):
 
 def empty():
     return {"models": {}, "turns": 0, "tool_calls": 0, "tool_errors": 0, "compactions": 0,
-            "compacted_context": 0, "versions": []}
+            "compacted_context": 0, "peak_context": 0, "versions": []}
 
 
 def usage(project, since=None, until=None):
@@ -154,6 +154,8 @@ def usage(project, since=None, until=None):
                         c[k] += v if isinstance(v, int) else 0
                     c["turns"] += 1
                     u["turns"] += 1
+                    side = sum(use.get(KEYS[k]) for k in INPUT_SIDE if isinstance(use.get(KEYS[k]), int))
+                    u["peak_context"] = max(u["peak_context"], side)
                     if isinstance(r.get("version"), str):
                         versions.add(r["version"][:20])
                 for b in m.get("content") if isinstance(m.get("content"), list) else []:
@@ -271,6 +273,25 @@ def sums(u):
         for k in FIELDS:
             out[k] += c.get(k, 0)
     return out
+
+
+INPUT_SIDE = ("input", "cache_read", "cache_write")
+
+
+def steps(u):
+    """Responses of the model in a usage dict — one step of the loop each."""
+    return (u or {}).get("turns") or 0
+
+
+def context(u):
+    """What the model read in a usage dict: the input side of every response (change plan K14 —
+    the session's cost is about this number, context per step × steps)."""
+    s = sums(u)
+    return sum(s[k] for k in INPUT_SIDE)
+
+
+def per_step(ctx, n):
+    return human(ctx / n) if n else "-"
 
 
 def total(u):
@@ -492,6 +513,13 @@ def report(root):
     out.append(f"  Tokens: {human(g_total)} — input {human(grand['input'])}, output {human(grand['output'])}, "
                f"cache read {human(grand['cache_read'])}, cache write {human(grand['cache_write'])} "
                f"({cache_share(grand)}% of the input side from the cache)")
+    src = sessions or tasks
+    g_steps, g_ctx = sum(steps(r.get("usage")) for r in src), sum(context(r.get("usage")) for r in src)
+    if g_steps:
+        peak = max((r.get("usage") or {}).get("peak_context") or 0 for r in src)
+        out.append(f"  Context per step: {per_step(g_ctx, g_steps)} tokens read per response, over {g_steps} steps"
+                   + (f"; largest single step {human(peak)}" if peak else "")
+                   + " (cost ≈ context per step × steps)")
     if tasks:
         out.append(f"  Per task: {human(t_total / len(tasks))} tokens, output {human(task_sum['output'] / len(tasks))}, "
                    f"{hours(sum(t.get('minutes') or 0 for t in tasks) / len(tasks))}")
@@ -514,8 +542,9 @@ def report(root):
         acc = collections.OrderedDict()
         for r in source:
             k = key(r)
-            a = acc.setdefault(k, {"n": 0, "min": 0, **dict.fromkeys(FIELDS, 0)})
+            a = acc.setdefault(k, {"n": 0, "min": 0, "steps": 0, **dict.fromkeys(FIELDS, 0)})
             a["n"] += 1
+            a["steps"] += steps(r.get("usage"))
             a["min"] += r.get("minutes") or 0
             add(a, sums(r.get("usage")))
         if not acc:
@@ -523,9 +552,10 @@ def report(root):
         out.append("")
         out.append(title)
         out.append(table([title.split()[1].capitalize() if " " in title else "", "tasks", "time", "tokens", "output",
-                          "per task", "cache"],
+                          "per task", "steps", "ctx/step", "cache"],
                          [[k, a["n"], hours(a["min"]), human(sum(a[f] for f in FIELDS)), human(a["output"]),
-                           human(sum(a[f] for f in FIELDS) / a["n"]), f"{cache_share(a)}%"] for k, a in acc.items()]))
+                           human(sum(a[f] for f in FIELDS) / a["n"]), a["steps"],
+                           per_step(sum(a[f] for f in INPUT_SIDE), a["steps"]), f"{cache_share(a)}%"] for k, a in acc.items()]))
 
     by_phase = sorted(tasks, key=lambda t: [int(x) if x.isdigit() else x for x in re.split(r"[.]", str(t.get("phase") or "?"))])
     group("By phase", lambda t: str(t.get("phase") or "?"), by_phase)
@@ -548,6 +578,14 @@ def report(root):
                            hours(t.get("minutes")), t.get("attempts") or 1, main_model(t.get("usage")) or "?"]
                           for t in top]))
         out.append("")
+        out.append("Largest context per step")
+        top = sorted((t for t in tasks if steps(t.get("usage"))),
+                     key=lambda t: -context(t.get("usage")) / steps(t.get("usage")))[:5]
+        out.append(table(["task", "ctx/step", "steps", "largest step", "tokens", "compactions"],
+                         [[t.get("task"), per_step(context(t.get("usage")), steps(t.get("usage"))), steps(t.get("usage")),
+                           human(t["usage"].get("peak_context")) if t["usage"].get("peak_context") else "-",
+                           human(total(t.get("usage"))), t["usage"].get("compactions") or 0] for t in top]))
+        out.append("")
         out.append("Longest")
         top = sorted(tasks, key=lambda t: -(t.get("minutes") or 0))[:5]
         out.append(table(["task", "time", "clock", "tokens", "refusals", "attempts"],
@@ -564,7 +602,8 @@ def report(root):
 
 CSV_HEAD = ["type", "from", "to", "task", "phase", "mode", "version", "model", "minutes", "wall_minutes", "input", "output",
             "cache_read", "cache_write", "turns", "tool_calls", "tool_errors", "compactions", "compacted_context",
-            "attempts", "refusals", "files", "insertions", "deletions", "commit", "claude_code"]
+            "attempts", "refusals", "files", "insertions", "deletions", "commit", "claude_code", "context_per_step",
+            "peak_context"]
 
 
 def write_csv(root, stream):
@@ -580,7 +619,8 @@ def write_csv(root, stream):
                     s["cache_read"], s["cache_write"], u.get("turns"), u.get("tool_calls"), u.get("tool_errors"),
                     u.get("compactions"), u.get("compacted_context"), r.get("attempts"), r.get("refusals"),
                     d.get("files"), d.get("insertions"), d.get("deletions"), r.get("commit"),
-                    ",".join(u.get("versions") or [])])
+                    ",".join(u.get("versions") or []),
+                    round(context(u) / steps(u)) if steps(u) else None, u.get("peak_context") or None])
 
 
 # --- command line ---------------------------------------------------------------------------

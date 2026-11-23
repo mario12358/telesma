@@ -212,6 +212,48 @@
 <!-- On failure (block | warn — config can soften a module, never harden it),                 -->
 <!-- Time limit (optional; units s, sec, min — e.g. 30 s, 5 min). A check without an entry here does not run and costs nothing. -->
 
+## Review
+
+<!-- An independent review of every task before it is committed: `done` itself sends the task's   -->
+<!-- plan lines and its diff to a SECOND model, which knows nothing of the session, and reads the  -->
+<!-- verdict — the model that wrote the code does not judge it. Off by default: the diff leaves    -->
+<!-- this machine for the reviewer you name, with the files it changes in full and the committed   -->
+<!-- files the task names (nothing else does: no spec files beyond the fragments the task cites,   -->
+<!-- no state files, no file git does not hold). A blocker refuses `done`; the author fixes it or contests it -->
+<!-- with a reason that lands in the commit message. No answer (network, key, timeout) is "not     -->
+<!-- run", said in the commit message — never a pass, never a stop. Log: .git/telesma-review/.     -->
+
+- **Enabled**: no
+- **Reviewer**: api
+  <!-- api    = a chat endpoint in the OpenAI format (Endpoint, Model, API key below): Google,     -->
+  <!--          OpenAI, Anthropic, or a server of your own (Ollama, vLLM, LiteLLM).                -->
+  <!-- claude = a separate Claude Code session on your subscription, without tools (`claude -p`);  -->
+  <!--          only Model is used — choose a different model than the one that writes the code.   -->
+  <!-- gemini = Gemini CLI on your own sign-in, headless and read-only (`gemini -p -m <Model>`),   -->
+  <!--          started in an empty directory; only Model is used (`gemini --list-models`).        -->
+- **Endpoint**: none
+  <!-- Google:    https://generativelanguage.googleapis.com/v1beta/openai/chat/completions         -->
+  <!-- OpenAI:    https://api.openai.com/v1/chat/completions                                       -->
+  <!-- Anthropic: https://api.anthropic.com/v1/chat/completions                                    -->
+  <!-- local:     http://localhost:11434/v1/chat/completions   (Ollama; LM Studio: port 1234;      -->
+  <!--            llama.cpp, vLLM: their /v1/chat/completions) — nothing leaves this machine,      -->
+  <!--            API key: none. http:// only for localhost; another machine has to be https://.   -->
+- **Model**:
+  <!-- The model's id as the provider lists it.                                                    -->
+- **API key**: env:TELESMA_REVIEW_KEY
+  <!-- env:NAME · file:<path outside the repo, e.g. ~/.config/telesma/review.key> · cmd:<command> · -->
+  <!-- none (a local server). Never a literal: this file goes into git. With the sandbox on, the   -->
+  <!-- reviewer's host is added to the allowed hosts by Telesma.                                   -->
+- **Max diff**: 240000
+  <!-- Characters of diff a review reads; a bigger diff is "not run". A LOCAL model needs a number -->
+  <!-- that fits its context window with room for the answer: about 3 characters per token, so     -->
+  <!-- 20000 for a window of 8k tokens, 90000 for 32k. A server that cuts a long prompt silently    -->
+  <!-- (Ollama does, to its num_ctx) is caught by the token count it reports and is "not run".     -->
+  <!-- What the diff leaves of this number is filled with context: the changed files in full and -->
+  <!-- the committed files the task names in backticks. A smaller number = a cheaper review.       -->
+- **Timeout**: 180
+  <!-- Seconds to wait for the reviewer (10–480). A local model on a large diff may need more.    -->
+
 ## Visual artifacts
 
 <!-- Opt-in: screenshots per screen from telesma/spec/ux_ui/ + recordings per Step from telesma/spec/APP_FLOW.md. -->
@@ -248,6 +290,12 @@
   <!-- Context compression (auto-compact) happens automatically when the window fills up —  -->
   <!-- Claude cannot call /compact by itself. The protection is the state files updated     -->
   <!-- after every task (section 6 of the instructions).                                     -->
+- **Compact context at**: 500k
+  <!-- Claude Code summarises the conversation once it passes this size (100k–1000k), instead   -->
+  <!-- of when the model's window is full. Every step re-reads the whole conversation, so a      -->
+  <!-- smaller value costs fewer tokens, and a larger one leaves a big task (a review of the     -->
+  <!-- whole project) uninterrupted; `telesma.sh --usage` shows the context per step.            -->
+  <!-- auto = leave it to Claude Code. A CLAUDE_CODE_AUTO_COMPACT_WINDOW you exported wins.      -->
 - **Max refusals per task**: 5
   <!-- A hard stop counted by the task tool: this many refused `done` for one task end the       -->
   <!-- session with TELESMA BLOCKED. "Max tries per task" is when Claude asks you; this is when   -->

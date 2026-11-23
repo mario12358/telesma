@@ -20,6 +20,8 @@
                                            the task's e2e test exists but cannot run in this session (the
                                            sandbox refuses the browser): committed on its other tests, the
                                            file waits for the person; `release` refuses while any waits
+    telesma-task.py done --contested TEXT  the independent review (## Review) refused the task on a blocker
+                                           that is wrong: the same files, with the reason; recorded in the commit
     telesma-task.py e2e-ran                the person, in a terminal: the waiting e2e tests ran green outside
                                            the session — the list is cleared
     telesma-task.py changes-done FILE --kind bug|correction|feature -m SUMMARY
@@ -54,6 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TELESMA = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import telesma_state as ts  # noqa: E402
+import telesma_review as tr  # noqa: E402
 import telesma_github as ghf  # noqa: E402
 import telesma_usage as tu  # noqa: E402
 
@@ -181,7 +184,10 @@ ZERO = [re.compile(p, re.I | re.M) for p in (
 POSITIVE = [re.compile(p, re.I | re.M) for p in (
     r"\b([1-9][0-9]*) (?:passed|passing)\b", r"\bRan ([1-9][0-9]*) tests?\b",
     r"\bTests:\s+([1-9][0-9]*) passed\b", r"^ok\s+\S+", r"test result: ok\. ([1-9][0-9]*) passed",
-    r"\b([1-9][0-9]*) tests? (?:completed|succeeded|passed)\b", r"\b([1-9][0-9]*) examples?, 0 failures\b")]
+    r"\b([1-9][0-9]*) tests? (?:completed|succeeded|passed)\b", r"\b([1-9][0-9]*) examples?, 0 failures\b",
+    # Swift: Swift Testing prints "Test run with 11 tests in 3 suites passed", and `swift test` also runs
+    # an XCTest harness that prints "Executed 0 tests" when every test is a Swift Testing one
+    r"\bTest run with ([1-9][0-9]*) tests?\b[^\n]*\bpassed\b", r"\bExecuted ([1-9][0-9]*) tests?, with 0 failures\b")]
 
 
 def zero_tests(output):
@@ -196,8 +202,11 @@ def zero_tests(output):
 
 
 def summary_of(output):
-    for p in (r"(\d+ passed(?:, \d+ \w+)*)", r"Tests:\s+([^\n]+)", r"(\d+ passing)", r"(Ran \d+ tests?)",
-              r"test result: ok\. (\d+ passed)"):
+    swift = re.findall(r"Test run with (\d+) tests?\b[^\n]*\bpassed\b", output)    # one line per test target
+    if swift:
+        return f"{sum(int(n) for n in swift)} tests passed"
+    for p in (r"(\d+ passed(?:, \d+ \w+)*)", r"Tests:\s+([^\n]+)",
+              r"(\d+ passing)", r"(Ran \d+ tests?)", r"test result: ok\. (\d+ passed)", r"(Executed \d+ tests?)"):
         m = re.findall(p, output)
         if m:
             return m[-1].strip()[:60]
@@ -359,6 +368,60 @@ def run_checks(root, files):
                       "\nFix what they name and run done again. If a finding is wrong, do NOT get around it: "
                       "TELESMA BLOCKED with the fingerprint — the person writes the exception.")
     return "" if out.startswith(("Checks disabled", "Checks (commit): clean")) else out
+
+
+IS_TEST = re.compile(r"^- \[[ xX]\]\s*\W*Test\b")
+
+
+def related_item(plan, item):
+    """The other half of a Task / Test pair, for the reviewer: a task's tests are often the next
+    plan item and the next commit, and a `Test:` item is read against the task it covers. The pair
+    is two neighbours in the plan (`- [ ] Task 2.1: …` then `- [ ] Test: 2.1 — …`)."""
+    order = plan.order
+    at = next((i for i, o in enumerate(order) if o["idx"] == item["idx"]), None)
+    if at is None:
+        return ""
+    is_test = lambda o: bool(IS_TEST.match(plan.lines[o["idx"]]))      # noqa: E731
+    if is_test(item):
+        if at == 0 or is_test(order[at - 1]) or order[at - 1]["phase"] != item["phase"]:
+            return ""
+        return ("The item under review is a `Test:` item. The task it covers (already committed):\n"
+                + "\n".join(plan.block(order[at - 1])))
+    if at + 1 >= len(order) or not is_test(order[at + 1]) or order[at + 1]["phase"] != item["phase"]:
+        return ""
+    other = order[at + 1]
+    return ("The tests of this task are a separate plan item, "
+            + ("already done:\n" if other["done"] else "not done yet — they come in the next commit:\n")
+            + "\n".join(plan.block(other)))
+
+
+def run_review(root, cfg, session, item, name, files, args, tests=""):
+    """The independent review (## Review, tools/telesma_review.py), after the tests and the checks
+    (a secret the checks refuse never reaches the reviewer). Adds its line to the commit message and
+    returns the notes to print; a blocker raises Refused, a reviewer that did not answer does not."""
+    task_lines, spec_text, related = [name], "", ""
+    if item is not None:
+        plan = ts.load_plan(root)
+        task_lines = plan.block(item)
+        related = related_item(plan, item)
+        out = []
+        try:
+            spec_part(root, plan.lines[item["idx"]], out, [], [], write=False)
+            spec_text = "\n\n".join(out) if ts.tags(plan.lines[item["idx"]], "spec") else ""
+        except Exception:       # the fragments are context for the reviewer, never a reason to stop
+            spec_text = ""
+    o = tr.review(root, cfg, trust_module(), name, task_lines, spec_text, files, session.get("review"),
+                  args.contested, self_command(), related=related,
+                  tests=f"Passed (a failing run refuses done before the review). The Tests cell: {tests}" if tests else "")
+    if o.refusal:
+        if o.state:
+            session["review"] = o.state
+            save_session(root, session)
+        raise Refused(o.refusal)
+    session.pop("review", None)
+    if o.line:
+        args.message = ((args.message or "").strip() + "\n\n" + o.line).strip()
+    return o.notes
 
 
 def record_evidence(root):
@@ -701,8 +764,10 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
     if fix:
         if branch != fix["branch"]:
             raise Refused(f"the PR fix belongs on `{fix['branch']}`, you are on `{branch}`")
-        run_tests(root, cfg, files)
+        tests = run_tests(root, cfg, files)
         warnings = run_checks(root, files)
+        review_notes = run_review(root, cfg, session, None, fix.get("name") or f"fix of PR #{fix['n']}", files, args,
+                                  tests)
         sha = make_commit(root, files, excluded, short_subject(f"Telesma: fix PR #{fix['n']} — {fix.get('name') or fix.get('kind')}"),
                           args.message, args.trailer)
         record_evidence(root)
@@ -712,12 +777,15 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
         print(f"committed {sha[:9]} and pushed to PR #{fix['n']}")
         if warnings:
             print(warnings)
+        if review_notes:
+            print(review_notes)
         print(f"Next: `{self_command()} next` — it reads the checks again.")
         return 0
     if session.get("branch") and branch != session["branch"]:
         raise Refused(f"{name} is worked on `{session['branch']}`, you are on `{branch}` — `git checkout {session['branch']}`")
     tests = run_tests(root, cfg, files) + e2e_note(args)
     warnings = run_checks(root, files)
+    review_notes = run_review(root, cfg, session, item, name, files, args, tests)
     subject = short_subject(f"Telesma: {name}")
     sha = make_commit(root, files, excluded, subject, args.message, args.trailer)
     record_evidence(root)
@@ -733,6 +801,8 @@ def done_github(root, cfg, session, item, name, files, excluded, args):
     print(f"committed {sha[:9]} {name} — PR #{n} opened ({merge_mode(cfg)} merge); the task is ticked when it is merged")
     if warnings:
         print(warnings)
+    if review_notes:
+        print(review_notes)
     print(f"Next: `{self_command()} next`")
     return 0
 
@@ -837,11 +907,14 @@ def cmd_done(root, args):
                 if p not in files and os.path.exists(os.path.join(root, p)):
                     files.append(p)
         warnings = run_checks(root, sorted(set(files)))
+        review_notes = run_review(root, cfg, session, item, name, sorted(set(files)), args, tests)
         if not auto_commit:
             record_usage(root, session, item, name, None, tests, refusals)
             session.update({"task": None, "last": name, "refusals": 0})
             save_session(root, session)
             print(f"done {name} — Auto-commit: no, nothing committed")
+            if review_notes:
+                print(review_notes)
             return 0
         sha = make_commit(root, sorted(set(files)), excluded, short_subject(f"Telesma: {name}"),
                           args.message, args.trailer)
@@ -871,6 +944,8 @@ def cmd_done(root, args):
     print(f"committed {sha[:9]} {name}")
     if warnings:
         print(warnings)
+    if review_notes:
+        print(review_notes)
     if git_mode:
         print("Repository integration: push this branch and open the PR (section 17.2), add (pr: #n) to the task; "
               "the task is ticked after the merge (17.1).")
@@ -1487,14 +1562,17 @@ def spec_index_entries(text):
     return out
 
 
-def find_entry(entries, path):
-    """An index entry for `path` (written with or without the telesma/spec/ prefix)."""
+def find_entry(entries, path, ui=False):
+    """An index entry for `path` (written with or without the telesma/spec/ prefix). A flow file is
+    often indexed twice — once under `## Files`, once under `## Flows` with its steps: a `(flow:)` or
+    `(ui-…:)` tag reads the second (`ui=True`), a `(spec:)` tag the first."""
     want = path[len("telesma/spec/"):] if path.startswith("telesma/spec/") else path
-    for k, v in entries.items():
-        kk = k[len("telesma/spec/"):] if k.startswith("telesma/spec/") else k
-        if kk == want:
+    found = [(k, v) for k, v in entries.items()
+             if (k[len("telesma/spec/"):] if k.startswith("telesma/spec/") else k) == want]
+    for k, v in found:
+        if bool(v.get("ui")) == ui:
             return k, v
-    return None, None
+    return found[0] if found else (None, None)
 
 
 def spec_file(root, path):
@@ -1544,7 +1622,30 @@ def fragment(full, start, end, limit=SPEC_PRINT_LIMIT):
     return body
 
 
-def spec_part(root, plan_line, out, blockers, wrote):
+def question_part(root, ids):
+    """The clarification entries a task cites (`(spec: QUESTIONS.md Q15)`, `(spec: Q19)`), from
+    telesma/state/QUESTIONS.md. A missing entry is a note, never a refusal: the answer was the
+    person's and the task's text carries what it decided."""
+    text = ts.read_text(os.path.join(root, ts.QUESTIONS))
+    if text is None:
+        return (f"### {ts.QUESTIONS} — not in this project; the task cites "
+                f"{', '.join(ids) or 'the clarification'}: go by the task's own text and DECISIONS.md.")
+    if not ids:
+        return f"### {ts.QUESTIONS} — Grep it for the task's terms and Read only the matching entries."
+    lines = text.split("\n")
+    parts = []
+    for qid in ids:
+        start = next((i for i, l in enumerate(lines) if re.match(rf"###\s+{re.escape(qid)}\b", l)), None)
+        if start is None:
+            parts.append(f"#### {qid} — no such entry in {ts.QUESTIONS}; go by the task's own text.")
+            continue
+        end = next((j for j in range(start + 1, len(lines)) if re.match(r"#{2,3}\s", lines[j])), len(lines))
+        end = min(end, start + SPEC_PRINT_LIMIT)
+        parts.append("\n".join(lines[start:end]).rstrip())
+    return f"### {ts.QUESTIONS} (the clarification's answers)\n\n" + "\n\n".join(parts)
+
+
+def spec_part(root, plan_line, out, blockers, wrote, write=True):
     specs = ts.tags(plan_line, "spec")
     if not specs:
         out.append("## Specification\n\nThe task has no (spec:) tag — find the sections in SPEC_INDEX.md by "
@@ -1559,6 +1660,9 @@ def spec_part(root, plan_line, out, blockers, wrote):
     for tag in specs:
         fname, _, note = tag.partition(" ")
         rel, full = spec_file(root, fname)
+        if not full and ts.question_ids(tag) is not None:
+            out.append(question_part(root, ts.question_ids(tag)))
+            continue
         if not full:
             blockers.append(f"(spec: {tag}) — no file {fname} in telesma/spec/ or the project root")
             continue
@@ -1594,7 +1698,7 @@ def spec_part(root, plan_line, out, blockers, wrote):
         else:
             out.append(head + "\n\nSections (ranges verified against their anchors — Read only the ones this task "
                        "needs, with offset/limit):\n" + table)
-    if changed:
+    if changed and write:
         ts.atomic_write(index_path, "\n".join(index_lines))
         wrote.append(ts.SPEC_INDEX)
 
@@ -1642,7 +1746,7 @@ def ui_part(root, plan_line, out, blockers):
             if name == "ui-tokens":
                 parts.append(f"- ({name}) {rel}: copy the file 1:1 into the project and wire it into the global style.")
                 continue
-            key, entry = find_entry(entries, path)
+            key, entry = find_entry(entries, path, ui=True)
             for ident in [x.strip() for x in ids.split(",") if x.strip()] or [""]:
                 if entry is None or not ident:
                     blockers.append(f"({name}: {ref}) — no entry for it in SPEC_INDEX.md")
@@ -1863,6 +1967,7 @@ class Args:
         self.trailer, self.project, self.only = [], None, []
         self.source, self.detected_by, self.withdrawn, self.cont = None, None, False, False
         self.e2e = []
+        self.contested = ""
 
 
 def parse(argv):
@@ -1894,6 +1999,10 @@ def parse(argv):
             a.withdrawn = True
         elif x == "--continue":
             a.cont = True
+        elif x == "--contested":
+            a.contested = next(it, "")
+            if not a.contested.strip():
+                raise Refused("--contested takes the reason, in quotes")
         elif x == "--e2e-not-run":
             v = next(it, "")
             if not v or v.startswith(("/", "-")) or ".." in v.split("/"):
@@ -1921,6 +2030,8 @@ def main(argv):
             return 2
         root = project_root(a.project)
         check_trailers(a.trailer)
+        if a.contested and a.command != "done":
+            raise Refused("--contested belongs to done")
         if a.e2e and a.command != "done":
             raise Refused("--e2e-not-run belongs to done")
         if a.e2e:

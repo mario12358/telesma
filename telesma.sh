@@ -295,8 +295,31 @@ run_claude() {
 }
 
 run_claude_once() {
-    local how="$1" prompt="$2" f arg a rc=0 continued=false limit=0 size
+    local how="$1" prompt="$2" f arg a rc=0 continued=false limit=0 size sf="" rest
     shift 2
+    # The instructions go into the system prompt, the state into the first message (change plan
+    # K14): a compaction summarises the conversation, never the system prompt. Live probe
+    # 2026-11-20: a rule given in the first message was gone after 14 compactions, the same rule in
+    # the system prompt held. Not with --continue (Claude Code ignores the file there).
+    for a in "$@"; do [[ "$a" == --continue ]] && continued=true; done
+    # Cut by length: a 100 KB pattern match is quadratic in Bash 3.2.
+    if [[ -n "${TELESMA_SYSTEM_PART:-}" && "$continued" == false && "${prompt:0:${#TELESMA_SYSTEM_PART}}" == "$TELESMA_SYSTEM_PART" ]]; then
+        rest="The Telesma instructions for this session are appended to your system prompt — follow them exactly. What follows is the project's state at the start of the session.${prompt:${#TELESMA_SYSTEM_PART}}"
+        sf=$(mktemp "${TMPDIR:-/tmp}/telesma-instructions.XXXXXX")
+        tmp_register "$sf"
+        printf '%s%s' "$TELESMA_SYSTEM_PART" "${TELESMA_SYSTEM_EXTRA:-}" > "$sf"
+        arg="$sf"
+        if [[ "$PREFLIGHT_OS" == windows ]] && command -v cygpath > /dev/null 2>&1; then
+            arg=$(cygpath -w "$sf")
+        fi
+        if [[ "$PREFLIGHT_OS" == windows || -n "${TELESMA_PROMPT_VIA_FILE:-}" ]] && (( ${#rest} >= 28000 )); then
+            rm -f "$sf"; sf=""           # the state alone does not fit a Windows command line: the old route
+        else
+            prompt="$rest"
+            set -- "$@" --append-system-prompt-file "$arg"
+        fi
+    fi
+    continued=false
     size=${#prompt}
     if [[ "$PREFLIGHT_OS" == windows || -n "${TELESMA_PROMPT_VIA_FILE:-}" ]]; then
         limit=28000
@@ -309,8 +332,15 @@ run_claude_once() {
     fi
     if (( limit > 0 )); then
         if (( size < limit )); then
-            claude "$@" "$prompt"
-            return
+            claude "$@" "$prompt" || rc=$?
+            [[ -n "$sf" ]] && rm -f "$sf"
+            return $rc
+        fi
+        if [[ -n "$sf" ]]; then          # the state alone is past one argument: it joins the instructions' file
+            printf '\n\n%s' "$prompt" >> "$sf"
+            claude "$@" "Begin now. Your instructions for this session are the Telesma prompt appended to your system prompt — follow them exactly." || rc=$?
+            rm -f "$sf"
+            return $rc
         fi
         for a in "$@"; do [[ "$a" == --continue ]] && continued=true; done
         f=$(mktemp "${TMPDIR:-/tmp}/telesma-prompt.XXXXXX")
@@ -330,10 +360,12 @@ run_claude_once() {
         return $rc
     fi
     if [[ "$how" == pipe ]]; then
-        claude "$@" <<< "$prompt"
+        claude "$@" <<< "$prompt" || rc=$?
     else
-        claude "$@" "$prompt"
+        claude "$@" "$prompt" || rc=$?
     fi
+    [[ -n "$sf" ]] && rm -f "$sf"
+    return $rc
 }
 
 # Edit a file in place — portable (BSD sed needs `-i ''`, GNU sed `-i`)
@@ -4001,6 +4033,8 @@ if command -v python3 &> /dev/null; then
                         playwright) _lmsg=$(msg sandbox.limit.playwright "$_lmsg") ;;
                         docker) _lmsg=$(msg sandbox.limit.docker "$_lmsg") ;;
                         watchman) _lmsg=$(msg sandbox.limit.watchman "$_lmsg") ;;
+                        playwright-python) _lmsg=$(msg sandbox.limit.playwright_python "$_lmsg") ;;
+                        metro) _lmsg=$(msg sandbox.limit.metro "$_lmsg") ;;
                     esac
                     echo -e "${YELLOW}$(msg sandbox.limit 'Sandbox limit (%s): %s' "$_lkey" "$_lmsg")${NC}"
                     [[ -t 0 && -t 1 ]] || continue
@@ -4980,6 +5014,8 @@ for o in plan.order:
         # Cut off a section note after the file name ("§7", "Appendix 2"); look relative to telesma/spec/
         # AND to the project root (plans also refer to policy/, docs/, telesma/spec/ with an explicit prefix)
         fname = f.split()[0]
+        if ts.question_ids(f) is not None:
+            continue   # an answer of the clarification (telesma/state/QUESTIONS.md), given by `next`
         if not ((spec_dir / fname).exists() or (project_root / fname).exists()):
             errors.append(f"line {i+1}: (spec: {f}) — no file {fname} (looked in telesma/spec/ and the project root)")
     for name in ("ui-tokens", "ui-component", "ui-screen", "flow"):
@@ -5184,6 +5220,10 @@ TASK_TOOL: ${TASK_TOOL}
 Run it exactly in this form (the session allows this command): \`${TASK_TOOL} next\`, \`${TASK_TOOL} done\`, \`${TASK_TOOL} suite\`, \`${TASK_TOOL} changes\`, \`${TASK_TOOL} changes-done <file> --kind … -m \"…\"\`, \`${TASK_TOOL} commit --kind <kind> -m \"…\"\`. Give the ones that run tests (done, suite, changes-done, commit) the Bash tool timeout 600000. Commits, task ticks and the report's history go through it only — a hook refuses git add / commit and edits of those sections.
 
 ${LANGUAGE_LINE}${EXPERIENCE_BLOCK}"
+# What holds for the whole session (the mode and its rules, the task tool, the language, the
+# experience block; the integrations line is added below): it goes into the system prompt as well,
+# next to the instructions, because a compaction summarises the first message (change plan K14).
+SESSION_CONSTANTS="$MODE_SUFFIX"
 
 # Trimming the prompt COPY — the files on disk are untouched. Measured on the reference project
 # (2026-09-22, 425k characters): template comments in config.md 13k; PROJECT_CONTEXT table rows
@@ -5301,6 +5341,9 @@ if [[ ${#ACTIVE_INTEGRATIONS[@]} -gt 0 ]]; then
     [[ "$INTEG_REPO" != "none" ]] && _integ_desc+=" Repository ${INTEG_REPO} (${INTEG_REPO_NAME}, merge: ${INTEG_MERGE}, PR limit: ${INTEG_LIMIT}) — section 17: every iteration starts with the PR reconciliation (17.1), a task is ✅ only after the merge."
     [[ "$INTEG_TRACKER" != "none" ]] && _integ_desc+=" Tracker ${INTEG_TRACKER} (project ${INTEG_TRACKER_PROJECT}) — section 18: the session starts with the sync (18.1), anchors before the task (18.2), trailer in the commits (18.3)."
     MODE_SUFFIX+="
+
+INTEGRATIONS: ${ACTIVE_INTEGRATIONS[*]}.${_integ_desc}"
+    SESSION_CONSTANTS+="
 
 INTEGRATIONS: ${ACTIVE_INTEGRATIONS[*]}.${_integ_desc}"
 fi
@@ -5466,12 +5509,42 @@ fi
 # Start Claude
 cd "$PROJECT_DIR"
 
+# Context per step (change plan K14, step 2): Claude Code compacts the conversation once it passes
+# this size instead of when the model's window is full. A session's cost is about the context per
+# step × the steps, and with a 1M window a phase reached 800k per step (hub data 2026-11-20). The
+# state files are the memory, so an earlier compaction loses nothing the loop needs. Set for this
+# session only, through the environment; a value the person exported themselves wins.
+_compact=$(config_field "Telesma loop" "Compact context at" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+if [[ -n "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}" || "$MODE" == "2" || "$MODE" == "3" ]]; then
+    :   # the person's own value wins; a chat (bugfix, review) keeps the whole window — a review of
+        # the whole project needs it, and the person is there to run /compact
+elif [[ "$_compact" =~ ^[0-9]+k$ ]] && (( ${_compact%k} >= 100 && ${_compact%k} <= 1000 )); then
+    export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$_compact"
+    echo -e "${CYAN}$(msg compact.at 'Context: compacted past %s tokens (## Telesma loop → Compact context at).' "$_compact")${NC}"
+elif [[ -n "$_compact" && "$_compact" != auto && "$_compact" != none ]]; then
+    echo -e "${YELLOW}$(msg compact.bad 'Compact context at: "%s" is not a size from 100k to 1000k — left to Claude Code.' "$_compact")${NC}"
+fi
+
 # A beginner was told "close this conversation, Telesma asks what next": the launcher outlives the
 # session (Ctrl+C reaches claude, not this script) and comes back to the "what now?" menu.
 BEGINNER_RETURN=false
 [[ "${PROJECT_EXPERIENCE:-developer}" == "beginner" && ( "$MODE" == "1" || "$MODE" == "2" ) ]] && BEGINNER_RETURN=true
 [[ "$BEGINNER_RETURN" == true ]] && trap ':' INT
 
+# A shell variable, never the environment (100 KB would not fit one environment string on Linux).
+TELESMA_SYSTEM_PART="$INSTRUCTIONS"
+TELESMA_SYSTEM_EXTRA="
+
+---
+
+# Session constants
+
+These hold for the whole session, also after a compaction (the first message, with the project's
+state at the start, is summarised then — the state is in the files, see section 6). A sentence
+that says to start or to greet the user applies once, at the beginning of the session.
+
+$SESSION_CONSTANTS
+"
 if [[ "$INTERACTIVE" == true ]]; then
     # The prompt as a positional argument — claude starts interactively WITH the instructions
     # (writing it to a tmp file + a bare `claude` left the session without the Telesma instructions)

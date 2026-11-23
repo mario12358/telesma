@@ -4,17 +4,45 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
-## Unreleased
+## 1.6.0 — 2026-11-23
 
-State format: 24. An older config gets `## Sandbox → Limits asked` through the merge; nothing
-else in your project's files changes.
+State format: 24. An older config gets `## Sandbox → Limits asked` and `## Review` (off) through
+the merge; nothing else in your project's files changes.
+
+- **An independent review of every task, by a second model (off by default).** With
+  `## Review → Enabled: yes`, `done` sends the task's plan lines and its diff (with the changed files in full, the committed
+  files the task names and what the tests said) to a reviewer that
+  knows nothing of the session — an OpenAI-format endpoint (Google, OpenAI, Anthropic, your own
+  server, a model run locally), a separate Claude Code session on another model, or Gemini CLI. The reviewer says what the change
+  does and how it is reached, then lists findings; a blocker refuses `done`, and the author fixes
+  it or contests it with a reason that lands in the commit message (`done --contested`). A
+  reviewer that does not answer is "not run", never a pass and never a stop. The diff leaves your
+  machine only after you confirmed the section there. See `docs/CONFIGURATION.md`.
 
 - **What the sandbox cannot do is said at the start, once.** On macOS Playwright's browsers do
   not start inside the sandbox, Docker does not work in it, and Jest with watchman fails there.
   The launcher now names the limit that applies to your project and asks once whether to run that
   command outside the sandbox (`npx playwright test *`, `docker compose *`, with a question before
   each run). The answer is kept in `## Sandbox`. Before, the loop found these out with a BLOCKED
-  in the middle of a phase.
+  in the middle of a phase. Two more are said the same way, as advice: Playwright run from Python
+  (pytest — those tests wait for you) and Metro, which hangs on watchman (`resolver.useWatchman:
+  false`, or build the bundle yourself).
+- **A task may cite an answer of the clarification.** `(spec: QUESTIONS.md Q15)` or a bare `Q19`
+  no longer stops `next` with "no file QUESTIONS.md": it prints those entries from
+  `telesma/state/QUESTIONS.md`.
+- **`--usage` shows the context per step.** How many tokens the model read per response — in the
+  summary, per phase, model, week and release, and the five tasks with the largest one. A
+  session's cost is about that number times the number of steps. `--csv` gets `context_per_step`
+  and `peak_context` (the largest single step, recorded from now on).
+- **An autonomous session compacts its context at 500k tokens.** With a 1M-token window a long
+  phase grew to 800k tokens read at every step. `## Telesma loop → Compact context at` (default
+  `500k`, which leaves a large task uninterrupted; `auto` = as before; the bugfix and review
+  chats keep the whole window) sets where Claude Code summarises the conversation; an older config gets
+  the field at the next start. The state files are the memory, so nothing the loop needs is lost.
+- **The instructions outlive a compaction.** The launcher now gives Telesma's instructions to
+  Claude Code as the system prompt and the project's state as the first message. Before, an
+  autonomous session carried both in one message, and every compaction left the model with a
+  summary of its own rules.
 - **An e2e test the session cannot run no longer blocks the loop.** The task is committed on its
   other tests with `done --e2e-not-run <file>`, `suite` lists what waits, and `release` refuses
   until you ran them and typed `telesma-task.py e2e-ran` in your terminal.
@@ -29,6 +57,11 @@ else in your project's files changes.
   stopped by code nobody touched yet; every phase says how many inherited findings are left, and
   the plan gets a task or a backlog item for each. New findings still block. A committed secret
   is never accepted this way.
+- **A green Swift test run is no longer "0 tests".** `swift test` prints XCTest's empty harness
+  (`Executed 0 tests`) beside the Swift Testing run that did the work, and `done` refused it. The
+  Swift Testing line now counts, and the `Tests` cell sums the runs of all test targets.
+- **A `(flow: …#step-N)` tag finds its step.** A flow file listed in the spec index both under
+  `## Files` and under `## Flows` made `next` refuse with "no row step-N".
 
 ## 1.5.0 — 2026-11-16
 

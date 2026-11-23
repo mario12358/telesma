@@ -72,12 +72,15 @@ ARGS_CLAUDE = r'''#!/bin/sh
 if [ "$1" = auth ]; then echo '{"loggedIn": true}'; exit 0; fi
 if [ "$1" = "--version" ]; then echo "9.9.9 (fake)"; exit 0; fi
 if [ -n "$FAKE_ARGS" ]; then
+  printf '%s' "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-unset}" > "$FAKE_ARGS.compact"
   : > "$FAKE_ARGS"
   for a in "$@"; do printf '%s %s\n' "$(printf '%s' "$a" | wc -c | tr -d ' ')" "$(printf '%s' "$a" | head -c 60 | tr '\n' ' ')" >> "$FAKE_ARGS"; done
 fi
 pf=""; prev=""
 for a in "$@"; do [ "$prev" = "--append-system-prompt-file" ] && pf="$a"; prev="$a"; done
-if [ -n "$pf" ]; then cat "$pf" > "${FAKE_LOG:-/dev/null}"
+if [ -n "$pf" ]; then
+  # the instructions' file, then the first message (an argument, or stdin in pipe mode)
+  cat "$pf" > "${FAKE_LOG:-/dev/null}"; printf '\n%s\n' "$*" >> "${FAKE_LOG:-/dev/null}"; [ -t 0 ] || cat >> "${FAKE_LOG:-/dev/null}"
 elif [ "$#" -gt 0 ]; then printf '%s\n' "$*" > "${FAKE_LOG:-/dev/null}"; [ -t 0 ] || cat >> "${FAKE_LOG:-/dev/null}"
 else cat > "${FAKE_LOG:-/dev/null}"; fi
 exit 0
@@ -290,7 +293,7 @@ def test_trust_gate():
         ok("Stopped. Nothing was started." in out and record(tmp, project) is None, "ENTER is no: the default does not accept")
         out = drive(["bash", str(LAUNCHER), str(project), "-m", "1"], ["y"], env)
         rec = record(tmp, project)
-        ok(rec is not None and sorted(rec["sections"]) == sorted(["Tests", "Integrations", "Working directories", "Sandbox", "Auto-approval", "Telemetry", "Permissions"])
+        ok(rec is not None and sorted(rec["sections"]) == sorted(["Tests", "Integrations", "Working directories", "Sandbox", "Review", "Auto-approval", "Telemetry", "Permissions"])
            and rec["project"] == os.path.realpath(project), "answer y: the record holds the seven sections and the project's real path")
         ok("Starting Claude" in out, "… and the start goes on")
         check = subprocess.run([sys.executable, "-I", str(TRUST), "check", str(project)], env=env, capture_output=True, text=True)
@@ -422,7 +425,14 @@ def test_prompt_route():
         ok(not [f for f in os.listdir(tmp / "t") if f.startswith("telesma-prompt.")], "the prompt file is removed afterwards")
         r = launch(tmp, project, "-m", "1")                                       # pipe mode is not affected
         args = (tmp / "claude.args").read_text() if (tmp / "claude.args").exists() else ""
-        ok(r.returncode == 0 and "--append-system-prompt-file" not in args, "the autonomous mode still pipes the prompt")
+        prompt = (tmp / "claude.log").read_text(encoding="utf-8", errors="replace") if started(tmp) else ""
+        ok(r.returncode == 0 and "--append-system-prompt-file" in args
+           and prompt.index("## 6. Context management") < prompt.index("appended to your system prompt") < prompt.rindex("MODE: ")
+           and "Task 1.1: do it" in prompt[prompt.index("appended to your system prompt"):],
+           "the autonomous mode: the instructions as the system prompt (they outlive a compaction), the state piped")
+        system = prompt[:prompt.index("appended to your system prompt")]
+        ok("# Session constants" in system and "MODE: autonomous" in system and "TASK_TOOL: " in system
+           and "LANGUAGE: " in system, "the mode, the task tool and the language are in the system prompt too")
 
 
 def test_generalization():
@@ -587,6 +597,35 @@ def test_no_silent_exit():
             ok(re.search(site, SCRIPT) is not None, f"a failing helper cannot end the launcher under set -e: /{site[:38]}…/")
 
 
+def test_compact_window():
+    print("context per step (K14) — the session compacts past ## Telesma loop → Compact context at")
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        seen = lambda: (tmp / "claude.args.compact").read_text() if (tmp / "claude.args.compact").exists() else None  # noqa: E731
+        project = shipped_project(tmp)
+        r = launch(tmp, project, "-m", "1", TELESMA_TRUST_CONFIG="yes")
+        ok(started(tmp) and seen() == "500k" and "compacted past 500k" in r.out,
+           f"the template's 500k reaches the session's environment ({seen()})")
+        r = launch(tmp, project, "-m", "1", TELESMA_TRUST_CONFIG="yes", CLAUDE_CODE_AUTO_COMPACT_WINDOW="400k")
+        ok(seen() == "400k" and "compacted past" not in r.out, "a value the person exported wins")
+        launch(tmp, project, "-m", "3", TELESMA_TRUST_CONFIG="yes")
+        ok(started(tmp) and seen() == "unset", "a chat mode (review, bugfix) keeps the whole window")
+        c = project / "telesma" / "config.md"
+        cfg("set", c, "Telesma loop", "Compact context at", "auto")
+        launch(tmp, project, "-m", "1", TELESMA_TRUST_CONFIG="yes")
+        ok(seen() == "unset", "auto leaves it to Claude Code")
+        cfg("set", c, "Telesma loop", "Compact context at", "50k; rm -rf x")
+        r = launch(tmp, project, "-m", "1", TELESMA_TRUST_CONFIG="yes")
+        ok(seen() == "unset" and "is not a size from 100k to 1000k" in r.out and started(tmp),
+           "a value that is no size from 100k to 1000k is said and not used")
+        old = tmp / "old"
+        shipped_project(tmp, "old")
+        oc = old / "telesma" / "config.md"
+        oc.write_text(re.sub(r"- \*\*Compact context at\*\*:.*\n(  <!--.*\n)*", "", oc.read_text(encoding="utf-8")), encoding="utf-8")
+        launch(tmp, old, "-m", "1", TELESMA_TRUST_CONFIG="yes")
+        ok("- **Compact context at**: 500k" in oc.read_text(encoding="utf-8"), "an older config gets the field through the merge")
+
+
 def test_work_in_progress():
     print("uncommitted changes: the issued task's work in progress is not the person's")
     with tempfile.TemporaryDirectory() as d:
@@ -746,6 +785,7 @@ if __name__ == "__main__":
     test_broken_settings()
     test_format_gate()
     test_no_silent_exit()
+    test_compact_window()
     test_work_in_progress()
     test_survey_preconditions()
     test_answers_verbatim()

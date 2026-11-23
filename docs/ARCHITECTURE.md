@@ -956,3 +956,64 @@ a config the launcher creates starts with `yes` where the sandbox can run. Nativ
 sandbox: `yes` warns, `required` stops the start. `Enabled: no` removes the key only while it is
 still exactly what Telesma wrote, and on every update the hosts and paths the person allowed in
 Claude Code stay (`.git/telesma-task/sandbox.json` remembers which values were Telesma's own).
+
+## 25. The independent review: a second model, called by the script
+
+Telemetry from four projects (195 tasks, format 23): no session used a subagent, so the model
+that wrote a task also wrote its tests and judged both; on the reference project about half of the
+historical bugs were found by the owner or in production, all under green suites. `## Review`
+(`tools/telesma_review.py`, off by default) puts a reader with no stake between "tests pass" and
+the commit. The idea of a reviewer without the conversation's history, and three of its rules, come
+from Google's elephant-goldfish model (which reviews design documents, not diffs):
+
+- **Paraphrase first.** The reviewer says what the diff does and through which entry point it is
+  reached before it lists anything. A list of defects does not find code that is correct and wired
+  to nothing (§12); a paraphrase with "I cannot find the entry point" does.
+- **A reviewer that did not answer did not review.** `not run`, in the commit message and the log —
+  never counted as "no findings", and never a refusal (the rule of the checks for the network).
+- **Read-only.** The reviewer changes nothing; the session that wrote the code fixes or answers.
+
+What is Telesma's own:
+
+- **The script calls the reviewer, not the model.** A review the model starts itself (a subagent)
+  cannot be told apart from a verdict the model wrote. `done` sends the package and reads the
+  answer, so the author's only ways through are a fix or a recorded answer.
+- **A different model.** `Reviewer: api` is any OpenAI-format endpoint, so the reviewer can come
+  from another provider and err in other places; `Reviewer: claude` is a separate headless session
+  without tools, started outside the project so that its hooks and CLAUDE.md are not part of it.
+- **One reviewer, the diff only.** The reviewer sees the task's plan lines, the cited spec
+  fragments and the diff — not the repository. It is told to call anything that depends on code it
+  was not shown `major`, not `blocker`. Whether the diff alone is enough is the first thing to measure.
+  Measured by replaying one project's history (106 task commits, the diff of each as `done` would
+  have sent it): a budget model (Gemini flash-lite) refused 5, of which one was a real omission
+  (a file the task named and the commit lacked), one a deliberate departure from the plan's wording
+  and three wrong — all three about code that existed outside the diff. None of the eleven tasks
+  that later needed a bug fix was refused for that bug: those bugs lived in hardware, in a missing
+  package or in test timing, not in the diff. A stronger model (Claude Haiku, 17 of the tasks)
+  found real defects the budget one missed (a password sent over plain http, tests that pass
+  without the code they name) and wrote 13 blockers and 94 majors where the budget one wrote 5 and 3.
+  So: the diff-only review catches "the task said X and the diff has no X", not behaviour, and the
+  choice of model moves the line between silence and noise more than anything in the prompt.
+- **More than the diff, since the replay.** The package now carries the changed files in full and
+  the committed files the task names in backticks (smallest first, within `Max diff`; never a file
+  git does not hold, so a task that names `.env` sends no keys), what the tests said when the script
+  ran them, and the other half of a Task / `Test:` pair from the plan. A weak test is `major` unless
+  the item under review is itself a `Test:` item. Replayed on the same 17 tasks: Haiku went from 13
+  blockers and 94 majors to 6 and 64, and the six are about the code (a password over plain http,
+  two missing `.env.example` entries, a parameter never passed); the budget model went from 5
+  blockers to 1 and lost the one real omission it had found — given five times the text it reads
+  less of it. One wrong blocker survived in both ("no test for X in the files shown"). A review
+  costs about 0.06 USD with Haiku at the default `Max diff`, four times the diff-only one.
+- **Built files are not reviewed.** A changed file with a line over 2000 characters (a bundle, a
+  minified script) is named in the diff and left out. In that project a committed frontend build put
+  33 of 107 tasks over `Max diff`, so every frontend task would have been `not run`.
+- **A blocker can be contested, once, for the same diff.** A second model is wrong sometimes, and a
+  wrong blocker that could only be "fixed" would make the author damage working code. The answer
+  goes into the commit message for the person; a changed diff is reviewed again. Refusals count
+  against `Max refusals per task`, so a dispute ends in BLOCKED, not in a loop.
+- **The diff leaves the machine**, which nothing else in Telesma does. Hence the trust gate (the
+  section is shown and confirmed per machine), the order (after the checks, so a secret they refuse
+  is never sent), and no state files in the package.
+
+Not measured yet: how many real defects a reviewer finds on diffs alone, and how many blockers are
+false. The log (`.git/telesma-review/reviews.jsonl`) holds outcome, findings, time and tokens for that.

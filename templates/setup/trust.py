@@ -43,7 +43,8 @@ import tempfile
 # The fields of `## Tests` that name a command, plus the switch that runs the linter at commit.
 TEST_FIELDS = ('Test command', 'Full suite command', 'Smoke suite', 'Linter/formatter', 'Typecheck command',
                'Lint before commit')
-SECTIONS = ['Tests', 'Integrations', 'Working directories', 'Sandbox', 'Auto-approval', 'Telemetry', 'Permissions']
+SECTIONS = ['Tests', 'Integrations', 'Working directories', 'Sandbox', 'Review', 'Auto-approval', 'Telemetry',
+            'Permissions']
 KNOWN_MODES = ('default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions')
 FIELD_RE = re.compile(r'^- \*\*(.+?)\*\*:[ \t]*(.*?)[ \t]*$')
 ITEM_RE = re.compile(r'^\s+-\s+(.+?)\s*$')
@@ -239,6 +240,15 @@ def show(project, template, names):
                 add(name, 'API key (command)', key_form(values.get('API key (command)', '')))
             else:
                 add(name, 'Auto-approve', 'no')
+        elif name == 'Review':
+            # the task's diff goes to this reviewer; a `cmd:` key is a command the task tool runs
+            add(name, 'Enabled', values.get('Enabled', '') or 'no')
+            if values.get('Enabled', 'no').lower() in ('yes', 'true'):
+                add(name, 'Reviewer', values.get('Reviewer', '') or 'api')
+                add(name, 'Model', values.get('Model', '') or '(empty)')
+                if (values.get('Reviewer', '') or 'api').lower() not in ('claude', 'gemini'):
+                    add(name, 'Endpoint', values.get('Endpoint', '') or 'none')
+                    add(name, 'API key', key_form(values.get('API key', '')))
         elif name == 'Telemetry':
             add(name, 'Send', values.get('Send', '') or 'no')
             if values.get('Send', 'no').lower() == 'yes':

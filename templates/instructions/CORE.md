@@ -564,7 +564,8 @@ shows**, minus the `Ignore on commit` patterns of the config and this machine's 
   `Allowed hosts`). A test that needs the network keeps the proxy variables (`HTTPS_PROXY`, …) in
   its environment.
 - **An e2e test cannot start its browser in the session** (Playwright's `browserType.launch`
-  closes, `MachPortRendezvousServer … Permission denied`, `sandbox_extension_issue_file_to_process`)
+  closes, `TargetClosedError`, `MachPortRendezvousServer … Permission denied`,
+  `sandbox_extension_issue_file_to_process`; from Node or from Python)
   — a known limit of the sandbox on macOS, not of the task: no setting fixes it, and a BLOCKED
   only asks the person what they already answered at the start. Write the test, run everything
   else (unit, integration, the server on 127.0.0.1), and finish with
@@ -572,6 +573,10 @@ shows**, minus the `Ignore on commit` patterns of the config and this machine's 
   waits for the person, `suite` lists it, and `release` refuses until they ran it (`e2e-ran`).
   Never mark such a test as passed, never skip it in the code to get past it, and name the
   waiting files in your summary.
+- **Jest or Metro hangs or fails on watchman** (macOS, sandbox on): watchman cannot work inside
+  the sandbox. Run Jest with `--no-watchman`; for Metro (`react-native start` / `bundle`) set
+  `resolver.useWatchman: false` in `metro.config.js` when the task may touch it, otherwise leave
+  the bundle to the person and say so in your summary. Never retry it in a loop.
 - **A command from `Excluded commands` runs with all the person's rights.** Run it alone (a
   compound command does not match the pattern and stays in the sandbox) and only on the project's
   own test files — never a file you wrote to run something outside the sandbox (a diagnostic spec,
@@ -623,7 +628,9 @@ Need help with: [a concrete question]
 ## 6. Context management
 
 `/compact` is the user's CLI command — **you cannot invoke it yourself**. Context compression
-(auto-compact) happens automatically when the window fills up, **at an unpredictable moment**.
+(auto-compact) happens automatically once the conversation passes the size in `## Telesma loop →
+Compact context at` (or when the window fills up), **at an unpredictable moment** — several times
+in a long phase.
 
 Practical consequence: **after every task, BEFORE you move on to the next, the state files must
 allow work to be fully resumed** — because auto-compact can happen at any moment. `done` keeps the

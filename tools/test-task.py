@@ -617,9 +617,14 @@ r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"),
                    capture_output=True, text=True)
 ok("Tasks finished: 1" in r.stdout and "By phase" in r.stdout and "Most tokens" in r.stdout
    and "claude-opus-5-5" in r.stdout, "telesma.sh --usage: the summary")
+ok("Context per step: 386 tokens read per response, over 3 steps; largest single step 1.1k" in r.stdout
+   and "ctx/step" in r.stdout and "Largest context per step" in r.stdout,
+   "… with the context per step (K14): the input side of every response over the number of responses")
 r = subprocess.run([sys.executable, str(TELESMA / "tools" / "telesma_usage.py"), "report", str(u), "--csv"], env=ENV,
                    capture_output=True, text=True)
 ok(r.stdout.startswith("type,from,to,task") and len(r.stdout.strip().splitlines()) == 3, "--csv: a header and every row")
+ok(r.stdout.splitlines()[0].endswith("context_per_step,peak_context") and r.stdout.splitlines()[1].endswith(",386,1053"),
+   "--csv: the context per step and the largest step of each row")
 k5 = project(plan=TWO, **{"Max tokens per session": "1k"})
 task(k5, "session-start")
 transcript(k5, "s.jsonl", reply(utcnow(), "big", out=900, read=900))
@@ -718,6 +723,275 @@ ok(rc == 1 and "terminal" in out, "e2e-ran without a terminal is refused (the ag
 rc, out = task(w2, "next", "--e2e-not-run", "e2e/flow.spec.ts")
 ok(rc == 1 and "belongs to done" in out, "--e2e-not-run is an option of done only")
 shutil.rmtree(w2, ignore_errors=True)
+
+print("next — a task citing the clarification's answers (QUESTIONS.md)")
+q = project(plan=PLAN.replace("(spec: api.md Greeting)", "(spec: QUESTIONS.md Q15, Q19, api.md Greeting)"))
+(q / "telesma" / "state" / "QUESTIONS.md").write_text(
+    "# Clarification\n\n## Questions\n\n### Q15: Objects in the world?\n- **Answer**: yes, with labels\n"
+    "- **Status**: ✅\n\n### Q16: Unrelated\n- **Answer**: canary-other\n\n### Q19: Snapshot?\n"
+    "- **Answer**: includes objects\n", encoding="utf-8")
+rc, out = task(q, "next")
+ok(rc == 0 and out.startswith("TELESMA NEXT: Task 1.1"), "(spec: QUESTIONS.md Q15, Q19) does not block next")
+ok("yes, with labels" in out and "includes objects" in out and "canary-other" not in out,
+   "the cited entries are printed, the others are not")
+ok("The greet function says hello." in out, "a spec file in the same tag is still given")
+ok(ts.question_ids("QUESTIONS.md Q15") == ["Q15"] and ts.question_ids("Q19") == ["Q19"]
+   and ts.question_ids("api.md Q1") is None and ts.question_ids("Quality.md") is None,
+   "only QUESTIONS.md and bare S/A/Q ids are read as clarification entries")
+q2 = project(plan=PLAN.replace("(spec: api.md Greeting)", "(spec: Q7)"))
+rc, out = task(q2, "next")
+ok(rc == 0 and "not in this project" in out, "no QUESTIONS.md → a note, never a refusal")
+q3 = project(plan=PLAN.replace("(spec: api.md Greeting)", "(spec: missing.md)"))
+rc, out = task(q3, "next")
+ok("no file missing.md" in out, "a spec file that does not exist is still refused")
+for x in (q, q2, q3):
+    shutil.rmtree(x, ignore_errors=True)
+
+print("done — the independent review (## Review)")
+import http.server  # noqa: E402
+import threading  # noqa: E402
+
+REVIEW = {"status": 200, "answer": "", "seen": [], "prompt_tokens": 1200}
+
+
+class FakeReviewer(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+        REVIEW["seen"].append({"auth": self.headers.get("Authorization"), "body": body})
+        data = json.dumps({"choices": [{"message": {"content": REVIEW["answer"]}}],
+                           "usage": {"prompt_tokens": REVIEW["prompt_tokens"], "completion_tokens": 80,
+                                     "total_tokens": REVIEW["prompt_tokens"] + 80}}).encode()
+        self.send_response(REVIEW["status"])
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeReviewer)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+ENDPOINT = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
+
+
+def review_field(d, label, value):
+    p = d / "telesma" / "config.md"
+    head, sep, rest = p.read_text(encoding="utf-8").partition("\n## Review\n")
+    assert sep
+    rest, n = re.subn(r"^- \*\*" + re.escape(label) + r"\*\*:.*$", f"- **{label}**: {value}", rest, count=1, flags=re.M)
+    assert n == 1, label
+    p.write_text(head + sep + rest, encoding="utf-8")
+
+
+def verdict(*findings, paraphrase="Adds a function and its test.", entry="module function"):
+    return json.dumps({"paraphrase": paraphrase, "entry": entry, "findings": [
+        {"severity": s, "file": "a.py", "line": 2, "finding": text, "why": "seen in the diff"} for s, text in findings]})
+
+
+RPLAN = "# Plan\n\n## Tasks\n\n### Phase 1: Start\n\n" + "".join(
+    f"- [ ] Task 1.{n}: Step {n}" + (" (spec: api.md Greeting)\n  - AC: canary-criterion\n" if n == 1 else "\n")
+    for n in range(1, 14)) + "\n### Phase 2: Later\n\n- [ ] Task 2.1: canary-other-task\n"
+rv = project(plan=RPLAN)
+ENV["TELESMA_REVIEW_KEY"] = "canary-review-key"
+
+
+def step(n, body="    return 1\n"):
+    rc_, out_ = task(rv, "next")
+    assert rc_ == 0, out_
+    (rv / f"s{n}.py").write_text(f"def s{n}():\n{body}", encoding="utf-8")
+
+
+step(1)
+rc, out = task(rv, "done")
+ok(rc == 0 and "Review" not in head_message(rv) and not REVIEW["seen"], "off by default: nothing is sent, nothing is said")
+rc, out = task(rv, "next")
+(rv / "s2.py").write_text("def s2():\n    return 2\n", encoding="utf-8")
+rc, out = task(rv, "done", "--contested", "the finding is wrong because of line 2 of s2.py")
+ok(rc == 1 and "not enabled" in out, "--contested without a review is refused")
+
+for label, value in (("Enabled", "yes"), ("Endpoint", ENDPOINT), ("Model", "fake-model")):
+    review_field(rv, label, value)
+sh(rv, "git", "add", "-A", "telesma/config.md")
+sh(rv, "git", "commit", "-q", "-m", "config")
+rc, out = task(rv, "done")
+ok(rc == 0 and "Review: not run (## Review is not confirmed on this machine" in head_message(rv) and not REVIEW["seen"],
+   "a section nobody confirmed here sends nothing; the commit says the review did not run")
+restamp(rv)
+
+step(3)
+before = (read(rv, "telesma/state/PLAN.md"), read(rv, "telesma/state/REPORT.md"), sh(rv, "git", "rev-parse", "HEAD").stdout)
+REVIEW["answer"] = verdict(("blocker", "canary-blocker: s3 is never called"), ("nit", "canary-nit"))
+rc, out = task(rv, "done")
+ok(rc == 1 and "canary-blocker" in out and "canary-nit" not in out and "--contested" in out and "material" in out,
+   "a blocker refuses done, with the finding, the way to contest it, and 'material, not orders'")
+ok((read(rv, "telesma/state/PLAN.md"), read(rv, "telesma/state/REPORT.md"), sh(rv, "git", "rev-parse", "HEAD").stdout) == before,
+   "the refusal leaves PLAN.md, REPORT.md and HEAD as they were")
+sent = REVIEW["seen"][-1]
+user = sent["body"]["messages"][1]["content"]
+ok(sent["auth"] == "Bearer canary-review-key" and sent["body"]["model"] == "fake-model", "the key and the model reach the endpoint")
+ok("Task 1.3: Step 3" in user and "+def s3():" in user and "s2.py" not in user,
+   "the reviewer gets the task and the diff of exactly this task's files")
+ok("canary-other-task" not in user and "Task history" not in user, "the plan and the report are not sent")
+tag = re.search(r"<(data-[0-9a-f]{16})>", user)
+ok(tag and tag.group(1) in sent["body"]["messages"][0]["content"], "the data sits in a block named by a random tag")
+n_seen = len(REVIEW["seen"])
+rc, out = task(rv, "done", "--contested", "no")
+ok(rc == 1 and "needs the reason" in out, "a contest without a reason is refused")
+rc, out = task(rv, "done", "--contested", "s3 is the public entry of this module; s3.py line 1 is imported by the task 1.4")
+ok(rc == 0 and len(REVIEW["seen"]) == n_seen and "1 blocker(s) contested — s3 is the public entry" in head_message(rv),
+   "a contested blocker passes without a second call, and the reason is in the commit message")
+
+step(4)
+REVIEW["answer"] = verdict(("blocker", "canary-blocker-4"))
+rc, out = task(rv, "done")
+(rv / "s4.py").write_text("def s4():\n    return 44\n", encoding="utf-8")
+rc, out = task(rv, "done", "--contested", "the reviewer misread s4.py line 2, it returns the value")
+ok(rc == 1 and "changed since" in out, "a contest after the files changed is refused: the new diff is reviewed")
+REVIEW["answer"] = "```json\n" + verdict(("major", "canary-major"), paraphrase="canary-paraphrase") + "\n```"
+rc, out = task(rv, "done")
+ok(rc == 0 and "Review (api:fake-model): passed — 0 blocker, 1 major, 0 nit" in head_message(rv)
+   and "canary-major" in out and "canary-paraphrase" in out,
+   "without a blocker the task is committed; the other findings and the paraphrase are printed")
+
+step(5)
+REVIEW["status"] = 500
+rc, out = task(rv, "done")
+ok(rc == 0 and "Review: not run (the reviewer answered HTTP 500" in head_message(rv) and "Review not run" in out,
+   "a reviewer that fails is 'not run' — never a refusal, never a pass")
+REVIEW["status"] = 200
+step(6)
+REVIEW["answer"] = "I think it looks fine."
+rc, out = task(rv, "done")
+ok(rc == 0 and "not run (the reviewer's answer could not be read)" in head_message(rv), "an answer that is not the JSON is 'not run'")
+step(7)
+REVIEW["answer"] = verdict()
+ENV.pop("TELESMA_REVIEW_KEY")
+rc, out = task(rv, "done")
+ok(rc == 0 and "TELESMA_REVIEW_KEY is not set" in head_message(rv), "a key that cannot be read is 'not run', with the reason")
+rows = [json.loads(x) for x in (rv / ".git" / "telesma-review" / "reviews.jsonl").read_text(encoding="utf-8").splitlines()]
+ok([x["outcome"] for x in rows] == ["not_run", "refused", "contested", "refused", "passed", "not_run", "not_run", "not_run"]
+   and rows[4]["usage"]["total_tokens"] == 1280 and "canary-review-key" not in json.dumps(rows),
+   "every review leaves a row in .git/telesma-review/reviews.jsonl, without the key")
+
+print("done — the independent review by a model run locally")
+ENV["TELESMA_REVIEW_KEY"] = "canary-review-key"
+review_field(rv, "API key", "none")
+review_field(rv, "Max diff", "2k")
+sh(rv, "git", "add", "-A", "telesma/config.md")
+sh(rv, "git", "commit", "-q", "-m", "config")
+restamp(rv)
+step(8)
+REVIEW["answer"] = "<think>Is { this } fine? A blocker maybe.</think>\n" + verdict(("nit", "canary-local-nit"))
+rc, out = task(rv, "done")
+ok(rc == 0 and REVIEW["seen"][-1]["auth"] is None and "passed — 0 blocker, 0 major, 1 nit" in head_message(rv),
+   "API key: none sends no Authorization header; a closed <think> block before the answer is dropped")
+step(9)
+REVIEW["answer"] = "<think>" + verdict(("blocker", "canary-thought"))
+rc, out = task(rv, "done")
+ok(rc == 0 and "could not be read" in head_message(rv), "an unclosed <think> block is no answer")
+step(10, body="".join(f"    x{i} = {i}\n" for i in range(400)))
+n_seen = len(REVIEW["seen"])
+rc, out = task(rv, "done")
+ok(rc == 0 and len(REVIEW["seen"]) == n_seen and "more than the 2000 of ## Review → Max diff" in head_message(rv),
+   "a diff over Max diff is not sent")
+review_field(rv, "Max diff", "240000")
+sh(rv, "git", "add", "-A", "telesma/config.md")
+sh(rv, "git", "commit", "-q", "-m", "config")
+restamp(rv)
+step(11, body="".join(f"    x{i} = {i}\n" for i in range(4000)))
+REVIEW["answer"], REVIEW["prompt_tokens"] = verdict(), 2048
+(rv / "bundle.min.js").write_text("var a=1;\n" + "canary-bundle;" * 400 + "\n", encoding="utf-8")
+(rv / "s1.py").write_text("def s1():\n    return 1\n\n\ndef canary_untouched():\n    return 0\n\n\nX = 1\n", encoding="utf-8")
+rc, out = task(rv, "done")
+sent = json.dumps(REVIEW["seen"][-1]["body"])
+ok("## s1.py (changed)" in sent and sent.count("canary_untouched") >= 2 and "## s11.py" not in sent,
+   "a changed file goes to the reviewer in full after the diff; a new file is whole in the diff already")
+ok("# Tests, as the script ran them before this review" in sent and "The Tests cell: Ran 1 test" in sent,
+   "the reviewer is told what the tests said when the script ran them")
+ok("canary-bundle" not in sent and "bundle.min.js" in sent and "generated or minified" in sent and "x3999 = 3999" in sent,
+   "a built or minified file (a line over 2000 characters) is named in the diff, not sent")
+ok(rc == 0 and "the reviewer read 2048 tokens of a prompt of" in head_message(rv) and "passed" not in head_message(rv),
+   "a reviewer that read only its context window's worth of a longer prompt did not review")
+REVIEW["prompt_tokens"] = 1200
+
+import importlib.util  # noqa: E402
+_spec = importlib.util.spec_from_file_location("telesma_task_mod", str(TELESMA / "tools" / "telesma-task.py"))
+_tt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_tt)
+import telesma_state as _ts  # noqa: E402
+_plan = _ts.Plan("### Phase 1: A\n\n- [x] Task 1.1: Build it `a.py`\n  - AC: works\n- [ ] Test: 1.1 — canary-pair\n"
+                 "- [ ] Task 1.2: Alone\n\n### Phase 2: B\n\n- [ ] Test: 2.1 — other phase\n")
+SWIFT = ("Test Suite 'All tests' passed at 2026-11-21.\n\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 seconds\n"
+         "\u2714 Test run with 11 tests in 3 suites passed after 0.012 seconds.\n")
+ok(not _tt.zero_tests(SWIFT) and _tt.summary_of(SWIFT + SWIFT) == "22 tests passed"
+   and _tt.zero_tests("\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 seconds\n")
+   and _tt.zero_tests("Executed 0 tests, with 0 failures\n\u2714 Test run with 0 tests passed after 0.001 seconds.\n")
+   and not _tt.zero_tests("\t Executed 4 tests, with 0 failures (0 unexpected) in 0.1 seconds\n"),
+   "Swift: a Swift Testing run beside XCTest's empty harness is not 0 tests; an empty run of both still is")
+ok("come in the next commit" in _tt.related_item(_plan, _plan.order[0]) and "canary-pair" in _tt.related_item(_plan, _plan.order[0])
+   and "The task it covers" in _tt.related_item(_plan, _plan.order[1]) and "Build it" in _tt.related_item(_plan, _plan.order[1])
+   and _tt.related_item(_plan, _plan.order[2]) == "" and _tt.related_item(_plan, _plan.order[3]) == "",
+   "a Task and the Test: item after it are shown to the reviewer as a pair; an item alone has none")
+_idx = _tt.spec_index_entries(
+    "## Files\n\n### APP_FLOW.md (40 lines)\n| Lines | Section | Anchor | Description |\n|--|--|--|--|\n"
+    "| 9-40 | Steps 1-3 | ## Step 1 | all steps |\n\n## Flows\n\n### telesma/spec/APP_FLOW.md (40 lines)\n"
+    "| Lines | ID | Title | Actors | Main actions |\n|--|--|--|--|--|\n| 9-20 | step-1 | Start | User | x |\n")
+_first = lambda e: next(r["cells"][1] for r in e[1]["rows"] if "start" in r)      # noqa: E731
+ok(_first(_tt.find_entry(_idx, "telesma/spec/APP_FLOW.md", ui=True)) == "step-1"
+   and _first(_tt.find_entry(_idx, "telesma/spec/APP_FLOW.md")) == "Steps 1-3"
+   and _tt.find_entry({"APP_FLOW.md": _idx["APP_FLOW.md"]}, "telesma/spec/APP_FLOW.md", ui=True)[0] == "APP_FLOW.md",
+   "a flow file indexed under Files and under Flows: a (flow:) tag reads the Flows entry, a (spec:) tag the Files one")
+
+fake_bin = Path(tempfile.mkdtemp(prefix="telesma-task-bin-"))
+(fake_bin / "claude").write_text(
+    "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > \"$FAKE_CLAUDE_LOG\"\ncat > \"$FAKE_CLAUDE_LOG.stdin\"\n"
+    "cat \"$FAKE_CLAUDE_ANSWER\"\n", encoding="utf-8")
+(fake_bin / "claude").chmod(0o755)
+ENV["PATH"] = str(fake_bin) + os.pathsep + ENV["PATH"]
+ENV["FAKE_CLAUDE_LOG"] = str(fake_bin / "log")
+ENV["FAKE_CLAUDE_ANSWER"] = str(fake_bin / "answer")
+(fake_bin / "answer").write_text(json.dumps({"is_error": False, "result": verdict(("blocker", "canary-claude-blocker")),
+                                             "usage": {"input_tokens": 10, "output_tokens": 5}}), encoding="utf-8")
+review_field(rv, "Reviewer", "claude")
+review_field(rv, "Model", "claude-haiku-5-5")
+sh(rv, "git", "add", "-A", "telesma/config.md")
+sh(rv, "git", "commit", "-q", "-m", "config")
+restamp(rv)
+step(12)
+n_seen = len(REVIEW["seen"])
+rc, out = task(rv, "done")
+clog = (fake_bin / "log").read_text(encoding="utf-8").split("\n")
+ok(rc == 1 and "canary-claude-blocker" in out and "claude:claude-haiku-5-5" in out and len(REVIEW["seen"]) == n_seen,
+   "Reviewer: claude asks a separate Claude Code session, not the endpoint")
+ok(os.path.realpath(clog[0]) != os.path.realpath(str(rv)) and "--tools" in clog and "claude-haiku-5-5" in clog
+   and "+def s12():" in (fake_bin / "log.stdin").read_text(encoding="utf-8"),
+   "that session starts outside the project, without tools, on the model named, with the diff on stdin")
+(fake_bin / "gemini").write_text(
+    "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" \"ide=$GEMINI_CLI_IDE_SERVER_PORT\" > \"$FAKE_CLAUDE_LOG.gemini\"\n"
+    "cat > \"$FAKE_CLAUDE_LOG.gemini.stdin\"\necho 'Ripgrep is not available.'\ncat \"$FAKE_CLAUDE_ANSWER.gemini\"\n", encoding="utf-8")
+(fake_bin / "gemini").chmod(0o755)
+(fake_bin / "answer.gemini").write_text(json.dumps({
+    "response": verdict(("major", "canary-gemini-major")),
+    "stats": {"models": {"gemini-x": {"tokens": {"prompt": 900, "candidates": 40, "total": 1000}}}}}), encoding="utf-8")
+ENV["GEMINI_CLI_IDE_SERVER_PORT"] = "4242"
+review_field(rv, "Reviewer", "gemini")
+review_field(rv, "Model", "gemini-x")
+sh(rv, "git", "add", "-A", "telesma/config.md")
+sh(rv, "git", "commit", "-q", "-m", "config")
+restamp(rv)
+rc, out = task(rv, "done")
+glog = (fake_bin / "log.gemini").read_text(encoding="utf-8").split("\n")
+gin = (fake_bin / "log.gemini.stdin").read_text(encoding="utf-8")
+ok(rc == 0 and "Review (gemini:gemini-x): passed — 0 blocker, 1 major, 0 nit" in head_message(rv) and "canary-gemini-major" in out,
+   "Reviewer: gemini asks Gemini CLI and reads its JSON past the lines it prints first")
+ok(os.path.realpath(glog[0]) != os.path.realpath(str(rv)) and "plan" in glog and "gemini-x" in glog and "ide=" in glog
+   and "+def s12():" in gin and "You review one finished task" in gin,
+   "… read-only, outside the project, without the IDE variables, instructions and diff on stdin")
+server.shutdown()
+shutil.rmtree(rv, ignore_errors=True)
+shutil.rmtree(fake_bin, ignore_errors=True)
 
 for x in (d, d2, d3, d4, d5, d6, d7, d8, d9, e, e2, e3, c, k, k2, k3, k4, r):
     shutil.rmtree(x, ignore_errors=True)
