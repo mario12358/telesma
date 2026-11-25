@@ -282,6 +282,60 @@ estate.write_text(json.dumps(st), encoding="utf-8")
 rc, out = task(e, eenv, "next")
 ok(out.startswith("TELESMA BLOCKED") and "closed without a merge" in out, "a PR closed by hand → TELESMA BLOCKED")
 
+# --- this machine's files that git still tracks (a project migrated from an older layout) ---
+sys.path.insert(0, str(TELESMA / "tools"))
+import telesma_github as ghf  # noqa: E402
+
+
+def g(cwd, *args, check=True):
+    r = subprocess.run(["git", "-C", str(cwd), *args], env=ENV, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise AssertionError(f"git {args}: {r.stdout}{r.stderr}")
+    return r
+
+
+m = TMP / "machine"
+(m / "telesma" / "state").mkdir(parents=True)
+log = m / "telesma" / "state" / "CHECKS.jsonl"
+log.write_text('{"n": 1}\n', encoding="utf-8")
+(m / "app.py").write_text("x = 1\n", encoding="utf-8")
+g(m, "init", "-q", "-b", "main")
+g(m, "add", "-A")
+g(m, "commit", "-q", "-m", "old layout: the check log is tracked")
+(m / ".git" / "info").mkdir(exist_ok=True)
+(m / ".git" / "info" / "exclude").write_text("telesma/state/CHECKS.jsonl\n", encoding="utf-8")
+g(m, "checkout", "-q", "-b", "untracked")
+g(m, "rm", "-q", "--cached", "telesma/state/CHECKS.jsonl")
+g(m, "commit", "-q", "-m", "the check log leaves git")
+g(m, "checkout", "-q", "main")
+log.write_text('{"n": 1}\n{"n": 2}\n', encoding="utf-8")
+ok(g(m, "checkout", "-q", "untracked", check=False).returncode != 0,
+   "(the fixture) a tracked, modified check log stops a plain branch switch")
+with ghf.machine_files_kept(m):
+    g(m, "checkout", "-q", "untracked")
+ok(log.read_text(encoding="utf-8") == '{"n": 1}\n{"n": 2}\n' and g(m, "status", "--porcelain").stdout == "",
+   "a branch switch keeps a tracked check log as it was on disk, and the switch goes through")
+log.write_text('{"n": 1}\n{"n": 2}\n{"n": 3}\n', encoding="utf-8")
+with ghf.machine_files_kept(m):
+    g(m, "checkout", "-q", "main")
+ok(log.read_text(encoding="utf-8") == '{"n": 1}\n{"n": 2}\n{"n": 3}\n',
+   "a switch to a branch that still tracks it does not overwrite the ignored log (git would, silently)")
+# main carries one more log line (an older commit took it along); the branch that untracked the log
+# is rebased onto it: modify/delete on the log alone is resolved as untracked, the rebase goes on
+g(m, "commit", "-q", "-am", "an old-style commit carried a log line")
+g(m, "checkout", "-q", "untracked", check=False)
+with ghf.machine_files_kept(m):
+    g(m, "checkout", "-q", "-f", "untracked")
+(m / "app.py").write_text("x = 2\n", encoding="utf-8")
+g(m, "commit", "-q", "-am", "work on the branch")
+with ghf.machine_files_kept(m):
+    r = g(m, "rebase", "-q", "main", check=False)
+    left = [] if r.returncode == 0 else ghf.go_on_rebasing(str(m), r)
+ok(r.returncode != 0, "(the fixture) the rebase stops on the check log")
+ok(left == [] and not ghf.rebase_in_progress(str(m))
+   and g(m, "ls-files", "telesma/state/CHECKS.jsonl").stdout == "" and log.is_file(),
+   "a rebase stopped only by the check log (untracked here, modified there) finishes, the log untracked and on disk")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print()
 if FAILURES:

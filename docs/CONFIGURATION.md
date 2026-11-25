@@ -200,7 +200,7 @@ Opt-in screenshots and recordings ([WORKFLOW.md § 7](WORKFLOW.md#7-visual-artif
 |---|---|---|
 | `Max tries per task` | `3` | Tries before `TELESMA BLOCKED`. Later tries widen the context (neighbouring spec sections, the whole file, the problem log). |
 | `Max refusals per task` | `5` | Hard stop counted by the task tool: this many refused `done` for one task end the session with `TELESMA BLOCKED`. `none` = no limit. |
-| `Max attempts per task` | `3` | How many times `next` may hand out the same task without a finished `done` (a restart, a compaction, a lost session) before the script stops. `none` = no limit. |
+| `Max attempts per task` | `3` | How many times `next` may hand out the same task without a finished `done` (a restart, a compaction, a lost session) before the script stops. `next` run again only to read the task — fewer than 10 tool calls since the last one — is not counted. `none` = no limit. |
 | `Compact context at` | `500k` | Claude Code summarises the conversation once it passes this size (`100k`–`1000k`) instead of when the model's window is full. Every step re-reads the whole conversation, so the size is what a step costs — a smaller value is cheaper, a larger one leaves a big task uninterrupted; `telesma.sh --usage` shows the context per step. `auto` = leave it to Claude Code. A `CLAUDE_CODE_AUTO_COMPACT_WINDOW` you exported wins. |
 | `Max tasks per session` | `none` | After this many finished tasks `next` hands out nothing and writes `telesma/state/BLOCKED.md`. |
 | `Max hours per session` | `none` | The same, counted in hours since the launcher started the session. Limits are read once, at the start; the next start shows the reason and asks you whether to go on. |

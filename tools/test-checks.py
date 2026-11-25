@@ -2055,6 +2055,27 @@ ok(bash(d, "git add a.py && git commit -m x")[0] == "deny", "--baseline alone do
 subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
                 "--templates", str(CHECKS), "--config-section"], capture_output=True, text=True)
 ok(bash(d, "git add a.py && git commit -m x")[0] is None, "--baseline --config-section (the launcher after its own wizard) records it")
+# The section is compared by what the checks read: headings and fields, not blank lines or comments
+# (a project switched between branches whose config differed only in blank lines had to --approve)
+approved_cfg = cfg_path.read_text(encoding="utf-8")
+cfg_path.write_text(re.sub(r"(?m)^(### [^\n]+\n)\n?", r"\1\n\n", approved_cfg)
+                    .replace("<!--", "<!-- reworded:", 1), encoding="utf-8")
+ok(bash(d, "git add a.py && git commit -m x")[0] is None,
+   "blank lines and a comment that differ in ## Checks are no difference to approve")
+cfg_path.write_text(approved_cfg.replace("- **PR status**: yes", "- **PR status**: no", 1), encoding="utf-8")
+ok(bash(d, "git add a.py && git commit -m x")[0] == "deny", "… a changed field still is")
+cfg_path.write_text(approved_cfg, encoding="utf-8")
+approve(d)                                   # a baseline written before the change: the raw section
+ok("checks_form" not in json.loads((d / ".git" / "telesma-checks" / "baseline.json").read_text(encoding="utf-8")),
+   "(the fixture) a baseline of the earlier form")
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "an earlier baseline still matches the same section")
+subprocess.run([sys.executable, str(d / "telesma" / "checks" / "telesma-checks.py"), "--baseline", str(d),
+                "--templates", str(CHECKS)], capture_output=True, text=True)
+ok(json.loads((d / ".git" / "telesma-checks" / "baseline.json").read_text(encoding="utf-8")).get("checks_form") == 2,
+   "the launcher's start moves a matching earlier baseline to the new form, without a question")
+cfg_path.write_text(re.sub(r"(?m)^(### [^\n]+\n)\n?", r"\1\n\n", approved_cfg), encoding="utf-8")
+ok(bash(d, "git add a.py && git commit -m x")[0] is None, "… after which blank lines no longer stop a commit")
+cfg_path.write_text(approved_cfg, encoding="utf-8")
 ok(any("differs from the approved state" in w for w in rc.validate(str(d))) is False, "the validator is silent without a difference")
 fresh = Path(tempfile.mkdtemp(prefix="telesma-checks-test-"))
 subprocess.run(["git", "init", "-q", str(fresh)], check=True)

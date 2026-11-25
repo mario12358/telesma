@@ -38,8 +38,8 @@ and the diagnosis with `--repair`.
 | `telesma/state/BUGFIXES.md` | Append-only log of mode 2 fixes. Never loaded into a prompt; grepped during a diagnosis (section 0.6); a recurring cause also becomes a `Known problems` row pointing at its entry. | Telesma (section 11) |
 | `telesma/state/REVIEWS.md` | Append-only log of mode 3 reviews: scope, findings by severity, actions, verdict. Never loaded into a prompt; grepped so a finding accepted as-is once is not raised again as new (section 0.6). | Telesma (section 12) |
 | `telesma/state/BACKLOG.md` | Topics for later — **read-write**; completed items older than 30 days move to `telesma/state/BACKLOG_DONE.md`. | Telesma + you (section 13) |
-| `telesma/state/BLOCKED.md` | The last `TELESMA BLOCKED`, so it survives pipe mode. Shown and injected at the next start; deleted once resolved. | Telesma (section 5) |
-| `telesma/state/WAITING.md` | The last `TELESMA WAITING` (GitHub integration: open-PR limit reached, nothing broken). Deleted after PR reconciliation. | Telesma (section 17) |
+| `telesma/state/BLOCKED.md` | The last `TELESMA BLOCKED`, so it survives pipe mode. Shown and injected at the next start; deleted once resolved. Machine data, in `.git/info/exclude`, never committed. | Telesma (section 5) |
+| `telesma/state/WAITING.md` | The last `TELESMA WAITING` (GitHub integration: open-PR limit reached, nothing broken). Deleted after PR reconciliation. Machine data, in `.git/info/exclude`, never committed. | Telesma (section 17) |
 | `telesma/state/SPECKY.md` | Specky sync state: cursor, last sync date, requirement → task map. Committed. | Wizard, Telesma (section 18) |
 | `telesma/state/TEST_SCENARIOS_TEMPLATE.md` | Skeleton for per-release manual test scenarios. Updated through the manifest; adapt it to your stack (your edits win). Read, never modified, by Telesma. | Launcher |
 | `telesma/state/REPORT_ARCHIVE.md` | Older REPORT.md entries and whole ad-hoc sections. Write-only. | Launcher (rotation) |
@@ -47,7 +47,7 @@ and the diagnosis with `--repair`.
 | `telesma/state/PLAN_ARCHIVE.md` | Fully completed phases beyond the last N, and intros of ad-hoc plan sections. Read only when a rework needs an archived task's text. | Launcher (rotation) |
 | `telesma/state/SECURITY_MAP.md` | Attack-surface map for the `intent` and `red-team` checks: roles and their guards in code, ownership boundaries, routes, outbound hosts, secrets. Skeleton written at startup; rows added by Telesma with each new route. | Launcher, Telesma, you (review) |
 | `telesma/state/CHECK_EXCEPTIONS.md` | Waived check findings, one fingerprint per line. Every write asks you. | You |
-| `telesma/state/CHECKS.jsonl` | Log of check runs (never secret content). Machine data, in `.git/info/exclude`. | Checks hook |
+| `telesma/state/CHECKS.jsonl` | Log of check runs (never secret content). Machine data, in `.git/info/exclude`; one that git still tracks (a project migrated from an older layout) leaves git with the next commit of the task tool and stays on disk. | Checks hook |
 | `telesma/state/PERMISSIONS.jsonl` | Log of permission-judge decisions with full commands. Stays on this machine; in `Ignore on commit`. | Judge hook |
 | `telesma/state/.telesma-version` | The project's state-format version. Gates one-time migrations. Committed. | Launcher |
 | `telesma/state/.telesma-manifest` | Template hash last delivered per file, so untouched files update automatically and edited ones are never overwritten. | Launcher |

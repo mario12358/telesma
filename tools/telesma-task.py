@@ -67,10 +67,8 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 KINDS = ("changes", "regression", "survey", "bugfix", "review", "artifacts", "backlog", "release")
-# This machine's files: never part of a commit, whatever the config says
-ALWAYS_EXCLUDED = ("telesma/state/PERMISSIONS.jsonl", "telesma/state/CHECKS.jsonl",
-                   "telesma/state/.telesma-lock/", "telesma/state/.questions-before-plan", "telesma/state/WAITING.md",
-                   ".claude/settings.local.json", ".claude/settings.local.json.bak")
+# This machine's files: never part of a commit, whatever the config says (telesma_state.MACHINE_FILES)
+ALWAYS_EXCLUDED = ts.MACHINE_FILES
 TEST_TIMEOUT = int(os.environ.get("TELESMA_TEST_TIMEOUT", "1500"))
 OUTPUT_TAIL = 60
 SPEC_PRINT_LIMIT = 400        # lines of one spec / UI fragment printed by `next`
@@ -162,8 +160,7 @@ def commit_set(root, cfg, only=None):
     for p in changed_files(root):
         if only and not any(p == o.rstrip("/") or p.startswith(o.rstrip("/") + "/") for o in only):
             continue                        # outside --only: neither committed nor reported as excluded
-        if any(p == x or (x.endswith("/") and p.startswith(x)) for x in ALWAYS_EXCLUDED) \
-                or ts.ignored(p, patterns):
+        if ts.machine_file(p) or ts.ignored(p, patterns):
             excluded.append(p)
         else:
             files.append(p)
@@ -333,16 +330,18 @@ def run_tests(root, cfg, files):
         print("Note: " + n, flush=True)
     pending = "; not run until confirmed: " + ", ".join(n.split(" `")[0] for n in notes) if notes else ""
     if ts.is_yes(lint_on) and not ts.unset(lint):
-        run_command(root, "lint", lint)
+        # several linters are listed with ` · ` (one per part of the project): each runs on its own
+        for one in ts.field_commands(lint, ts.LINT_SEPARATORS):
+            run_command(root, "lint", one)
     if ts.unset(test_cmd):
         return "no tests (Test command: none)" + pending
-    out, secs = run_command(root, "tests", test_cmd)
+    out, secs = run_command(root, "tests", ts.shell_line(test_cmd))
     if zero_tests(out):
         raise Refused(f"the test command reported 0 executed tests: `{test_cmd}` — a configuration error "
                       f"(wrong pattern, empty test directory), not a pass\n{tail(out, 20)}")
     result = f"{summary_of(out)} ({secs} s)"
     if not ts.unset(smoke) and smoke.strip() != test_cmd.strip():
-        sout, ssecs = run_command(root, "smoke suite", smoke)
+        sout, ssecs = run_command(root, "smoke suite", ts.shell_line(smoke))
         if zero_tests(sout):
             raise Refused(f"the smoke suite reported 0 executed tests: `{smoke}`\n{tail(sout, 20)}")
         result += f"; smoke {summary_of(sout)}"
@@ -432,13 +431,30 @@ def record_evidence(root):
 
 # --- commit ---------------------------------------------------------------------------------
 
+def tracked_machine_files(root):
+    """This machine's files that git nevertheless tracks — a project migrated from an older layout
+    committed them. `.git/info/exclude` does not apply to a tracked file: it shows as modified after
+    every check run and stops a branch switch."""
+    r = git(root, "ls-files", "-z", "--", *ALWAYS_EXCLUDED, check=False)
+    return sorted(p for p in r.stdout.decode("utf-8", "surrogateescape").split("\0") if p and ts.machine_file(p))
+
+
 def make_commit(root, files, excluded, subject, body, trailers):
-    """Stage exactly `files` (deletions included), drop from the index what is excluded, commit."""
+    """Stage exactly `files` (deletions included), drop from the index what is excluded, commit.
+    This machine's files that git still tracks leave the index in the same commit (they stay on
+    disk); a deletion is nothing the checks read, so the evidence still matches the commit."""
     env = dict(os.environ, GIT_LITERAL_PATHSPECS="1")
     if files:
         git(root, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul",
             input_bytes="\0".join(files).encode("utf-8", "surrogateescape"), env=env)
-    leftovers = [p for p in staged(root) if p not in files]
+    untrack = tracked_machine_files(root)
+    if untrack:
+        git(root, "rm", "-r", "-q", "--cached", "--pathspec-from-file=-", "--pathspec-file-nul",
+            input_bytes="\0".join(untrack).encode("utf-8", "surrogateescape"), env=env)
+        print("Note: no longer tracked by git (this machine's files, they stay on disk): " + ", ".join(untrack),
+              flush=True)
+        body = ((body or "").strip() + "\n\nNo longer tracked (this machine's files): " + ", ".join(untrack)).strip()
+    leftovers = [p for p in staged(root) if p not in files and p not in untrack]
     if leftovers:
         git(root, "reset", "-q", "--pathspec-from-file=-", "--pathspec-file-nul",
             input_bytes="\0".join(leftovers).encode("utf-8", "surrogateescape"), env=env)
@@ -690,9 +706,10 @@ def reconcile(root, cfg, session):
             return 0, None, main
         session.setdefault("pr_fixes", {})[str(n)] = count
         restore_state_files(root)
-        git(root, "checkout", "-q", pr["headRefName"]) if git(root, "rev-parse", "-q", "--verify",
-                                                               f"refs/heads/{pr['headRefName']}", check=False).returncode == 0 \
-            else git(root, "checkout", "-q", "-b", pr["headRefName"], f"origin/{pr['headRefName']}")
+        with ghf.machine_files_kept(root):
+            git(root, "checkout", "-q", pr["headRefName"]) if git(root, "rev-parse", "-q", "--verify",
+                                                                   f"refs/heads/{pr['headRefName']}", check=False).returncode == 0 \
+                else git(root, "checkout", "-q", "-b", pr["headRefName"], f"origin/{pr['headRefName']}")
         session["pr_fix"] = {"n": n, "branch": pr["headRefName"], "name": name, "red": red, "count": count,
                              "max": fixes_max, "calls": 0}
         save_session(root, session)
@@ -738,7 +755,8 @@ def side_commit(root, cfg, session, files, excluded, kind, subject, body, traile
     try:
         sha = make_commit(root, files, excluded, subject, body, trailers)
     except Refused:
-        git(root, "checkout", "-q", main, check=False)
+        with ghf.machine_files_kept(root):
+            git(root, "checkout", "-q", main, check=False)
         git(root, "branch", "-q", "-D", branch, check=False)
         raise
     record_evidence(root)
@@ -748,7 +766,8 @@ def side_commit(root, cfg, session, files, excluded, kind, subject, body, traile
         ghf.enable_auto_merge(root, n)
     session.setdefault("side_prs", []).append({"n": n, "branch": branch, "kind": kind})
     save_session(root, session)
-    git(root, "checkout", "-q", main)
+    with ghf.machine_files_kept(root):
+        git(root, "checkout", "-q", main)
     return sha, n
 
 
@@ -1056,6 +1075,16 @@ def cmd_session_start(root, args):
     return 0
 
 
+REREAD_CALLS = 10      # fewer tool calls since the last `next`: the task was read again, not tried again
+
+
+def worked_since_next(session):
+    """Whether handing the same task out again is a new attempt. `next` run again to read the task's
+    context (pavise, 2026-11-24: three in a row, no work started, the session stopped on the budget)
+    is not one; the guard counts the tool calls since the last `next`."""
+    return int(session.get("calls_since_next") or 0) >= REREAD_CALLS
+
+
 def budget_check(root, session, again):
     """None when the next task may be issued, else the exhaust() result."""
     lim = limits(root, session)
@@ -1083,7 +1112,7 @@ def budget_check(root, session, again):
     if tasks and int(session.get("tasks_this_session", 0)) >= tasks:
         return exhaust(root, session, "Max tasks per session", f"{tasks} tasks were finished in this session")
     attempts = lim.get("Max attempts per task")
-    if again and attempts and int(session.get("issues", 0)) + 1 > attempts:
+    if again and attempts and worked_since_next(session) and int(session.get("issues", 0)) + 1 > attempts:
         return exhaust(root, session, "Max attempts per task",
                        f"{session.get('name')} was handed out {session.get('issues')} times without a finished done")
     return None
@@ -1132,7 +1161,8 @@ def cmd_suite(root, args):
         if not same(full, before) or ts.unset(before):
             raise Refused(f"the full suite command `{full}` is not the one confirmed on this machine — " + not_confirmed(root))
     print(f"Telesma suite ({due['reason']}): {full}", flush=True)
-    argv = [BASH, "-c", full] if BASH else full
+    line = ts.shell_line(full)
+    argv = [BASH, "-c", line] if BASH else line
     start = now()
     try:
         r = subprocess.run(argv, shell=not BASH, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1910,7 +1940,7 @@ def cmd_next(root, args):
         print(text)
         return 0
 
-    issues = int(session.get("issues", 0)) + 1 if again else 1
+    issues = int(session.get("issues", 0)) + (1 if worked_since_next(session) else 0) if again else 1
     if not again:
         session["next_wrote"] = []
     session["next_wrote"] = sorted(set(session.get("next_wrote") or []) | set(wrote))

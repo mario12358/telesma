@@ -1575,6 +1575,28 @@ def text_hash(t):
     return hashlib.sha256((t or '').encode('utf-8', 'replace')).hexdigest()
 
 
+# How the ## Checks section is hashed. Form 2 (the baseline says `checks_form: 2`): only what
+# load_config reads — the `## Checks` and `### <check>` headings and the `- **Field**: value` lines,
+# comments dropped, trailing spaces cut — so a blank line or a template comment that differs
+# between two branches is no difference for the human to approve. Form 1 (a baseline without
+# `checks_form`): the section's raw text; such a baseline is still compared that way, and moves to
+# form 2 on the next write (the launcher's start does it while the section matches).
+CHECKS_FORM = 2
+
+
+def checks_section_hash(text):
+    kept = [l.rstrip() for l in strip_comments(checks_section(text)).splitlines()
+            if l.startswith(('## Checks', '### ')) or l.lstrip().startswith('- ')]
+    return text_hash('\n'.join(kept))
+
+
+def checks_section_matches(base, text):
+    """Whether the ## Checks section in `text` is the one the baseline holds, in the baseline's form."""
+    if base.get('checks_form') == CHECKS_FORM:
+        return base.get('checks_section', '') == checks_section_hash(text)
+    return base.get('checks_section', '') == text_hash(checks_section(text))
+
+
 def integrity_state(root):
     modules = {}
     base = os.path.join(root, DIRECTORY)
@@ -1587,7 +1609,8 @@ def integrity_state(root):
             modules[os.path.relpath(full, root).replace(os.sep, '/')] = file_hash(full)
     return {'modules': modules,
             'exceptions': file_hash(os.path.join(root, EXCEPTIONS)),
-            'checks_section': text_hash(checks_section(read_text(os.path.join(root, CONFIG)) or ''))}
+            'checks_section': checks_section_hash(read_text(os.path.join(root, CONFIG)) or ''),
+            'checks_form': CHECKS_FORM}
 
 
 def baseline_file(root):
@@ -1614,7 +1637,7 @@ def integrity_drift(root):
             out.append(f'{p} ({"added" if a is None else "removed" if b is None else "changed"})')
     if now['exceptions'] != base.get('exceptions', ''):
         out.append(f'{EXCEPTIONS} (changed)')
-    if now['checks_section'] != base.get('checks_section', ''):
+    if not checks_section_matches(base, read_text(os.path.join(root, CONFIG)) or ''):
         out.append(f'{CONFIG} -> ## Checks (changed)')
     return out
 
@@ -1660,14 +1683,24 @@ def baseline_set(base, key, value):
             base['modules'].pop(key[1], None)
     else:
         base[key[0]] = value
+        if key[0] == 'checks_section':
+            base['checks_form'] = CHECKS_FORM
 
 
 def integrity_state_entry(root, key):
     if key[0] == 'exceptions':
         return file_hash(os.path.join(root, EXCEPTIONS))
     if key[0] == 'checks_section':
-        return text_hash(checks_section(read_text(os.path.join(root, CONFIG)) or ''))
+        return checks_section_hash(read_text(os.path.join(root, CONFIG)) or '')
     return file_hash(os.path.join(root, key[1]))
+
+
+def baseline_entry_current(root, base, key):
+    """Whether the baseline still holds what the file holds now (the ## Checks section in the
+    baseline's own form)."""
+    if key[0] == 'checks_section':
+        return checks_section_matches(base, read_text(os.path.join(root, CONFIG)) or '')
+    return baseline_get(base, key) == integrity_state_entry(root, key)
 
 
 def remember_asked_edit(root, tool, tool_input):
@@ -1681,13 +1714,13 @@ def remember_asked_edit(root, tool, tool_input):
     d = evidence_dir(root)
     if not key or base is None or not d or tool not in ('Edit', 'Write', 'MultiEdit'):
         return
-    if baseline_get(base, key) != integrity_state_entry(root, key):
+    if not baseline_entry_current(root, base, key):
         return
     full = path if os.path.isabs(path) else os.path.join(root, path)
     after = content_after(read_text(full), tool, tool_input)
     if after is None:
         return
-    expected = text_hash(checks_section(after)) if key[0] == 'checks_section' \
+    expected = checks_section_hash(after) if key[0] == 'checks_section' \
         else hashlib.sha256(after.encode('utf-8')).hexdigest()
     asked = load_json(os.path.join(d, APPROVALS)) or []
     asked = [x for x in asked if isinstance(x, dict)][-19:] + [{'key': list(key), 'expected': expected}]
@@ -1729,8 +1762,13 @@ def mode_baseline(root, templates, config_section=False):
                 f.write(head + '\n')
         except OSError:
             pass
-    if base is not None and config_section and base.get('checks_section') != now['checks_section']:
-        base['checks_section'] = now['checks_section']
+    if base is not None and base.get('checks_form') != CHECKS_FORM \
+            and checks_section_matches(base, read_text(os.path.join(root, CONFIG)) or ''):
+        base['checks_section'], base['checks_form'] = now['checks_section'], CHECKS_FORM
+        write_baseline(root, base)          # the approved section, now in form 2 (no question: it is the same)
+    if base is not None and config_section and (base.get('checks_section') != now['checks_section']
+                                                or base.get('checks_form') != CHECKS_FORM):
+        base['checks_section'], base['checks_form'] = now['checks_section'], CHECKS_FORM
         write_baseline(root, base)
     if base is None:
         ok = write_baseline(root, now)

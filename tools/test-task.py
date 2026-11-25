@@ -537,9 +537,22 @@ ok(out.startswith("TELESMA NEXT: Task 1.2"), "and the loop goes on, counters fro
 
 k2 = project(plan=TWO, **{"Max attempts per task": "2"})
 task(k2, "session-start")
-task(k2, "next"); task(k2, "next")
+task(k2, "next"); task(k2, "next"); task(k2, "next")
 rc, out = task(k2, "next")
-ok("Budget: Max attempts per task" in out, "the same task handed out a third time with a limit of 2 → stop")
+ok(out.startswith("TELESMA NEXT: Task 1.1") and "Budget:" not in out,
+   "next run again only to read the task (no tool calls since) is not a new attempt")
+
+
+def worked(p, calls=40):
+    f = p / ".git/telesma-task/session.json"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    d["calls_since_next"] = calls
+    f.write_text(json.dumps(d), encoding="utf-8")
+
+
+worked(k2); task(k2, "next"); worked(k2)
+rc, out = task(k2, "next")
+ok("Budget: Max attempts per task" in out, "the same task handed out a third time after work, with a limit of 2 → stop")
 
 k3 = project(plan=TWO, **{"Max refusals per task": "2"})
 task(k3, "session-start")
@@ -993,7 +1006,37 @@ server.shutdown()
 shutil.rmtree(rv, ignore_errors=True)
 shutil.rmtree(fake_bin, ignore_errors=True)
 
-for x in (d, d2, d3, d4, d5, d6, d7, d8, d9, e, e2, e3, c, k, k2, k3, k4, r):
+# --- this machine's files and markdown-written commands (found on a project migrated from format 19)
+mf = project()
+(mf / "telesma" / "state" / "CHECKS.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+sh(mf, "git", "add", "-f", "telesma/state/CHECKS.jsonl")
+sh(mf, "git", "commit", "-q", "-m", "old layout: the check log is tracked")
+restamp(mf)
+task(mf, "next")
+(mf / "greet.py").write_text("x = 1\n", encoding="utf-8")
+(mf / "telesma" / "state" / "CHECKS.jsonl").write_text('{"n": 1}\n{"n": 2}\n', encoding="utf-8")
+(mf / "telesma" / "state" / "BLOCKED.md").write_text("TELESMA BLOCKED\n\nProblem: an earlier one\n", encoding="utf-8")
+rc, out = task(mf, "done")
+tracked = sh(mf, "git", "ls-files", "telesma/state").stdout
+ok(rc == 0 and "CHECKS.jsonl" not in tracked and "BLOCKED.md" not in tracked
+   and read(mf, "telesma/state/CHECKS.jsonl") == '{"n": 1}\n{"n": 2}\n',
+   "done takes a tracked check log out of git (it stays on disk) and never commits BLOCKED.md")
+ok("No longer tracked (this machine's files): telesma/state/CHECKS.jsonl" in head_message(mf)
+   and "no longer tracked by git" in out, "… and says so in the commit message and the output")
+
+marks = Path(tempfile.mkdtemp(prefix="telesma-task-lint-"))
+ln = project(**{"Linter/formatter": f"`touch {marks}/a` · `touch {marks}/b`", "Lint before commit": "yes",
+                "Test command": "`python3 -m unittest discover -s tests -q` · `true`"})
+task(ln, "next")
+(ln / "greet.py").write_text("x = 1\n", encoding="utf-8")
+rc, out = task(ln, "done")
+ok(rc == 0 and (marks / "a").is_file() and (marks / "b").is_file(),
+   "Linter/formatter listing two commands with ` · ` (as configure.py writes it) runs each, not `·` as a command")
+ok("tests: python3 -m unittest discover -s tests -q && true" in out,
+   "a test command written in backticks runs unquoted (bash would read a backtick as a substitution)")
+shutil.rmtree(marks, ignore_errors=True)
+
+for x in (d, d2, d3, d4, d5, d6, d7, d8, d9, e, e2, e3, c, k, k2, k3, k4, r, mf, ln):
     shutil.rmtree(x, ignore_errors=True)
 shutil.rmtree(XDG, ignore_errors=True)
 print()

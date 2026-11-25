@@ -33,6 +33,21 @@ REPORT = "telesma/state/REPORT.md"
 CONFIG = "telesma/config.md"
 SPEC_INDEX = "telesma/state/SPEC_INDEX.md"
 BLOCKED = "telesma/state/BLOCKED.md"
+WAITING = "telesma/state/WAITING.md"
+# This machine's files: never part of a commit, whatever the config says. The launcher keeps the
+# telesma/ ones in .git/info/exclude (git_exclude_local in telesma.sh — keep the two lists equal);
+# one that git already tracks (a project migrated from an older layout) is untracked by the next
+# commit of tools/telesma-task.py and kept across its branch switches.
+MACHINE_FILES = ("telesma/state/PERMISSIONS.jsonl", "telesma/state/CHECKS.jsonl",
+                 "telesma/state/.telesma-lock/", "telesma/state/.questions-before-plan", WAITING, BLOCKED,
+                 ".claude/settings.local.json", ".claude/settings.local.json.bak")
+
+
+def machine_file(path):
+    """True for a repository-relative path that is one of this machine's files (MACHINE_FILES)."""
+    return any(path == x or (x.endswith("/") and path.startswith(x)) for x in MACHINE_FILES)
+
+
 CHANGES = "telesma/changes"
 CHANGES_EXAMPLE = "EXAMPLE.md"
 GUIDELINES = "telesma/guidelines"
@@ -100,6 +115,31 @@ def unset(value):
     """An empty, `none` or still-template (`[e.g. …]`) field value."""
     v = (value or "").strip()
     return not v or v.lower() in ("none", "-", "no") or v.startswith("[")
+
+
+# The separators the lint-types check splits `Linter/formatter` and `Typecheck command` on
+# (templates/checks/lint-types/run.py commands()); configure.py lists the linters of several
+# parts with ` · `. `done` runs the same commands the check reads.
+LINT_SEPARATORS = r"\s+·\s+|\s+and\s+|\s+;\s+"
+
+
+def field_commands(value, separators=r"\s+·\s+"):
+    """The commands in a ## Tests field: the parts in backticks when there are any (markdown
+    quoting — bash would read a backtick as a command substitution), otherwise the value split
+    on `separators`."""
+    quoted = re.findall(r"`([^`]+)`", value or "")
+    if quoted:
+        return [k.strip() for k in quoted if k.strip()]
+    return [k.strip() for k in re.split(separators, value or "") if k.strip()]
+
+
+def shell_line(value):
+    """One shell line for a test field: a value written as markdown (in backticks, or several
+    commands listed with ` · `) is unquoted and chained with `&&`; anything else runs as written."""
+    v = (value or "").strip()
+    if not v.startswith("`") and not re.search(r"\s·\s", v):
+        return v
+    return " && ".join(field_commands(v))
 
 
 def is_yes(value):

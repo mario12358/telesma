@@ -712,9 +712,11 @@ git_exclude() {
     done
     return 0
 }
+# Keep equal to MACHINE_FILES in tools/telesma_state.py (except .claude/settings.local.json, left to the project).
 git_exclude_local() {
     git_exclude 'telesma/state/PERMISSIONS.jsonl' 'telesma/state/CHECKS.jsonl' 'telesma/state/.telesma-lock/' \
-                'telesma/state/.questions-before-plan' '.claude/settings.local.json.bak'
+                'telesma/state/.questions-before-plan' 'telesma/state/WAITING.md' 'telesma/state/BLOCKED.md' \
+                '.claude/settings.local.json.bak'
 }
 git_exclude_local
 

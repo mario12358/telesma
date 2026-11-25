@@ -393,6 +393,11 @@ Read it and fill it in; do not reproduce the layout from memory and **do not mod
 tasks closed in that range in `telesma/state/PLAN.md` — that is where the findings and deliberate
 deviations sit, i.e. the best candidates for a scenario. **Do not rewrite the automated tests.**
 
+**The order of writing: the intent first, the scenarios second.** Fill in `## What this version changes`
+before any scenario: one row per change a user can notice, in the user's words, with the place named as on
+screen. Testers compare that list with what they see, so a change missing from it is tested by nobody.
+Only then write the scenarios, and put their numbers into the rows. A row without a scenario says why.
+
 **`telesma/spec/APP_FLOW.md` — how to use it (if it exists).** The Steps are already written in the user's
 language and in clicks, i.e. in the format the template requires — do not invent paths, point at the Step.
 You have the line ranges in the `## Flows` section of `telesma/state/SPEC_INDEX.md`, so you do not read the whole file.
@@ -415,6 +420,22 @@ a ticked failure means). For `[-]` ask for one sentence: what the user saw inste
 
 **Content rules:**
 
+- **Every scenario says what it is: `**Kind:** change (Z<n>)` or `regression`**, with one sentence of
+  reason — what is new or was broken, or which changed place the path goes through. A scenario you cannot
+  give a reason for does not belong in the file.
+- **Every changed place gets its other paths, not only the main one.** For each row of the intent list
+  ask what else a person can do there — cancel, leave the field empty, give a wrong value, go back, do it
+  a second time, lose the connection, come in with data from before the change — and write a scenario for
+  each path the change could have broken. One scenario per changed place is not enough.
+- **Check every step in the code before you write it: can a person perform it, and does it cause what
+  the scenario says?** Find the trigger: the control exists in this build and is reachable from where the
+  previous step ends, the condition can be met by hand (a threshold, a timing, a sound level, a state of
+  the data), the prepared data makes it visible. A step you could not confirm is rewritten until it can be
+  performed, or the scenario says plainly what the tester needs that the steps cannot give.
+- **Names are copied from the screen, not from the code.** Buttons, screens, menu items and messages are
+  written in quotes exactly as the user sees them, in the language under test — take them from the
+  interface texts (the localisation catalog, the template, the string in the view), never from an
+  identifier, a route or a component name.
 - **"Failure signal" is mandatory** on every functional scenario. Without it it is easy
   to accept as correct something that only looks familiar.
 - **A barriers section** (things that must be rejected) — if the release adds any
@@ -423,7 +444,7 @@ a ticked failure means). For `[-]` ask for one sentence: what the user saw inste
   historical data). Silence in such a scenario is no proof that it works.
 - **Zero description of the implementation.** File and class names only when the user really has to look there
   or add something by hand.
-- **Order: first what used to be a defect**, then new features, regression at the end.
+- **Order: the intent list, then what used to be a defect**, then new features, regression at the end.
 - Leave room for a measurement (`**Measured result:** ____`) wherever an acceptance criterion
   speaks of a number that could not be measured in tests.
 - **Take the commands from the project's stack**, not from examples: migrations and starting the environment from

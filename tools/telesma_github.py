@@ -10,10 +10,14 @@ branch, never a push to main — are properties of this code.
 
 Stdlib only, Python 3.9+. `TELESMA_GH` names the gh binary (the self-tests use a fake).
 """
+import contextlib
 import json
 import os
 import re
 import subprocess
+import tempfile
+
+import telesma_state as ts
 
 GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 RED = {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "ERROR", "STARTUP_FAILURE", "STALE"}
@@ -120,17 +124,70 @@ def branch_name(cfg, tid, title):
     return f"{prefix}{ident}-{slug(title)}"
 
 
+@contextlib.contextmanager
+def machine_files_kept(root):
+    """A branch switch, a pull or a rebase leaves this machine's files (telesma_state.MACHINE_FILES)
+    as they were on disk. One that git still tracks (a project migrated from an older layout) is
+    reset to its committed content first, or git refuses the switch over the check log; one that
+    only the other branch tracks would be overwritten without a word — git treats an ignored file
+    as expendable. Afterwards every file holds what it held before."""
+    saved, gone = {}, []
+    for rel in ts.MACHINE_FILES:
+        if rel.endswith("/"):
+            continue
+        full = os.path.join(root, rel)
+        tracked = git(root, "ls-files", "--error-unmatch", "--", rel, check=False).returncode == 0
+        if os.path.isfile(full):
+            try:
+                with open(full, "rb") as f:
+                    saved[rel] = f.read()
+            except OSError:
+                continue
+        elif tracked:
+            gone.append(rel)
+        else:
+            continue
+        if tracked:
+            git(root, "checkout", "-q", "--", rel, check=False)
+    try:
+        yield
+    finally:
+        for rel, data in saved.items():
+            full = os.path.join(root, rel)
+            try:
+                with open(full, "rb") as f:
+                    if f.read() == data:
+                        continue
+            except OSError:
+                pass
+            try:
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix=".telesma-", dir=os.path.dirname(full))
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, full)
+            except OSError:
+                pass
+        for rel in gone:
+            try:
+                os.remove(os.path.join(root, rel))
+            except OSError:
+                pass
+
+
 def start_branch(root, name, base):
     """A new task branch off origin/<base> (main, or the predecessor's branch of a chain)."""
-    if git(root, "rev-parse", "-q", "--verify", f"refs/heads/{name}", check=False).returncode == 0:
-        git(root, "checkout", "-q", name)
-        return
-    git(root, "checkout", "-q", "-b", name, f"origin/{base}")
+    with machine_files_kept(root):
+        if git(root, "rev-parse", "-q", "--verify", f"refs/heads/{name}", check=False).returncode == 0:
+            git(root, "checkout", "-q", name)
+            return
+        git(root, "checkout", "-q", "-b", name, f"origin/{base}")
 
 
 def sync_main(root, main):
-    git(root, "checkout", "-q", main)
-    git(root, "pull", "-q", "--ff-only", "origin", main)
+    with machine_files_kept(root):
+        git(root, "checkout", "-q", main)
+        git(root, "pull", "-q", "--ff-only", "origin", main)
 
 
 def push(root, branch, force=False):
@@ -172,10 +229,29 @@ def rebase_onto(root, main, old_base, branch):
         else f"origin/{old_base}"
     if git(root, "rev-parse", "-q", "--verify", f"refs/heads/{branch}", check=False).returncode != 0:
         git(root, "branch", "-q", branch, f"origin/{branch}")
-    r = git(root, "rebase", "-q", "--onto", f"origin/{main}", cut, branch, check=False)
-    if r.returncode == 0:
-        return []
-    return conflicted(root) or ["(rebase stopped: " + (r.stderr or r.stdout).strip()[:200] + ")"]
+    with machine_files_kept(root):
+        r = git(root, "rebase", "-q", "--onto", f"origin/{main}", cut, branch, check=False)
+        if r.returncode == 0:
+            return []
+        return go_on_rebasing(root, r)
+
+
+def go_on_rebasing(root, r):
+    """The rebase stopped. A conflict on this machine's file only (one side untracked it, the other
+    still carried a log line) is resolved as untracked, and the rebase goes on; anything else is
+    returned for the model to resolve."""
+    env = dict(os.environ, GIT_EDITOR="true")
+    for _ in range(100):
+        left = conflicted(root)
+        if any(not ts.machine_file(p) for p in left):
+            return [p for p in left if not ts.machine_file(p)]
+        if not left:
+            return ["(rebase stopped: " + (r.stderr or r.stdout).strip()[:200] + ")"]
+        git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", *left, check=False)
+        r = subprocess.run(["git", "-C", root, "rebase", "--continue"], capture_output=True, text=True, env=env)
+        if r.returncode == 0 and not rebase_in_progress(root):
+            return []
+    return ["(rebase stopped: too many steps)"]
 
 
 def conflicted(root):
@@ -194,17 +270,22 @@ def continue_rebase(root):
     """After the model resolved the conflicts in the files: stage them and go on. Returns the files
     still conflicted ([] = the rebase finished)."""
     files = conflicted(root)
+    mine = [f for f in files if ts.machine_file(f)]
+    files = [f for f in files if not ts.machine_file(f)]
     marked = [f for f in files if "<<<<<<<" in (open(os.path.join(root, f), encoding="utf-8", errors="replace").read()
                                                 if os.path.isfile(os.path.join(root, f)) else "")]
     if marked:
         return marked
-    if files:
-        git(root, "add", "--", *files)
-    env = dict(os.environ, GIT_EDITOR="true")
-    r = subprocess.run(["git", "-C", root, "rebase", "--continue"], capture_output=True, text=True, env=env)
-    if r.returncode == 0 and not rebase_in_progress(root):
-        return []
-    return conflicted(root) or ["(rebase stopped: " + (r.stderr or r.stdout).strip()[:200] + ")"]
+    with machine_files_kept(root):
+        if mine:
+            git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", *mine, check=False)
+        if files:
+            git(root, "add", "--", *files)
+        env = dict(os.environ, GIT_EDITOR="true")
+        r = subprocess.run(["git", "-C", root, "rebase", "--continue"], capture_output=True, text=True, env=env)
+        if r.returncode == 0 and not rebase_in_progress(root):
+            return []
+        return go_on_rebasing(root, r)
 
 
 def task_prs(prs):

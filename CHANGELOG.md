@@ -4,6 +4,41 @@ All notable changes to Telesma are documented here. Release versions follow
 [Semantic Versioning](https://semver.org). The internal state-format version (`TELESMA_FORMAT`,
 stored per project in `telesma/state/.telesma-version`) is independent and listed per release.
 
+## 1.6.1 — 2026-11-25
+
+State format: 24 (unchanged). Your project's delivered files (the checks, the scenario template)
+are updated at the next start unless you edited them.
+
+The first three were found on a project brought from format 19 to 24 with the GitHub integration;
+each one stopped the loop with a TELESMA BLOCKED the person could not have caused.
+
+- **This machine's files stay out of git, also in a project that once committed them.**
+  `BLOCKED.md` is now one of them, like `WAITING.md` (a commit took it along, and from then on
+  every new block was a "change outside a task" that blocked again). A check log or another of
+  these files that git still tracks leaves git with the next commit of the task tool and stays on
+  disk; until then a branch switch, a pull or a rebase keeps it as it is (git refused the switch
+  over the modified log, or overwrote the log without a word), and a rebase stopped only by that
+  file goes on by itself.
+- **The integrity check reads `## Checks` the way the checks do.** A blank line or a comment that
+  differs between two branches is no longer a difference the person has to `--approve`; a changed
+  heading or field still is. An approval recorded before stays valid and moves to the new form at
+  the next start.
+- **`done` runs the linters the way the lint-types check reads them.** Several linters listed with
+  ` · ` (one per part of the project, as the setup wizard writes them) ran as one shell line, and
+  `·: command not found` refused every task. Each now runs on its own; a test command written in
+  backticks runs unquoted.
+
+- **Reading a task again is not a new attempt.** `next` run a second and third time only to see
+  the task's context counted towards `Max attempts per task` and stopped the session before any
+  work began. Handing the same task out again now counts only when work happened in between.
+- **Release test scenarios start from the intent** (from testers' feedback). The scenarios file
+  now opens with the list of intended changes, written before any scenario, so testers compare the
+  intent with the result. Every scenario is marked `change` or `regression` with one sentence of
+  reason, every changed place gets its other paths (cancel, wrong input, back, a second time),
+  every step is checked in the code — can a person perform it, does it cause what the scenario
+  says — and names are copied from the screen, not from the code. Your project's
+  `TEST_SCENARIOS_TEMPLATE.md` is updated at the next start unless you edited it.
+
 ## 1.6.0 — 2026-11-23
 
 State format: 24. An older config gets `## Sandbox → Limits asked` and `## Review` (off) through
